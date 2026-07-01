@@ -1,0 +1,218 @@
+"""Slash-command dispatch. Any input starting with '/' is handled here on the
+UI thread and never reaches the model. Handlers operate on the App controller
+(duck-typed: .session, .console, and task-control methods) to avoid a circular
+import with cli.py.
+"""
+import os
+
+from . import orchestrator, tools
+
+COMMANDS = {}
+
+
+def command(*names):
+    def deco(fn):
+        for n in names:
+            COMMANDS[n] = fn
+        return fn
+    return deco
+
+
+def command_specs() -> list[tuple[str, str]]:
+    """Ordered (primary_name, one-line-doc) for each command, deduped by handler
+    (aliases collapse to the first-registered name). Drives the / completion menu."""
+    specs: list[tuple[str, str]] = []
+    seen = set()
+    for name, fn in COMMANDS.items():
+        if fn in seen:
+            continue
+        seen.add(fn)
+        doc = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""
+        specs.append((name, doc))
+    return specs
+
+
+def dispatch_input(raw: str, app) -> bool:
+    """Return True if the line was a handled slash command (never reaches the
+    model); False if it should be treated as task input."""
+    if not raw.startswith("/"):
+        return False
+    parts = raw[1:].split(maxsplit=1)
+    if not parts:
+        return False
+    name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
+    handler = COMMANDS.get(name)
+    if handler is None:
+        app.console.print(f"[red]Unknown command:[/red] /{name}  (try /help)")
+        return True
+    handler(rest, app)
+    return True
+
+
+def _target_task(app):
+    """The task a state command acts on: the active one, else the most recent."""
+    return app.session.active_task or (app.session.tasks[-1] if app.session.tasks else None)
+
+
+@command("help", "h")
+def _help(rest, app):
+    """Show this help."""
+    app.console.print("[bold]Commands:[/bold]")
+    seen = set()
+    for name, fn in COMMANDS.items():
+        if fn in seen:
+            continue
+        seen.add(fn)
+        doc = (fn.__doc__ or "").strip().splitlines()[0]
+        app.console.print(f"  [cyan]/{name}[/cyan] — {doc}")
+    app.console.print("  Type anything else to run it as a task.")
+
+
+@command("model")
+def _model(rest, app):
+    """Show or switch the model (Ollama models in M2)."""
+    if not rest.strip():
+        app.console.print(f"Current model: [bold]{app.session.default_model}[/bold]")
+        return
+    name = rest.strip()
+    try:
+        installed = orchestrator.list_installed_models()
+    except Exception as e:
+        app.console.print(f"[red]Could not reach Ollama: {e}[/red]")
+        return
+    if name not in installed:
+        app.console.print(f"[red]Model not installed:[/red] {name}. Try /models.")
+        return
+    app.session.default_model = name
+    app.console.print(f"Model set to [bold]{name}[/bold] (applies to new tasks).")
+
+
+@command("models")
+def _models(rest, app):
+    """List installed models."""
+    try:
+        installed = orchestrator.list_installed_models()
+    except Exception as e:
+        app.console.print(f"[red]Could not reach Ollama: {e}[/red]")
+        return
+    for m in installed:
+        marker = "  (current)" if m == app.session.default_model else ""
+        app.console.print(f"  {m}{marker}")
+
+
+@command("task")
+def _task(rest, app):
+    """Queue a new task: /task <description>."""
+    if not rest.strip():
+        app.console.print("Usage: /task <description>")
+        return
+    app.enqueue_task(rest.strip())
+
+
+@command("tasks")
+def _tasks(rest, app):
+    """List all tasks in this session and their status."""
+    if not app.session.tasks:
+        app.console.print("(no tasks yet)")
+        return
+    for t in app.session.tasks:
+        pend, act, done = t.step_counts()
+        steps = f"  [{done}✓/{act}▶/{pend}□]" if t.plan_steps else ""
+        wait = "  [waiting for confirmation]" if t.pending else ""
+        app.console.print(f"  {t.status_glyph()} [{t.id}] {t.title}  ({t.state.value}){steps}{wait}")
+
+
+@command("fg")
+def _fg(rest, app):
+    """Foreground a backgrounded task by id: /fg <id> (needed to approve a task waiting on a write)."""
+    if not rest.strip():
+        app.console.print("Usage: /fg <id>  (see /tasks for ids)")
+        return
+    task = app.session.find(rest.strip())
+    if task is None:
+        app.console.print(f"[red]No task with id {rest.strip()}[/red]")
+        return
+    app.request_foreground(task.id)
+
+
+@command("yes")
+def _yes(rest, app):
+    """Toggle auto-approve of writes/edits for the session."""
+    app.session.auto_yes = not app.session.auto_yes
+    state = "ON" if app.session.auto_yes else "OFF"
+    app.console.print(f"Auto-approve writes/edits: [bold]{state}[/bold]")
+
+
+@command("undo")
+def _undo(rest, app):
+    """Revert the last file write/edit (single level)."""
+    task = _target_task(app)
+    if task is None or task.last_edit_snapshot is None:
+        app.console.print("Nothing to undo.")
+        return
+    path, pre = task.last_edit_snapshot
+    full = tools._safe_path(path)
+    if full is None:
+        app.console.print("[red]Cannot undo: path escapes working directory.[/red]")
+        return
+    if pre is None:
+        # It was a newly created file — undo means remove it.
+        try:
+            os.remove(full)
+            app.console.print(f"Removed newly-created {path}.")
+        except OSError as e:
+            app.console.print(f"[red]Undo failed: {e}[/red]")
+    else:
+        with open(full, "w") as f:
+            f.write(pre)
+        app.console.print(f"Reverted {path} to its previous contents.")
+    task.last_edit_snapshot = None
+    task.last_diff = None
+
+
+@command("diff")
+def _diff(rest, app):
+    """Re-show the last proposed/applied diff."""
+    task = _target_task(app)
+    if task is None or not task.last_diff:
+        app.console.print("No diff available.")
+        return
+    app.console.print(task.last_diff)
+
+
+@command("add")
+def _add(rest, app):
+    """Pre-load a file into the current task's context: /add <file>."""
+    if not rest.strip():
+        app.console.print("Usage: /add <file>")
+        return
+    task = _target_task(app)
+    if task is None:
+        app.console.print("No task to add context to — start a task first.")
+        return
+    content = tools.do_read_file(rest.strip())
+    if content.startswith("error:"):
+        app.console.print(f"[red]{content}[/red]")
+        return
+    if not task.history:
+        task.history.append({"role": "system", "content": orchestrator.SYSTEM_PROMPT})
+    task.history.append({"role": "user", "content": f"[pre-loaded file: {rest.strip()}]\n{content}"})
+    app.console.print(f"Loaded {rest.strip()} into task context ({len(content)} bytes).")
+
+
+@command("clear")
+def _clear(rest, app):
+    """Reset the current task's conversation history (keeps other tasks)."""
+    task = _target_task(app)
+    if task is None:
+        app.console.print("No task to clear.")
+        return
+    task.history.clear()
+    task.plan_steps.clear()
+    app.console.print(f"Cleared history for [{task.id}] {task.title}.")
+
+
+@command("quit", "q", "exit")
+def _quit(rest, app):
+    """Exit 2B."""
+    app.request_quit()

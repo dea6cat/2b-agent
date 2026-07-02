@@ -25,6 +25,16 @@ class TaskState(str, Enum):
     ERROR = "error"
 
 
+# Operating modes, cycled with shift+tab (or set via /mode). These change how the
+# write-gated tools behave — 2B's only confirm-gated tools are edit_file/write_file,
+# so there's no separate "auto" mode (it would be identical to accept-edits).
+MODE_NORMAL = "normal"          # confirm every write/edit
+MODE_ACCEPT = "accept_edits"    # auto-approve writes/edits
+MODE_PLAN = "plan"              # read-only: edits/writes refused; the model plans instead
+MODES = (MODE_NORMAL, MODE_ACCEPT, MODE_PLAN)
+MODE_LABELS = {MODE_NORMAL: "normal mode", MODE_ACCEPT: "accept edits", MODE_PLAN: "plan mode"}
+
+
 @dataclass
 class PlanStep:
     text: str
@@ -89,13 +99,40 @@ class Task:
 @dataclass
 class Session:
     default_model: str = ""
-    auto_yes: bool = False
+    auto_yes: bool = False       # legacy seed for the initial mode (--yes / /yes)
     cwd: str = "."
+    mode: str = MODE_NORMAL
     tasks: list[Task] = field(default_factory=list)
     active_task_id: str | None = None
     # Events emitted by any task thread, drained by the UI thread so all
     # rendering happens on one thread regardless of which task produced it.
     events: "queue.Queue" = field(default_factory=queue.Queue)
+
+    def __post_init__(self):
+        # --yes / auto_yes at startup is just "begin in accept-edits mode".
+        if self.auto_yes and self.mode == MODE_NORMAL:
+            self.mode = MODE_ACCEPT
+
+    @property
+    def approve_writes(self) -> bool:
+        """Whether writes/edits apply without a confirmation prompt."""
+        return self.mode == MODE_ACCEPT
+
+    @property
+    def read_only(self) -> bool:
+        """Plan mode — edit_file/write_file are refused; the model plans instead."""
+        return self.mode == MODE_PLAN
+
+    def cycle_mode(self) -> str:
+        i = MODES.index(self.mode) if self.mode in MODES else 0
+        self.mode = MODES[(i + 1) % len(MODES)]
+        return self.mode
+
+    def set_mode(self, name: str) -> bool:
+        if name in MODES:
+            self.mode = name
+            return True
+        return False
 
     @property
     def active_task(self) -> Task | None:

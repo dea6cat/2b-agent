@@ -28,10 +28,11 @@ class App:
         # redirect_stdout (used to capture verbatim-tool print output) can never
         # divert the UI's terminal writes.
         self.console = Console(file=sys.stdout)
+        self.ui = self.console   # provider-neutral output handle used by commands.py
         self.session = Session(default_model=model, auto_yes=auto_yes, cwd=os.getcwd())
         self.registry = registry.build_registry()
         self.listener = KeyListener(on_key=self._on_key)
-        self._session = make_session()
+        self._session = make_session(self)
         self._quit = False
         self._background_requested = False
         self._fg_target: str | None = None
@@ -230,6 +231,9 @@ def main() -> None:
     parser.add_argument("--model", help="Ollama model tag, e.g. qwen3.5:9b (default: autodetect)")
     parser.add_argument("--yes", action="store_true", help="Auto-apply file writes/edits without confirmation")
     parser.add_argument("--list-models", action="store_true", help="List available models across configured providers and exit")
+    parser.add_argument("--classic", action="store_true", help="Use the line-mode REPL instead of the full-screen TUI")
+    parser.add_argument("--theme", choices=["system", "light", "dark"], default="system",
+                        help="TUI color theme (default: system — uses your terminal background)")
     parser.add_argument("--version", action="version", version=f"2b {__version__}")
     parser.add_argument("task", nargs="?", help="An initial task to run before dropping into the session")
     args = parser.parse_args()
@@ -260,7 +264,14 @@ def main() -> None:
     if not args.model:
         console.print(f"[dim]No --model given, autodetected: {model}[/dim]")
 
-    App(model=model, auto_yes=args.yes).run(initial_task=args.task)
+    # Full-screen Textual TUI by default on an interactive terminal; the proven
+    # line-mode REPL for --classic and for scripted/piped (non-TTY) use.
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    if interactive and not args.classic:
+        from .app_tui import run_tui
+        run_tui(model, args.yes, args.task, args.theme)
+    else:
+        App(model=model, auto_yes=args.yes).run(initial_task=args.task)
 
 
 if __name__ == "__main__":

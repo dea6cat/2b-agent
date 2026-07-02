@@ -23,19 +23,41 @@ transport is abstracted. Local Ollama still reaches its native /api/chat.
 """
 import io
 import os
+import time
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
 from . import planparse, registry, tools
-from .conversation import Conversation, Message, ToolResult
+from .conversation import Conversation, Message, Role, ToolResult
 from .providers.base import ProviderError
 from .session import PendingConfirmation, Session, Task, TaskState
 from .toolspec import TOOL_SPECS
 
-MAX_TURNS = 12
+MAX_TURNS = 40          # generous budget for real multi-step tasks
 DEFAULT_MODEL = "qwen3.5:9b"
+
+# --- context-window management (auto-compaction) -----------------------------
+# Estimated-token budgets per provider. Local models run small windows, so we
+# compact aggressively there; cloud models have far more headroom. Override the
+# local budget with TWOB_CONTEXT_TOKENS if your Ollama num_ctx is larger.
+CONTEXT_BUDGETS = {
+    "ollama": 8000, "anthropic": 180000, "openai": 120000,
+    "openrouter": 120000, "mistral": 120000, "nvidia": 120000, "google": 900000,
+}
+COMPACT_AT = 0.75       # compact once estimated usage crosses this fraction
+COMPACT_KEEP_TAIL = 6   # most-recent messages kept verbatim (rest are summarized)
+_COMPACT_MAX_INPUT_CHARS = 48_000   # cap the transcript handed to the summarizer
+
+COMPACT_SYSTEM = (
+    "You are compressing a coding session's history to free up context so work "
+    "can continue uninterrupted. Summarize concisely but completely: the user's "
+    "goal, files and code already read and what they contain, findings, decisions "
+    "made, edits applied (with exact file paths), and what remains to be done. "
+    "Preserve exact identifiers, paths, and any values needed to keep working. "
+    "Output plain text only — no preamble."
+)
 
 BASE_SYSTEM_PROMPT = (
     "You are a careful local coding assistant with five tools: list_files, read_file, "
@@ -94,13 +116,105 @@ def pick_default_model() -> str:
     return DEFAULT_MODEL if DEFAULT_MODEL in models else models[0]
 
 
+def context_budget(provider, model: str) -> int:
+    """Estimated-token budget for a provider/model. Local Ollama honors the
+    TWOB_CONTEXT_TOKENS env override (match it to your num_ctx)."""
+    name = getattr(provider, "name", "")
+    if name == "ollama":
+        env = os.environ.get("TWOB_CONTEXT_TOKENS")
+        if env and env.isdigit():
+            return int(env)
+    return CONTEXT_BUDGETS.get(name, 8000)
+
+
+def estimate_tokens(conv: Conversation) -> int:
+    """Rough token estimate for a conversation (~4 chars/token). Cheap and
+    provider-agnostic — good enough to decide when to compact."""
+    total = len(conv.system_prompt or "")
+    for m in conv.messages:
+        total += len(m.text or "") + len(m.thinking or "")
+        for tc in m.tool_calls:
+            total += len(tc.name) + len(str(tc.arguments))
+        for r in m.tool_results:
+            total += len(r.content or "")
+    return total // 4
+
+
+def _render_transcript(messages: list[Message]) -> str:
+    """Flatten history to a plain-text transcript for the summarizer."""
+    parts: list[str] = []
+    for m in messages:
+        if m.role == Role.USER and m.tool_results:
+            for r in m.tool_results:
+                parts.append(f"[tool result]\n{r.content}")
+        elif m.role == Role.USER:
+            parts.append(f"[user]\n{m.text or ''}")
+        elif m.role == Role.ASSISTANT:
+            if m.thinking:
+                parts.append(f"[assistant reasoning]\n{m.thinking}")
+            if m.text:
+                parts.append(f"[assistant]\n{m.text}")
+            for tc in m.tool_calls:
+                parts.append(f"[assistant called {tc.name}] {tc.arguments}")
+    text = "\n\n".join(parts)
+    if len(text) > _COMPACT_MAX_INPUT_CHARS:      # keep the most-recent portion
+        text = "…[earlier turns elided]…\n\n" + text[-_COMPACT_MAX_INPUT_CHARS:]
+    return text
+
+
+def compact_conversation(conv: Conversation, provider, model: str) -> bool:
+    """Replace all but the recent tail of `conv` with a single summary message.
+    Returns True if compaction happened. The cut lands on an assistant message so
+    tool_call/tool_result pairs in the kept tail stay intact for every provider."""
+    msgs = conv.messages
+    target = max(0, len(msgs) - COMPACT_KEEP_TAIL)
+    # Largest assistant-boundary cut at/below the keep-tail target; if the tail
+    # would swallow everything (few messages), fall back to the last group so we
+    # still fold the rest rather than giving up.
+    cut = next((i for i in range(target, 0, -1) if msgs[i].role == Role.ASSISTANT), None)
+    if not cut:
+        cut = next((i for i in range(1, len(msgs)) if msgs[i].role == Role.ASSISTANT), None)
+    if not cut:                                   # nothing safe/worthwhile to fold
+        return False
+    head, tail = msgs[:cut], msgs[cut:]
+    summ = Conversation(system_prompt=COMPACT_SYSTEM)
+    summ.append(Message.user(_render_transcript(head)))
+    buf: list[str] = []
+    resp = provider.stream(summ, model, (), lambda c: buf.append(c))
+    summary = "".join(buf).strip() or (resp.message.text or resp.message.thinking or "").strip()
+    if not summary:
+        return False
+    recap = Message.user("[Summary of earlier conversation, compacted to save context]\n\n" + summary)
+    conv.messages = [recap] + tail
+    return True
+
+
+def _maybe_compact(conv: Conversation, provider, model: str, task: Task,
+                   on_event: Callable[["AgentEvent"], None]) -> None:
+    """Compact `conv` in place when it nears the model's context budget. Failures
+    are swallowed — a task must never break because compaction couldn't run."""
+    try:
+        budget = context_budget(provider, model)
+        if estimate_tokens(conv) < int(budget * COMPACT_AT):
+            return
+        task.status_line = "Compacting conversation"
+        task.turn_started_at = time.monotonic()
+        on_event(AgentEvent(EventType.LOG, task.id,
+                            {"text": "Nearing context limit — compacting conversation to keep going…"}))
+        if compact_conversation(conv, provider, model):
+            on_event(AgentEvent(EventType.LOG, task.id,
+                                {"text": f"Compacted. Context now ~{estimate_tokens(conv)} tokens."}))
+    except Exception:
+        pass
+
+
 # --- confirmation routed to the UI thread -----------------------------------
 
 def request_confirmation(session: Session, task: Task, prompt: str, diff: str) -> bool:
     """Called from a worker thread. If auto-approve is on, approve immediately.
     Otherwise hand a PendingConfirmation to the UI thread and block until it is
     answered (a backgrounded task simply waits here until foregrounded)."""
-    if session.auto_yes:
+    if session.approve_writes:
         return True
     pc = PendingConfirmation(prompt=prompt, diff=diff)
     task.pending = pc
@@ -163,6 +277,10 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
 
 
 def _dispatch_tool(session: Session, task: Task, name: str, args: dict) -> str:
+    if session.read_only and name in ("edit_file", "write_file"):
+        return ("error: plan mode is on — no changes are applied. Do not call edit_file or "
+                "write_file. Investigate with the read-only tools and present your proposed "
+                "changes as a concrete, numbered plan in your final answer instead.")
     if name == "edit_file":
         return apply_edit(session, task, args["path"], args["old_text"], args["new_text"])
     if name == "write_file":
@@ -186,8 +304,6 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     """Drive the tool-call loop for one task on the calling (worker) thread.
     Resolves the active model to a provider, then drives it via the canonical
     Conversation. Emits events for the UI thread; never writes the terminal."""
-    import time
-
     reg = reg if reg is not None else registry.build_registry()
     model_str = task.model_override or session.default_model
     resolved = registry.resolve(reg, model_str)
@@ -202,7 +318,11 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     if task.conversation is None:
         task.conversation = Conversation(system_prompt=SYSTEM_PROMPT)
     conv = task.conversation
-    conv.append(Message.user(task.description))
+    desc = task.description
+    if session.read_only:
+        desc += ("\n\n(Plan mode is on: do NOT edit or write files. Use the read-only tools to "
+                 "investigate, then present a concrete, numbered plan as your final answer.)")
+    conv.append(Message.user(desc))
 
     first_turn = not any(m.role.value == "assistant" for m in conv.messages)
     try:
@@ -213,12 +333,13 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 on_event(AgentEvent(EventType.TASK_ERROR, task.id, {"error": "cancelled"}))
                 return
 
+            _maybe_compact(conv, provider, model, task, on_event)
             task.status_line = "Thinking"
             task.turn_started_at = time.monotonic()
             # Best-effort perf readout (local models). May be blank on the very
             # first turn until the model finishes loading; refreshed on the first
             # streamed token below, and persists across turns once set.
-            if hasattr(provider, "perf"):
+            if getattr(provider, "name", "") == "ollama" and hasattr(provider, "perf"):
                 try:
                     p = provider.perf(model)
                     if p:
@@ -230,7 +351,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             streamed = {"n": 0, "perf": False}
 
             def on_text(chunk: str, _t=task, _p=provider, _m=model) -> None:
-                if not streamed["perf"] and hasattr(_p, "perf"):
+                if not streamed["perf"] and getattr(_p, "name", "") == "ollama" and hasattr(_p, "perf"):
                     streamed["perf"] = True
                     try:
                         val = _p.perf(_m)
@@ -286,9 +407,35 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 results.append(ToolResult(tool_call_id=tc.id, content=result))
             conv.append(Message.results(results))
 
-        task.state = TaskState.ERROR
-        task.error = "max turns reached without a final answer"
-        on_event(AgentEvent(EventType.TASK_ERROR, task.id, {"error": task.error}))
+        # Tool budget exhausted — one final turn for a best-effort answer (no more
+        # tools), so the user gets a summary instead of a bare error.
+        conv.append(Message.user(
+            "You've reached the tool-call limit. Give your best final answer now, "
+            "based on what you've already found — do not call any more tools."))
+        _maybe_compact(conv, provider, model, task, on_event)
+        task.status_line = "Thinking"
+        task.turn_started_at = time.monotonic()
+        on_event(AgentEvent(EventType.TURN_START, task.id))
+        got = {"n": 0}
+
+        def on_final(chunk: str, _t=task) -> None:
+            got["n"] += len(chunk)
+            on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
+
+        try:
+            resp = provider.stream(conv, model, TOOL_SPECS, on_final)
+            planparse.finalize_steps(task.plan_steps)
+            task.status_line = ""
+            task.state = TaskState.DONE
+            if got["n"] == 0:
+                txt = (resp.message.text or resp.message.thinking or "").strip() or \
+                    "(reached the tool-call limit without a final answer)"
+                on_event(AgentEvent(EventType.ASSISTANT_DELTA, task.id, {"chunk": txt}))
+            on_event(AgentEvent(EventType.TASK_DONE, task.id))
+        except Exception as e:
+            task.state = TaskState.ERROR
+            task.error = f"max turns reached; final attempt failed: {e}"
+            on_event(AgentEvent(EventType.TASK_ERROR, task.id, {"error": task.error}))
     finally:
         if task.status_line:
             task.status_line = ""

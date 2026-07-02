@@ -10,11 +10,28 @@ services are added as data in registry.py, not new code.
 """
 import json
 import os
+import time
 from typing import Callable
 
 from ..conversation import Conversation, Message, Role, ToolCall
 from ..toolspec import ToolSpec, to_openai
 from .base import ProviderResponse, get_json, post_json, post_stream
+
+_MODELS_TTL = 60  # seconds to cache a provider's model list
+
+# Substrings that mark a model as NOT a chat/tool-calling model — filtered out
+# of listings so /models shows usable models, not embedders/audio/OCR/etc.
+_NON_CHAT = (
+    "embed", "embedding", "ocr", "tts", "whisper", "transcribe", "moderation",
+    "rerank", "guard", "safety", "reward", "-parse", "nemoretriever", "nvclip",
+    "bge-", "arctic-embed", "voxtral", "riva", "diffusion", "calibration",
+    "topic-control", "detector", "-fim-",
+)
+
+
+def _is_chat_model(model_id: str) -> bool:
+    low = model_id.lower()
+    return not any(tok in low for tok in _NON_CHAT)
 
 
 class OpenAICompatProvider:
@@ -27,6 +44,7 @@ class OpenAICompatProvider:
         self._static_models = models or []
         self._dynamic = dynamic_models
         self._extra_headers = extra_headers or {}
+        self._cache: tuple[float, list[str]] | None = None
 
     @property
     def api_key(self) -> str:
@@ -43,12 +61,16 @@ class OpenAICompatProvider:
     def list_models(self) -> list[str]:
         if not self._dynamic:
             return list(self._static_models)
+        if self._cache is not None and (time.monotonic() - self._cache[0]) < _MODELS_TTL:
+            return self._cache[1]
         try:
             data = get_json(f"{self.base_url}/models", headers=self._headers(), provider=self.name)
             ids = [m.get("id", "") for m in data.get("data", [])]
-            return [i for i in ids if i] or list(self._static_models)
+            models = sorted(i for i in ids if i and _is_chat_model(i)) or list(self._static_models)
         except Exception:
-            return list(self._static_models)
+            models = list(self._static_models)
+        self._cache = (time.monotonic(), models)
+        return models
 
     def _messages(self, conv: Conversation) -> list[dict]:
         out = [{"role": "system", "content": conv.system_prompt}]

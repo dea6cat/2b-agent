@@ -75,6 +75,7 @@ class Task:
     last_edit_snapshot: tuple | None = None          # (path, pre_content_or_None) for /undo
     pending: "PendingConfirmation | None" = None     # set when blocked on a backgrounded write
     error: str | None = None
+    last_compact_tokens: int = 0                     # size floor after the last compaction (anti-thrash)
 
     def __post_init__(self):
         if not self.title:

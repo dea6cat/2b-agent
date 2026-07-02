@@ -8,8 +8,11 @@ later milestones.
 """
 import difflib
 import os
+import re
 
 MAX_FILE_BYTES = 200_000
+_RANGE_RE = re.compile(r"^(?P<base>.+):(?P<start>\d+)-(?P<end>\d+)$")   # "path:90-120"
+_MATCH_SCAN_CAP = 40   # stop walking once we've seen this many basename hits
 SKIP_DIRS = {".git", "build", ".dart_tool", "node_modules", ".idea", ".aider.tags.cache.v4"}
 SKIP_DIR_PREFIXES = (".aider",)  # e.g. .aider.tags.cache.v4, any future .aider* cache dirs
 BINARY_PROBE_BYTES = 8192
@@ -129,7 +132,26 @@ def _is_probably_binary(path):
     return b"\x00" in chunk
 
 
-def do_list_files(path):
+def _find_by_basename(name, given):
+    """Files under the launch dir (the project) whose basename == name, skipping
+    junk dirs. Matches whose relpath ends with the given path come first (handles
+    a partial path like 'view/chat.dart'). Returns up to 20 relpaths."""
+    root = os.getcwd()
+    suffix_hits, base_hits, seen = [], [], 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not _should_skip_dir(d)]
+        for f in filenames:
+            if _should_skip_file(f) or f != name:
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, f), root)
+            (suffix_hits if given and given != name and rel.endswith(given) else base_hits).append(rel)
+            seen += 1
+        if seen >= _MATCH_SCAN_CAP:
+            break
+    return (suffix_hits + base_hits)[:20]
+
+
+def do_list_files(path, max_chars=None):
     root = _safe_path(path)
     if root is None:
         return "error: empty or invalid path"
@@ -141,21 +163,71 @@ def do_list_files(path):
                 continue
             out.append(os.path.relpath(os.path.join(dirpath, f)))
     out.sort()
-    return "\n".join(out[:500]) or "(empty directory)"
+    listing = "\n".join(out[:500])
+    if not listing:
+        return "(empty directory)"
+    # A big recursive listing is navigation noise that can blow a small model's
+    # context — trim on a line boundary and tell it to narrow the path.
+    if max_chars and len(listing) > max_chars:
+        clipped = listing[:max_chars].rsplit("\n", 1)[0]
+        return (clipped + f"\n…(large listing: {len(out)} files — pass a narrower path like 'lib' "
+                f"to focus; showing the first {clipped.count(chr(10)) + 1})")
+    return listing
 
 
-def do_read_file(path):
-    full = _safe_path(path)
+def do_read_file(path, max_chars=None):
+    """Read a file. Supports an optional line range via a 'path:START-END' suffix.
+    If the path isn't found, looks for the basename anywhere in the project. When a
+    whole-file read is too big for max_chars, suggests a section read instead of
+    clipping. max_chars=None means no size guard (whole file returned)."""
+    raw = str(path or "")
+    lo = hi = None
+    base = raw
+    m = _RANGE_RE.match(raw)
+    if m:
+        base, lo, hi = m.group("base"), int(m.group("start")), int(m.group("end"))
+
+    full = _safe_path(base)
     if full is None:
         return "error: empty or invalid path"
-    if not os.path.isfile(full):
-        return f"error: no such file: {path}"
-    if os.path.getsize(full) > MAX_FILE_BYTES:
-        return f"error: file too large ({os.path.getsize(full)} bytes) — point at a smaller file or section"
+
+    note = ""
+    if not os.path.isfile(full):                          # project-wide fallback
+        name = os.path.basename(base)
+        matches = _find_by_basename(name, base) if name else []
+        if len(matches) == 1:
+            note = f"[note: '{base}' not found at that path — reading the only project match: {matches[0]}]\n"
+            full = _safe_path(matches[0])
+        elif len(matches) > 1:
+            return (f"error: no file at '{base}'. Files named '{name}' in this project: "
+                    f"{', '.join(matches)}. Read one of these.")
+        else:
+            return f"error: no such file: {base}"
+
     if _is_probably_binary(full):
-        return f"error: {path} looks like a binary file, not reading it"
+        return f"error: {base} looks like a binary file, not reading it"
+    rel = os.path.relpath(full)
+
+    if lo is not None:                                    # section read — never size-guarded
+        seg = []
+        with open(full, "r", errors="replace") as f:
+            for i, line in enumerate(f, start=1):
+                if i > hi:
+                    break
+                if i >= lo:
+                    seg.append(line.rstrip("\n"))
+        return f"{note}# {rel} lines {lo}-{hi}\n" + "\n".join(seg)
+
+    if os.path.getsize(full) > MAX_FILE_BYTES:
+        return f'error: file too large ({os.path.getsize(full)} bytes) — read a section, e.g. read_file "{rel}:1-200"'
     with open(full, "r", errors="replace") as f:
-        return f.read()
+        content = f.read()
+    if max_chars and len(content) > max_chars:            # too big for this model — suggest a section
+        n_lines = content.count("\n") + 1
+        return (f"{note}{rel} is {n_lines:,} lines (~{len(content) // 1024} KB) — too large to read whole "
+                f'with the current model\'s context. Read a section, e.g. read_file "{rel}:1-150", or '
+                "switch to a bigger model with /model.")
+    return note + content
 
 
 def do_write_file(path, content, auto_yes):

@@ -19,6 +19,45 @@ from .base import Provider, ProviderResponse, get_json, post_json, post_stream
 LOCAL_DEFAULT = "http://localhost:11434"
 CLOUD_HOST = "https://ollama.com"
 
+CTX_FALLBACK = 16384     # used when RAM/arch can't be read to size the window
+CLOUD_CTX = 120_000      # cloud runs large windows; don't pin num_ctx there
+CTX_FLOOR = 2048         # never pin below this
+CTX_ROUND = 1024         # round the computed window down to a clean multiple
+KV_RESERVE_BYTES = 3 * 1024 ** 3   # RAM kept free for OS + app + compute buffers
+KV_USE_FRACTION = 0.75             # of the RAM left after weights+reserve, give this to KV
+
+
+def _total_ram_bytes() -> int:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")   # macOS + Linux
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
+def _mi_int(model_info: dict, suffix: str):
+    """First int field whose key ends with suffix, ignoring vision-tower keys."""
+    for k, v in model_info.items():
+        if ".vision." not in k and k.endswith(suffix) and isinstance(v, int):
+            return v
+    return None
+
+
+def _kv_bytes_per_token(mi: dict) -> int:
+    """f16 KV-cache bytes per token = layers × kv_heads × (k_len + v_len) × 2.
+    Works across model families (llama/qwen/gemma/…); 0 if the arch is unreadable."""
+    layers = _mi_int(mi, ".block_count")
+    heads = _mi_int(mi, ".attention.head_count")
+    kv_heads = _mi_int(mi, ".attention.head_count_kv") or heads    # GQA if present, else full
+    klen = _mi_int(mi, ".attention.key_length")
+    vlen = _mi_int(mi, ".attention.value_length")
+    if (klen is None or vlen is None) and heads:                   # derive head dim from embedding
+        emb = _mi_int(mi, ".embedding_length")
+        if emb:
+            klen = vlen = emb // heads
+    if not (layers and kv_heads and klen and vlen):
+        return 0
+    return layers * kv_heads * (klen + vlen) * 2
+
 
 class OllamaProvider:
     def __init__(self, name: str = "ollama", host: str | None = None, api_key: str | None = None):
@@ -26,9 +65,69 @@ class OllamaProvider:
         self.host = (host or os.environ.get("OLLAMA_API_BASE")
                      or os.environ.get("OLLAMA_HOST") or LOCAL_DEFAULT).rstrip("/")
         self.api_key = api_key
+        self._ctx_cache: dict[str, int] = {}   # model -> effective num_ctx
+        self._show_cache: dict[str, dict] = {}  # model -> /api/show payload
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+
+    # --- context window ------------------------------------------------------
+    def _show(self, model: str) -> dict:
+        if model not in self._show_cache:
+            try:
+                self._show_cache[model] = post_json(
+                    f"{self.host}/api/show", {"model": model},
+                    headers=self._headers(), timeout=10, provider=self.name)
+            except Exception:
+                self._show_cache[model] = {}
+        return self._show_cache[model]
+
+    def _weight_bytes(self, model: str) -> int:
+        try:
+            data = get_json(f"{self.host}/api/tags", headers=self._headers(), provider=self.name)
+            for m in data.get("models", []):
+                if m.get("name") == model and isinstance(m.get("size"), int):
+                    return m["size"]
+        except Exception:
+            pass
+        return 0
+
+    def _compute_ctx(self, model: str) -> int:
+        """The largest window this machine can run comfortably for this model:
+        min(model's trained max, what fits in RAM after weights + a headroom
+        reserve, using ~75% of the rest for the KV cache). Rounds to a clean
+        multiple. Falls back to CTX_FALLBACK if RAM or arch can't be read."""
+        mi = self._show(model).get("model_info") or {}
+        trained = _mi_int(mi, ".context_length") or 0
+        per_tok = _kv_bytes_per_token(mi)
+        ram = _total_ram_bytes()
+        weights = self._weight_bytes(model)
+        if not (trained and per_tok and ram and weights):
+            return min(trained, CTX_FALLBACK) if trained else CTX_FALLBACK
+        avail = max(0.0, ram - weights - KV_RESERVE_BYTES) * KV_USE_FRACTION
+        ram_ctx = int(avail / per_tok)
+        eff = min(trained, ram_ctx)
+        eff = max(CTX_FLOOR, (eff // CTX_ROUND) * CTX_ROUND)
+        return min(eff, trained)
+
+    def context_window(self, model: str) -> int:
+        """The window 2B pins (via num_ctx) and budgets for. TWOB_CONTEXT_TOKENS
+        overrides; cloud isn't pinned; otherwise it's computed per machine+model
+        so we run as large as the box handles comfortably, no more. Cached."""
+        env = os.environ.get("TWOB_CONTEXT_TOKENS")
+        if env and env.isdigit():
+            return int(env)
+        if self.api_key is not None:            # cloud
+            return CLOUD_CTX
+        if model not in self._ctx_cache:
+            self._ctx_cache[model] = self._compute_ctx(model)
+        return self._ctx_cache[model]
+
+    def _options(self, model: str) -> dict:
+        """Runtime options. Locally we pin num_ctx to context_window so the model
+        actually runs at the size 2B budgets for (Ollama otherwise defaults to a
+        small ~4k window regardless of the model's trained max)."""
+        return {} if self.api_key is not None else {"num_ctx": self.context_window(model)}
 
     def is_available(self) -> bool:
         if self.api_key is not None and not self.api_key:
@@ -67,6 +166,7 @@ class OllamaProvider:
             "messages": self._messages(conversation),
             "tools": to_openai(tools),
             "stream": False,
+            "options": self._options(model),
         }
         raw = post_json(f"{self.host}/api/chat", payload, headers=self._headers(),
                         provider=self.name)
@@ -92,6 +192,7 @@ class OllamaProvider:
             "messages": self._messages(conversation),
             "tools": to_openai(tools),
             "stream": True,
+            "options": self._options(model),
         }
         content, thinking, calls = [], [], []
         for line in post_stream(f"{self.host}/api/chat", payload, headers=self._headers(),

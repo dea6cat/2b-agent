@@ -7,7 +7,7 @@ import os
 
 from . import config, mcp_client, orchestrator, registry, tools
 from .conversation import Conversation, Message
-from .session import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, MODE_LABELS
+from .session import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, MODE_LABELS, TaskState
 
 COMMANDS = {}
 
@@ -429,14 +429,17 @@ def _copy(rest, app):
 
 @command("clear")
 def _clear(rest, app):
-    """Reset the current task's conversation history (keeps other tasks)."""
-    task = _target_task(app)
-    if task is None:
-        app.ui.print("No task to clear.")
+    """Start fresh — clear the screen, history, and tasks, like a new 2B session."""
+    active = app.session.active_task
+    if active is not None and active.state == TaskState.ACTIVE:
+        app.ui.print("A task is still running — stop it first ([bold]esc[/bold]), then /clear.")
         return
-    task.conversation = None
-    task.plan_steps.clear()
-    app.ui.print(f"Cleared history for [{task.id}] {task.title}.")
+    app.session.tasks.clear()
+    app.session.active_task_id = None
+    if hasattr(app, "clear_screen"):
+        app.clear_screen()          # TUI: wipe the log back to the intro
+    else:
+        app.ui.print("Cleared.")
 
 
 @command("quit", "q", "exit")

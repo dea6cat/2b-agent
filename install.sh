@@ -314,7 +314,8 @@ PYEOF
       PS=$(ollama ps 2>/dev/null | awk -v mm="$m" '$1==mm')
       MEM=$(printf '%s' "$PS" | awk '{print $3, $4}')
       GPU=no; printf '%s' "$PS" | grep -q "100% GPU" && GPU=yes
-      printf '  %-20s %6s tok/s   [%s]   100%%GPU=%s\n' "$m" "$TOKS" "$MEM" "$GPU"
+      CTX=$(2b --print-ctx "$m" 2>/dev/null | sed -E 's/.*: ([0-9]+) tokens.*/\1/')
+      printf '  %-20s %6s tok/s   [%s]   100%%GPU=%s   ctx=%s\n' "$m" "$TOKS" "$MEM" "$GPU" "${CTX:-?}"
     done
   fi
 

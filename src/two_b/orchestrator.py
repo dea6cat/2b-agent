@@ -68,6 +68,7 @@ BASE_SYSTEM_PROMPT = (
     "Only use write_file for new files or small existing ones. Paths may be relative to the "
     "working directory or absolute — pass them through unchanged. If a tool returns an error, "
     "report it plainly; never substitute a different file or invent a file's location or contents. "
+    "Reply in the same language the user writes in. "
     "When finished, reply with a plain-text final answer and make no further tool calls."
 )
 SYSTEM_PROMPT = BASE_SYSTEM_PROMPT + planparse.PLAN_PROMPT
@@ -134,13 +135,18 @@ def pick_default_model() -> str:
 
 
 def context_budget(provider, model: str) -> int:
-    """Estimated-token budget for a provider/model. Local Ollama honors the
-    TWOB_CONTEXT_TOKENS env override (match it to your num_ctx)."""
+    """Token budget for a provider/model. For local Ollama this is the window 2B
+    actually pins via num_ctx — detected from the model (min of its trained max and
+    a RAM-safe cap), or TWOB_CONTEXT_TOKENS if set — so the budget matches reality."""
     name = getattr(provider, "name", "")
-    if name == "ollama":
-        env = os.environ.get("TWOB_CONTEXT_TOKENS")
-        if env and env.isdigit():
-            return int(env)
+    if name == "ollama" and hasattr(provider, "context_window"):
+        try:
+            return provider.context_window(model)
+        except Exception:
+            pass
+    env = os.environ.get("TWOB_CONTEXT_TOKENS")
+    if name == "ollama" and env and env.isdigit():
+        return int(env)
     return CONTEXT_BUDGETS.get(name, 8000)
 
 
@@ -212,15 +218,22 @@ def _maybe_compact(conv: Conversation, provider, model: str, task: Task,
     are swallowed — a task must never break because compaction couldn't run."""
     try:
         budget = context_budget(provider, model)
-        if estimate_tokens(conv) < int(budget * COMPACT_AT):
+        est = estimate_tokens(conv)
+        if est < int(budget * COMPACT_AT):
+            return
+        # Anti-thrash: if we just compacted and nothing meaningful was added since,
+        # don't compact again — a single oversized recent result can't be folded
+        # away, and re-running it every turn is pointless churn.
+        if task.last_compact_tokens and est <= int(task.last_compact_tokens * 1.15):
             return
         task.status_line = "Compacting conversation"
         task.turn_started_at = time.monotonic()
         on_event(AgentEvent(EventType.LOG, task.id,
                             {"text": "Nearing context limit — compacting conversation to keep going…"}))
         if compact_conversation(conv, provider, model):
+            task.last_compact_tokens = estimate_tokens(conv)
             on_event(AgentEvent(EventType.LOG, task.id,
-                                {"text": f"Compacted. Context now ~{estimate_tokens(conv)} tokens."}))
+                                {"text": f"Compacted. Context now ~{task.last_compact_tokens} tokens."}))
     except Exception:
         pass
 
@@ -293,7 +306,7 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     return result
 
 
-def _dispatch_tool(session: Session, task: Task, name: str, args: dict) -> str:
+def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap: int | None = None) -> str:
     if session.read_only and name in ("edit_file", "write_file"):
         return ("error: plan mode is on — no changes are applied. Do not call edit_file or "
                 "write_file. Investigate with the read-only tools and present your proposed "
@@ -311,9 +324,9 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict) -> str:
     buf = io.StringIO()
     with redirect_stdout(buf):
         if name == "list_files":
-            return tools.do_list_files(args.get("path", "."))
+            return tools.do_list_files(args.get("path", "."), max_chars=read_cap)
         if name == "read_file":
-            return tools.do_read_file(args["path"])
+            return tools.do_read_file(args["path"], max_chars=read_cap)
         if name == "search_files":
             return tools.do_search_files(args["query"], args.get("path", "."))
     return f"error: unknown tool {name}"
@@ -336,6 +349,10 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
         on_event(AgentEvent(EventType.TASK_ERROR, task.id, {"error": err}))
         return
     provider, model = resolved
+    # A single read/listing may use ~55% of the model's token budget (≈ tokens*2.2
+    # chars). Small local windows get a section suggestion for bigger files; large
+    # cloud windows are effectively unbounded.
+    read_cap = int(context_budget(provider, model) * 4 * 0.55)
 
     if task.conversation is None:
         task.conversation = Conversation(system_prompt=SYSTEM_PROMPT)
@@ -431,7 +448,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 task.status_line = _STATUS.get(tc.name, "Working")
                 shown = {k: (v if k != "content" else f"<{len(v)} chars>") for k, v in tc.arguments.items()}
                 on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": tc.name, "shown": shown}))
-                result = _dispatch_tool(session, task, tc.name, tc.arguments)
+                result = _dispatch_tool(session, task, tc.name, tc.arguments, read_cap)
                 on_event(AgentEvent(EventType.TOOL_CALL_RESULT, task.id, {"name": tc.name, "result": result}))
                 results.append(ToolResult(tool_call_id=tc.id, content=result))
             conv.append(Message.results(results))

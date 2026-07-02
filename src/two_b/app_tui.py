@@ -201,6 +201,7 @@ class TwoBApp(App):
         self._pending_tool = None                 # (name, args) between a tool START and its RESULT
         self._tool_widgets: list = []             # this task's tool-action widgets (for └ on the last)
         self._last_reply = ""                     # most-recent model reply, for /copy
+        self._ctx_label = ""                      # "13k ctx" for the banner (filled async)
 
     # ---- theming ----
     def get_css_variables(self) -> dict[str, str]:
@@ -243,8 +244,26 @@ class TwoBApp(App):
         self.set_interval(1 / 12, self._tick)
         for line in self._intro_lines():
             self.log_write(line)
+        # Resolve the model's context window off-thread so a slow /api/show never
+        # blocks startup; refresh the banner once it's known.
+        threading.Thread(target=self._load_ctx_label, daemon=True).start()
         if self._initial_task:
             self._start_task(self._initial_task)
+
+    def _load_ctx_label(self) -> None:
+        try:
+            resolved = registry.resolve(self.registry, self.session.default_model)
+            if not resolved:
+                return
+            provider, model = resolved
+            if getattr(provider, "name", "") != "ollama" or getattr(provider, "api_key", None) is not None:
+                return   # only meaningful for local models 2B pins num_ctx on
+            win = provider.context_window(model)
+        except Exception:
+            return
+        if win:
+            self._ctx_label = f"{win // 1000}k ctx" if win >= 1000 else f"{win} ctx"
+            self.call_from_thread(lambda: self.query_one("#header", Static).update(self._banner_header()))
 
     # ---- helpers exposed to commands.py (duck interface) ----
     def request_quit(self) -> None:
@@ -273,6 +292,18 @@ class TwoBApp(App):
         log = self.query_one("#log", VerticalScroll)
         log.mount(Static(renderable, classes=classes or None))
         log.scroll_end(animate=False)
+
+    def clear_screen(self) -> None:
+        """Wipe the conversation log back to a fresh-session state (for /clear)."""
+        self._commit_stream()
+        self.query_one("#log", VerticalScroll).remove_children()
+        self._stream_widget = None
+        self._stream_text = ""
+        self._pending_tool = None
+        self._tool_widgets = []
+        self._last_reply = ""
+        for line in self._intro_lines():
+            self.log_write(line)
 
     # ---- input + command palette ----
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -640,6 +671,8 @@ class TwoBApp(App):
         t.append("2B", style=f"bold {self.c('ink')}")
         t.append(f"  v{__version__}   ", style=self.c("dim"))
         t.append(self.session.default_model, style=self.c("accent"))
+        if self._ctx_label:
+            t.append(f"  ·  {self._ctx_label}", style=self.c("dim"))
         t.append("  ·  local  ·  Ollama\n", style=self.c("dim"))
         t.append(path, style=self.c("dim"))
         return t

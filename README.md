@@ -236,8 +236,14 @@ small as you keep it.
 
 ### Configuration
 
-- `TWOB_CONTEXT_TOKENS` — override the local-model context budget (in tokens) that triggers
-  auto-compaction. Set it to match your Ollama `num_ctx` if you've raised it.
+- **Context window (local) — sized to your machine.** For a local model 2B works out the largest
+  window your box can run *comfortably* and pins `num_ctx` to it on every request (Ollama otherwise
+  defaults to ~4k regardless of the model). It reads the model's architecture and trained max from
+  `/api/show`, computes the KV-cache cost per token, and fits it into the RAM left after the model
+  weights plus a headroom reserve — so a 16 GB laptop, an 18 GB one, and a 64 GB workstation each get
+  a different, appropriate window (e.g. qwen3.5:9b ≈ 13k on 18 GB), never more than the model was
+  trained for. That number drives auto-compaction (~75%) and the read-a-section threshold. Set
+  `TWOB_CONTEXT_TOKENS` to override (higher if you want to spend more RAM, lower to save it).
 
 ---
 

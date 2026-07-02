@@ -235,6 +235,8 @@ def main() -> None:
     parser.add_argument("--theme", choices=["system", "light", "dark"], default="system",
                         help="TUI color theme (default: system — uses your terminal background)")
     parser.add_argument("--version", action="version", version=f"2b {__version__}")
+    parser.add_argument("--print-ctx", metavar="MODEL", nargs="?", const="",
+                        help="Print the context window 2B will run a local model at (sized to this machine), and exit")
     parser.add_argument("task", nargs="?", help="An initial task to run before dropping into the session")
     args = parser.parse_args()
 
@@ -259,6 +261,14 @@ def main() -> None:
             for m in models:
                 marker = "  (default)" if pname == "ollama" and m == orchestrator.DEFAULT_MODEL else ""
                 console.print(f"{pname}:{m}{marker}")
+        raise SystemExit(0)
+
+    if args.print_ctx is not None:
+        from . import registry
+        m = args.print_ctx or args.model or orchestrator.pick_default_model()
+        ol = registry.build_registry().get("ollama")
+        win = ol.context_window(m) if ol is not None else 0
+        console.print(f"{m}: {win} tokens (num_ctx 2B will pin on this machine)")
         raise SystemExit(0)
 
     try:

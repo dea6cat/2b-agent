@@ -339,6 +339,69 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     return result
 
 
+def apply_worker_changes(session: Session, task: Task, changes) -> str:
+    """Apply file changes collected from `delegate` workers as a single batch: a
+    path touched by more than one worker is a conflict (applied for none, reported);
+    non-conflicting paths get one combined confirmation, then are written and
+    diagnosed like apply_write. Snapshot is last-applied-wins, matching the
+    existing single-level /undo."""
+    if not changes:
+        return ""
+    if session.read_only:
+        return "\n(plan mode — worker changes not applied)"
+    by_path: dict[str, list] = {}
+    for ap, orig, final, idx in changes:
+        by_path.setdefault(ap, []).append((orig, final, idx))
+    to_apply, conflicts = [], []
+    for ap, group in by_path.items():
+        (conflicts if len(group) > 1 else to_apply).append((ap, group))
+
+    import difflib
+
+    previews = []
+    currents: dict[str, str] = {}
+    for ap, group in to_apply:
+        orig, final, _ = group[0]
+        cur = orig
+        try:
+            with open(ap, "r", errors="replace") as f:
+                cur = f.read()
+        except OSError:
+            pass
+        currents[ap] = cur
+        previews.append("\n".join(difflib.unified_diff(
+            cur.splitlines(), final.splitlines(), lineterm="", n=1,
+            fromfile=os.path.relpath(ap), tofile=os.path.relpath(ap))))
+
+    lines = []
+    if conflicts:
+        lines.append("conflict — not applied (multiple workers changed the same file): "
+                     + ", ".join(os.path.relpath(ap) for ap, _ in conflicts))
+    if not to_apply:
+        return "\n" + "\n".join(lines)
+
+    combined_preview = "\n\n".join(previews)
+    if not request_confirmation(session, task,
+            f"Apply {len(to_apply)} worker change(s)?", combined_preview):
+        return "\n" + "\n".join(lines + ["worker changes rejected by user"])
+
+    applied = []
+    for ap, group in to_apply:
+        _, final, _ = group[0]
+        pre = currents[ap]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            res = tools.do_write_file(ap, final, auto_yes=True)
+        if res.startswith("wrote"):
+            task.last_edit_snapshot = (ap, pre)
+            task.last_diff = combined_preview
+            res += diagnostics.summarize(ap)
+        applied.append(res)
+    lines.append(f"applied {len(to_apply)} worker change(s):")
+    lines.extend(applied)
+    return "\n" + "\n".join(lines)
+
+
 def _run_git(session: Session, task: Task, git_args: str, read_cap: int | None) -> str:
     """Read-only git runs immediately (and in plan mode); mutating git is
     confirmation-gated and refused in plan mode."""
@@ -516,8 +579,10 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": tc.name, "shown": shown}))
                 if tc.name == "delegate" and not is_local:
                     from . import subagents
-                    result = subagents.delegate(tc.arguments.get("tasks", []), provider, model,
-                                                read_cap=read_cap, on_event=on_event, cancel=task.cancel_flag)
+                    digest, changes = subagents.delegate(tc.arguments.get("tasks", []), provider, model,
+                                                read_cap=read_cap, on_event=on_event, cancel=task.cancel_flag,
+                                                read_only=session.read_only)
+                    result = digest + apply_worker_changes(session, task, changes)
                 else:
                     result = _dispatch_tool(session, task, tc.name, tc.arguments, read_cap)
                 on_event(AgentEvent(EventType.TOOL_CALL_RESULT, task.id, {"name": tc.name, "result": result}))

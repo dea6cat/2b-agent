@@ -27,7 +27,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
-from . import orchestrator, registry, theme
+from . import config, orchestrator, registry, theme
 from .commands import command_specs, dispatch_input
 from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
@@ -72,6 +72,44 @@ class ConfirmScreen(ModalScreen[bool]):
             self.dismiss(True)
         elif event.key in ("n", "escape"):
             self.dismiss(False)
+
+class ConnectScreen(ModalScreen[str | None]):
+    """Masked prompt for a provider API key, so it never lands in the log.
+    Returns the entered key, or None if cancelled."""
+    CSS = """
+    ConnectScreen { align: center middle; }
+    #box { width: 80%; max-width: 90; height: auto; border: round #8A7A45;
+           background: #C7C1AE; color: #454235; padding: 1 2; }
+    #btns { height: auto; padding-top: 1; align-horizontal: right; }
+    Button { margin-left: 2; }
+    """
+
+    def __init__(self, provider: str):
+        super().__init__()
+        self._provider = provider
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="box"):
+            yield Static(f"Paste your {self._provider} API key (hidden), then Enter:")
+            yield Input(password=True, id="key")
+            with Horizontal(id="btns"):
+                yield Button("Connect", variant="success", id="ok")
+                yield Button("Cancel", variant="error", id="cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#key", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip() or None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        key = self.query_one("#key", Input).value.strip()
+        self.dismiss(key if event.button.id == "ok" and key else None)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
+
 
 _SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -216,6 +254,18 @@ class TwoBApp(App):
     def enqueue_task(self, description: str):
         return self.session.add_task(description)
 
+    def begin_connect(self, provider: str) -> None:
+        """Collect a provider key in a masked modal, then save + re-detect."""
+        def _done(key, _p=provider):
+            if not key:
+                self.log_write(Text(f"Cancelled connecting {_p}.", style=self.c("faint")))
+                return
+            config.connect(_p, key)
+            self.registry = registry.build_registry()
+            self.log_write(Text(f"Connected {_p} ({config.mask(key)}). Saved for future sessions.",
+                                style=self.c("accent")))
+        self.push_screen(ConnectScreen(provider), _done)
+
     def log_write(self, renderable, classes: str = "") -> None:
         log = self.query_one("#log", VerticalScroll)
         log.mount(Static(renderable, classes=classes or None))
@@ -257,7 +307,9 @@ class TwoBApp(App):
         if sel is None:
             return
         inp = self.query_one("#input", Input)
-        if run and sel != "/model":               # /model opens a second-stage model menu
+        # These open a second-stage menu (model / provider), so fill rather than run.
+        opens_submenu = sel in ("/model", "/connect", "/login", "/disconnect")
+        if run and not opens_submenu:
             self._clear_palette()
             inp.value = ""
             self._submit(sel)
@@ -286,6 +338,9 @@ class TwoBApp(App):
                 if cmd == "model":                          # completing a model name
                     matches = [(f"/model {full}", "") for full in self._model_candidates()
                                if arg.lower() in full.lower()]
+                elif cmd in ("connect", "login", "disconnect"):   # completing a provider
+                    matches = [(f"/{cmd} {p}", "connected" if config.is_connected(p) else "")
+                               for p in config.PROVIDER_KEY_ENV if p.startswith(arg.lower())]
         self._pal = matches
         if self._pal_index >= len(matches):
             self._pal_index = 0
@@ -326,8 +381,16 @@ class TwoBApp(App):
             return
         self._submit(raw)
 
+    @staticmethod
+    def _echo_safe(raw: str) -> str:
+        # Never echo an inline API key (/connect <provider> <key>) into the log.
+        parts = raw.split()
+        if len(parts) >= 3 and parts[0] in ("/connect", "/login"):
+            return f"{parts[0]} {parts[1]} ••••••"
+        return raw
+
     def _submit(self, raw: str) -> None:
-        self.log_write(Text(f"› {raw}"), classes="user")
+        self.log_write(Text(f"› {self._echo_safe(raw)}"), classes="user")
         if raw.startswith("/"):
             dispatch_input(raw, self)
             return

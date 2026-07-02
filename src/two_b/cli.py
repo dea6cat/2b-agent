@@ -238,6 +238,10 @@ def main() -> None:
     parser.add_argument("task", nargs="?", help="An initial task to run before dropping into the session")
     args = parser.parse_args()
 
+    # Load any provider keys saved via /connect before we detect providers.
+    from . import config
+    config.load_into_env()
+
     console = Console()
 
     if args.list_models:

@@ -155,7 +155,12 @@ up automatically in `/models`:
 | Anthropic  | `ANTHROPIC_API_KEY`                         |
 | Google     | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)      |
 
-Switch anytime with `/model <name>`. A bare name works when it's unambiguous; otherwise use
+Or connect one from **inside** 2B — `/connect <provider>` prompts for the key with a hidden field
+and saves it to `~/.config/2b/keys.json` (`chmod 600`) so it's there next time; `/connect` on its own
+shows what's connected, and `/disconnect <provider>` removes a saved key. A key exported in your
+shell always takes precedence over a saved one.
+
+Switch models anytime with `/model <name>`. A bare name works when it's unambiguous; otherwise use
 `provider:model` (e.g. `/model anthropic:claude-sonnet-5`).
 
 ### Commands
@@ -165,6 +170,8 @@ Switch anytime with `/model <name>`. A bare name works when it's unambiguous; ot
 | `/help` | List commands |
 | `/model [name]` | Show or switch model — context is preserved |
 | `/models [filter]` | List available models, grouped by provider |
+| `/connect [provider] [key]` | Connect a provider (hidden key prompt); bare shows status |
+| `/disconnect <provider>` | Remove a saved provider key |
 | `/mode [normal\|accept\|plan]` | Set operating mode (or **Shift+Tab** to cycle) |
 | `/theme [system\|light\|dark]` | Switch color theme |
 | `/context` | Show estimated context usage (auto-compacts near the limit) |

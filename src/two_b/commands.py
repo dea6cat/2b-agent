@@ -5,7 +5,7 @@ import with cli.py.
 """
 import os
 
-from . import orchestrator, registry, tools
+from . import config, orchestrator, registry, tools
 from .conversation import Conversation, Message
 from .session import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, MODE_LABELS
 
@@ -93,6 +93,58 @@ def _model(rest, app):
     if active is not None:
         active.model_override = f"{provider.name}:{model}"
     app.ui.print(f"Model set to [bold]{provider.name}:{model}[/bold] (context preserved).")
+
+
+def _show_connections(app):
+    saved = config.saved_providers()
+    app.ui.print("[bold]Providers:[/bold]")
+    for p in config.PROVIDER_KEY_ENV:
+        label = "ollama (cloud)" if p == "ollama" else p
+        mark = "[green]connected[/green]" if config.is_connected(p) else "[dim]not connected[/dim]"
+        src = "  [dim](saved in 2B)[/dim]" if p in saved else ""
+        app.ui.print(f"  {label:<16} {mark}{src}")
+    app.ui.print("  [dim]/connect <provider> to add a key · /disconnect <provider> to remove.[/dim]")
+    app.ui.print("  [dim]Local Ollama needs no key; a key only enables Ollama Cloud.[/dim]")
+
+
+@command("connect", "login")
+def _connect(rest, app):
+    """Connect a provider by saving its API key: /connect <provider> [key]."""
+    parts = rest.split(maxsplit=1)
+    if not parts:
+        _show_connections(app)
+        return
+    provider = parts[0].lower()
+    if provider not in config.PROVIDER_KEY_ENV:
+        app.ui.print(f"[red]Unknown provider '{provider}'.[/red] Known: {', '.join(config.PROVIDER_KEY_ENV)}")
+        return
+    if len(parts) == 2 and parts[1].strip():             # key given inline
+        _apply_connect(app, provider, parts[1].strip())
+        return
+    if hasattr(app, "begin_connect"):                    # TUI: collect it in a masked modal
+        app.begin_connect(provider)
+    else:
+        app.ui.print(f"Usage: /connect {provider} <api-key>")
+
+
+def _apply_connect(app, provider, key):
+    config.connect(provider, key)
+    app.registry = registry.build_registry()             # re-detect with the new key
+    app.ui.print(f"Connected [bold]{provider}[/bold] ([dim]{config.mask(key)}[/dim]). Saved for future sessions.")
+
+
+@command("disconnect")
+def _disconnect(rest, app):
+    """Remove a saved provider key: /disconnect <provider>."""
+    provider = rest.strip().lower()
+    if provider not in config.PROVIDER_KEY_ENV:
+        app.ui.print(f"[red]Unknown provider '{provider}'.[/red] Known: {', '.join(config.PROVIDER_KEY_ENV)}")
+        return
+    if config.disconnect(provider):
+        app.registry = registry.build_registry()
+        app.ui.print(f"Disconnected [bold]{provider}[/bold] and removed its saved key.")
+    else:
+        app.ui.print(f"{provider} wasn't connected via 2B (a shell env var may still provide it).")
 
 
 @command("models")

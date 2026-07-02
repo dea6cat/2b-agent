@@ -1,0 +1,39 @@
+name: release
+
+# Publishes to PyPI when a version tag is pushed. Uses PyPI Trusted Publishing
+# (OIDC) — no API token or secret is stored anywhere. Configure the trusted
+# publisher once on PyPI (owner: dea6cat, repo: 2b-agent, workflow: release.yml,
+# environment: pypi) before the first tag.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  pypi:
+    name: build & publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write          # OIDC identity for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Guard — the tag must match the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(sed -n 's/^__version__ *= *"\(.*\)"/\1/p' src/two_b/__init__.py)"
+          echo "tag=$tag  package=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag v$tag does not match __version__ $ver — bump src/two_b/__init__.py to match before tagging"
+            exit 1
+          fi
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Publish to PyPI (trusted publishing)
+        run: uv publish

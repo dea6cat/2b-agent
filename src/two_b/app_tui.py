@@ -132,8 +132,11 @@ class TwoBApp(App):
     """
     BINDINGS = [
         Binding("tab", "palette_accept", "complete", priority=True, show=False),
+        Binding("down", "pal_down", "next suggestion", show=False),
+        Binding("up", "pal_up", "prev suggestion", show=False),
         Binding("shift+tab", "cycle_mode", "cycle mode", priority=True, show=False),
         Binding("ctrl+b", "background", "background task", show=False),
+        Binding("ctrl+y", "copy", "copy last reply", show=False),
         Binding("escape", "interrupt", "interrupt", show=False),
         Binding("ctrl+d", "quit", "quit", show=False),
     ]
@@ -153,8 +156,10 @@ class TwoBApp(App):
         self._stream_widget = None                # the in-flow Static currently being streamed into
         self._confirm_open = False                # a ConfirmScreen modal is currently shown
         self._pal: list[tuple[str, str]] = []     # current command-palette matches
+        self._pal_index = 0                       # highlighted match (↑/↓ navigation)
         self._pending_tool = None                 # (name, args) between a tool START and its RESULT
         self._tool_widgets: list = []             # this task's tool-action widgets (for └ on the last)
+        self._last_reply = ""                     # most-recent model reply, for /copy
 
     # ---- theming ----
     def get_css_variables(self) -> dict[str, str]:
@@ -218,17 +223,47 @@ class TwoBApp(App):
 
     # ---- input + command palette ----
     def on_input_changed(self, event: Input.Changed) -> None:
+        self._pal_index = 0                        # a new filter resets the highlight
         self._update_palette(event.value)
 
     def action_palette_accept(self) -> None:
-        """Tab: accept the top palette match into the input (else no-op)."""
+        """Tab: fill the highlighted match into the input (no run)."""
+        self._accept_palette(run=False)
+
+    def action_pal_down(self) -> None:
+        if self._pal:
+            self._pal_index = (self._pal_index + 1) % len(self._pal)
+            self._render_palette()
+
+    def action_pal_up(self) -> None:
+        if self._pal:
+            self._pal_index = (self._pal_index - 1) % len(self._pal)
+            self._render_palette()
+
+    def _palette_selected(self) -> str | None:
         if not self._pal:
+            return None
+        return self._pal[self._pal_index % len(self._pal)][0]
+
+    def _clear_palette(self) -> None:
+        self._pal = []
+        self._pal_index = 0
+        self.query_one("#palette", Static).update("")
+
+    def _accept_palette(self, run: bool) -> None:
+        """Take the highlighted match. `/model` fills so you can pick a model next;
+        anything else runs when `run` (Enter), or fills when not (Tab)."""
+        sel = self._palette_selected()
+        if sel is None:
             return
         inp = self.query_one("#input", Input)
-        inp.value = self._pal[0][0] + " "
+        if run and sel != "/model":               # /model opens a second-stage model menu
+            self._clear_palette()
+            inp.value = ""
+            self._submit(sel)
+            return
+        inp.value = sel + " "                      # fill; on_input_changed recomputes the menu
         inp.cursor_position = len(inp.value)
-        self._pal = []
-        self.query_one("#palette", Static).update("")
 
     def _model_candidates(self) -> list[str]:
         out = []
@@ -240,7 +275,7 @@ class TwoBApp(App):
         return out
 
     def _update_palette(self, text: str) -> None:
-        pal = self.query_one("#palette", Static)
+        """Recompute the matches for the current input, then render."""
         matches: list[tuple[str, str]] = []
         if text.startswith("/"):
             body = text[1:]
@@ -252,28 +287,46 @@ class TwoBApp(App):
                     matches = [(f"/model {full}", "") for full in self._model_candidates()
                                if arg.lower() in full.lower()]
         self._pal = matches
+        if self._pal_index >= len(matches):
+            self._pal_index = 0
+        self._render_palette()
+
+    def _render_palette(self) -> None:
+        pal = self.query_one("#palette", Static)
+        matches = self._pal
         if not matches:
             pal.update("")
             return
         accent, dim, faint = self.c("accent"), self.c("dim"), self.c("faint")
+        window = 8
+        top = 0 if self._pal_index < window else self._pal_index - window + 1
         lines = []
-        for i, (txt, doc) in enumerate(matches[:8]):
+        if top > 0:
+            lines.append(f"  [{faint}]↑ +{top} more[/{faint}]")
+        for i in range(top, min(top + window, len(matches))):
+            txt, doc = matches[i]
             meta = f"  [{dim}]{doc}[/{dim}]" if doc else ""
-            if i == 0:  # highlight the tab-target
-                lines.append(f"[reverse {accent}] {txt} [/reverse {accent}]{meta}   [{faint}](tab)[/{faint}]")
+            if i == self._pal_index:               # the ↑/↓ · enter target
+                lines.append(f"[reverse {accent}] {txt} [/reverse {accent}]{meta}   [{faint}](↑↓ · enter)[/{faint}]")
             else:
                 lines.append(f"  [{accent}]{txt}[/{accent}]{meta}")
-        if len(matches) > 8:
-            lines.append(f"  [{faint}]… +{len(matches) - 8} more[/{faint}]")
+        remaining = len(matches) - min(top + window, len(matches))
+        if remaining > 0:
+            lines.append(f"  [{faint}]↓ +{remaining} more[/{faint}]")
         pal.update("\n".join(lines))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if self._pal:                              # menu open → Enter selects the highlight
+            self._accept_palette(run=True)
+            return
         raw = event.value.strip()
         self.query_one("#input", Input).value = ""
-        self._pal = []
-        self.query_one("#palette", Static).update("")
+        self._clear_palette()
         if not raw:
             return
+        self._submit(raw)
+
+    def _submit(self, raw: str) -> None:
         self.log_write(Text(f"› {raw}"), classes="user")
         if raw.startswith("/"):
             dispatch_input(raw, self)
@@ -316,6 +369,30 @@ class TwoBApp(App):
     def action_cycle_mode(self) -> None:
         self.session.cycle_mode()
         self._render_mode()
+
+    def action_copy(self) -> None:
+        self.copy_last()
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Prefer pbcopy on macOS (Terminal.app ignores OSC-52), else fall back to
+        Textual's OSC-52 path. This also backs the built-in drag-to-select copy:
+        selecting text with the mouse and pressing ctrl+c routes here too."""
+        import subprocess
+        try:
+            subprocess.run(["pbcopy"], input=text.encode(), check=True)
+            return
+        except Exception:
+            pass
+        super().copy_to_clipboard(text)
+
+    def copy_last(self) -> None:
+        """Copy the last model reply to the clipboard (for /copy, ctrl+y)."""
+        text = (self._last_reply or "").strip()
+        if not text:
+            self.log_write(Text("Nothing to copy yet.", style=self.c("faint")))
+            return
+        self.copy_to_clipboard(text)
+        self.log_write(Text(f"Copied last reply to clipboard ({len(text)} chars).", style=self.c("accent")))
 
     def _render_mode(self) -> None:
         mode = self.session.mode
@@ -370,6 +447,7 @@ class TwoBApp(App):
         # badly mid-stream). Now that it's complete, re-render it as Markdown so
         # headings, bold, code, and tables format properly.
         if self._stream_widget is not None and self._stream_text.strip():
+            self._last_reply = self._stream_text
             try:
                 self._stream_widget.update(Markdown(self._stream_text))
             except Exception:
@@ -400,6 +478,7 @@ class TwoBApp(App):
             elif t == EventType.ASSISTANT_TEXT:
                 self._commit_stream()
                 self._close_tool_group()
+                self._last_reply = ev.payload["text"]
                 self.log_write(Markdown(ev.payload["text"]), classes="reply")
             elif t == EventType.LOG:
                 self._commit_stream()

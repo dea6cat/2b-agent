@@ -1,7 +1,7 @@
 [project]
 name = "2b"
 version = "0.1.0"
-description = "A local-first coding agent CLI that keeps small local models focused instead of hallucinating."
+description = "A local-first coding agent that keeps small local models focused instead of hallucinating."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

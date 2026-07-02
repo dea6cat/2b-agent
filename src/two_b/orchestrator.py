@@ -65,8 +65,10 @@ BASE_SYSTEM_PROMPT = (
     "search_files to find where something is defined or used instead of guessing paths. "
     "For changes to existing files, prefer edit_file (an exact old_text/new_text "
     "replacement) over write_file — it's faster and safer, especially on large files. "
-    "Only use write_file for new files or small existing ones. When finished, reply with "
-    "a plain-text final answer and make no further tool calls."
+    "Only use write_file for new files or small existing ones. Paths may be relative to the "
+    "working directory or absolute — pass them through unchanged. If a tool returns an error, "
+    "report it plainly; never substitute a different file or invent a file's location or contents. "
+    "When finished, reply with a plain-text final answer and make no further tool calls."
 )
 SYSTEM_PROMPT = BASE_SYSTEM_PROMPT + planparse.PLAN_PROMPT
 
@@ -251,7 +253,7 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
 def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text: str) -> str:
     full = tools._safe_path(path)
     if full is None:
-        return "error: path escapes working directory"
+        return "error: empty or invalid path"
     if not os.path.isfile(full):
         return f"error: no such file: {path}"
     with open(full, "r", errors="replace") as f:

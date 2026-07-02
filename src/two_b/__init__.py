@@ -1,4 +1,4 @@
-"""2B — a local-first coding agent CLI.
+"""2B — a local-first coding agent.
 
 Built on one hard-won lesson: small local models stay reliable only when the
 host keeps the model's world simple — a small, native tool schema over the

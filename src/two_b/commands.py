@@ -207,7 +207,7 @@ def _undo(rest, app):
     path, pre = task.last_edit_snapshot
     full = tools._safe_path(path)
     if full is None:
-        app.ui.print("[red]Cannot undo: path escapes working directory.[/red]")
+        app.ui.print("[red]Cannot undo: empty or invalid path.[/red]")
         return
     if pre is None:
         # It was a newly created file — undo means remove it.
@@ -282,6 +282,15 @@ def _context(rest, app):
     at = int(orchestrator.COMPACT_AT * 100)
     app.ui.print(f"Context: ~[bold]{used}[/bold] / {budget} tokens ([bold]{pct}%[/bold]). "
                  f"Auto-compacts at {at}%.")
+
+
+@command("copy", "cp")
+def _copy(rest, app):
+    """Copy the last model reply to the clipboard (or hold Option and drag to select)."""
+    if hasattr(app, "copy_last"):
+        app.copy_last()
+    else:
+        app.ui.print("In --classic mode, use your terminal's native text selection to copy.")
 
 
 @command("clear")

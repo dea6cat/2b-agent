@@ -1,2 +1,208 @@
-# 2B CLI 
-This llm Agent was created based on necessity for one that could simply use local models without making them hallucinate and keep them focus
+# 2B
+
+A local-first coding agent for the terminal. It runs your own models over Ollama's
+native protocol, keeps them focused instead of hallucinating, and gives you a full-screen
+TUI — streaming replies, a live plan checklist, narrated tool actions — without ever routing
+your local model through a translation layer that would confuse it.
+
+I named it **2B**, after NieR: Automata. It's built to keep working when the power and the
+internet don't — I live somewhere the grid isn't a guarantee, and I wanted a coding agent that
+doesn't fall apart the moment I'm offline.
+
+---
+
+## Why I built it
+
+I kept being told that small models — Nemotron 3 Nano 4B, `gpt-oss:20b`, the Qwen family — were
+"good enough" for agentic coding. On paper they were. In practice, every off-the-shelf harness I
+tried broke them:
+
+- **opencode** made `gpt-oss` invent tool names that didn't exist and emit fake `<command>` tags as
+  plain text.
+- **Cline**, **Goose**, **Continue**, **OpenHands** each failed in their own way — malformed tool
+  schemas, reasoning collapse, the model narrating tool calls instead of making them.
+
+The models weren't the problem. The harnesses were. Nearly all of them talk to a local model
+through a generic **OpenAI-compatible `/v1` shim** and pile abstraction on top of it. That shim
+measurably degrades a small model's tool selection, and the extra complexity buries whatever
+capability the model actually has.
+
+The one thing that worked cleanly was a ~350-line script I wrote that talked to Ollama's **native
+`/api/chat`** endpoint with a tiny, fixed set of five tools. So I grew that prototype into a real,
+shareable tool. That's 2B.
+
+**The core rule, and the whole point:** all complexity lives on the *host* side. The model's world
+never changes — the same five tools, the same native wire format for whatever provider is active, no
+generic shim. Everything you see below — the TUI, the plan checklist, task management, model
+switching, auto-compaction — is something 2B renders *around* the tool loop, never a new thing the
+model has to understand.
+
+---
+
+## What it does
+
+- **Five tools, and only five.** `list_files`, `read_file`, `search_files`, `edit_file`,
+  `write_file`. That small, concrete surface is exactly what keeps a small model reliable. It
+  explores before it edits — searching for where something lives instead of guessing paths — and
+  prefers exact-snippet edits over rewriting whole files.
+- **Native protocols, never a shim.** Local Ollama models get Ollama's own `/api/chat` with NDJSON
+  streaming. Each cloud provider gets its own native format. Nothing is translated through a
+  lowest-common-denominator layer.
+- **Streaming, full-screen TUI.** A scrolling conversation, a framed input box, a live status line
+  with a spinner, elapsed time, and — for local models — a RAM/GPU readout pulled from Ollama.
+- **Narrated tool actions.** Instead of a wall of raw `read_file {...}`, you see what it's doing in
+  plain language, tied together with a tree gutter and a ✓/✗ per step:
+  ```
+  ├ ✓ Searching for "MemoryScopeLevel" in lib
+  ├ ✓ Reading lib/memory/memory_store.dart
+  └ ✓ Editing lib/memory/memory_store.dart
+  ```
+- **A live plan checklist.** The model writes a short numbered plan before its first tool call; 2B
+  parses it and renders it as a checklist that advances (`□` pending, `■` active, `✓` done) as the
+  work progresses. Purely cosmetic — a wrong guess never breaks anything.
+- **Many providers, one conversation.** Ollama (local and cloud), OpenAI, OpenRouter, Mistral,
+  NVIDIA, Anthropic, and Google Gemini. 2B keeps history in a provider-agnostic form and
+  re-serializes it fresh for whoever's active — so you can switch models *mid-task* with `/model`
+  and keep every bit of context. Start a task on a local Qwen, hand it to Claude when it gets hard,
+  keep going.
+- **Operating modes**, cycled with **Shift+Tab** or set with `/mode`:
+  - **normal** — every write/edit asks first.
+  - **accept edits** — writes apply automatically.
+  - **plan mode** — read-only; `edit_file`/`write_file` are refused and the model returns a plan
+    instead of touching disk.
+- **Auto-compaction.** When a conversation nears the model's context window — which happens fast on
+  small local windows — 2B folds the older turns into a summary and keeps going uninterrupted,
+  instead of hitting the wall. It cuts on a safe boundary so nothing breaks, and shows you
+  "Compacting conversation…" while it does it.
+- **Themes.** `/theme system` (default — transparent, uses your terminal's own background),
+  `/theme light` (a warm parchment palette), `/theme dark` (a dimmed version). Switches live.
+- **Copy that actually works.** Drag to select any text and press **Ctrl+C**, or **Ctrl+Y** / `/copy`
+  to grab the whole last reply. On macOS this goes through `pbcopy`, so it lands on your clipboard
+  even in Terminal.app (which ignores the escape sequence most TUIs rely on).
+- **Multiple tasks.** Queue tasks, background the running one with **Ctrl+B**, foreground it later
+  with `/fg`. A backgrounded task pauses when it needs to write and waits for you.
+- **Undo.** `/undo` reverts the last write or edit — one level, but it's there.
+
+---
+
+## Install
+
+2B is a Python package. The simplest way to get the `2b` command:
+
+```bash
+uv tool install git+https://github.com/dea6cat/2B
+```
+
+Or from a local clone:
+
+```bash
+git clone https://github.com/dea6cat/2B
+uv tool install ./2B
+```
+
+You'll want [Ollama](https://ollama.com) running with at least one model pulled — I default to
+`qwen3.5:9b`, which is a good balance on an 18 GB machine:
+
+```bash
+ollama pull qwen3.5:9b
+```
+
+---
+
+## Use it
+
+```bash
+2b                       # start in the current directory, autodetects a local model
+2b "add a docstring to lib/main.dart"   # run one task, then drop into the session
+2b --model qwen3.5:9b    # pin a model
+2b --list-models         # what's available across configured providers
+```
+
+Then just type what you want done. Type `/` to see the commands.
+
+### Providers
+
+Local Ollama needs nothing. For anything else, set the matching environment variable and it shows
+up automatically in `/models`:
+
+| Provider   | Environment variable                        |
+| ---------- | ------------------------------------------- |
+| Ollama     | `OLLAMA_API_BASE` (or `OLLAMA_HOST`)        |
+| Ollama Cloud | `OLLAMA_API_KEY`                          |
+| OpenAI     | `OPENAI_API_KEY`                            |
+| OpenRouter | `OPENROUTER_API_KEY`                        |
+| Mistral    | `MISTRAL_API_KEY`                           |
+| NVIDIA     | `NVIDIA_API_KEY`                            |
+| Anthropic  | `ANTHROPIC_API_KEY`                         |
+| Google     | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)      |
+
+Switch anytime with `/model <name>`. A bare name works when it's unambiguous; otherwise use
+`provider:model` (e.g. `/model anthropic:claude-sonnet-5`).
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `/help` | List commands |
+| `/model [name]` | Show or switch model — context is preserved |
+| `/models [filter]` | List available models, grouped by provider |
+| `/mode [normal\|accept\|plan]` | Set operating mode (or **Shift+Tab** to cycle) |
+| `/theme [system\|light\|dark]` | Switch color theme |
+| `/context` | Show estimated context usage (auto-compacts near the limit) |
+| `/copy` | Copy the last reply to the clipboard (**Ctrl+Y**) |
+| `/task <desc>` | Queue a task |
+| `/tasks` | List tasks and their status |
+| `/fg <id>` | Foreground a backgrounded task |
+| `/yes` | Toggle accept-edits mode |
+| `/undo` | Revert the last write/edit |
+| `/diff` | Re-show the last diff |
+| `/add <file>` | Pre-load a file into the current task's context |
+| `/clear` | Reset the current task's history |
+| `/quit` | Exit |
+
+### Keyboard
+
+| Key | Action |
+| --- | --- |
+| **Shift+Tab** | Cycle operating mode |
+| **Ctrl+B** | Background the running task |
+| **Ctrl+Y** | Copy the last reply |
+| **Ctrl+C** | Copy the current mouse selection |
+| **Esc** | Interrupt the running task |
+| **Ctrl+D** | Quit |
+| **Tab** | Accept the top `/`-command suggestion |
+
+### Configuration
+
+- `TWOB_CONTEXT_TOKENS` — override the local-model context budget (in tokens) that triggers
+  auto-compaction. Set it to match your Ollama `num_ctx` if you've raised it.
+
+---
+
+## Honest caveats
+
+- **It reads and writes wherever you point it.** 2B resolves absolute paths and paths outside the
+  working directory on purpose — it's a personal tool for your machine. Writes are still confirmed
+  in normal mode, and plan mode refuses them entirely.
+- **Switching to a stronger model mid-task hands it a tool-call history it didn't make.** For these
+  five simple tools that's low-risk (the wire format is unambiguously the new provider's own; only
+  the *choices* inside came from a weaker model), but you may see mild "why did I read that file"
+  moments. It is *not* the shim-degradation failure that sank the other harnesses.
+- **It's a full-screen TUI.** That means it lives in the terminal's alternate screen, so a single
+  mouse drag selects what's on screen, not scrolled-off history. For a classic inline REPL, run
+  `2b --classic`.
+
+---
+
+## How it's built
+
+- **Python, standard library first.** The only real dependencies are `rich`, `prompt_toolkit`, and
+  `textual`. Every provider talks over `urllib` — no per-provider SDKs.
+- **A canonical conversation model** that each provider serializes fresh on every request. That
+  re-derivation is exactly what makes switching models mid-task safe.
+- **One worker thread per task**, emitting events into a queue the UI thread drains and renders — so
+  the tool code stays untouched off the main thread and one thread owns the terminal.
+- The five-tool schema is **frozen**. It's what makes small models reliable, and it isn't up for
+  redesign.
+
+Built for local models, kept on task.

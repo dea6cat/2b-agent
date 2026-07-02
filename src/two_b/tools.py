@@ -101,10 +101,13 @@ TOOLS = [
 
 
 def _safe_path(path):
-    full = os.path.abspath(path)
-    if not full.startswith(os.getcwd()):
+    """Resolve a path to an absolute path — absolute inputs as-is, relative ones
+    against the working directory, with ~ expanded. 2B is a personal local tool,
+    so you can point it at files outside the working directory (writes are still
+    confirmed via the UI). Returns None only for an empty/unusable path."""
+    if not path or not str(path).strip():
         return None
-    return full
+    return os.path.abspath(os.path.expanduser(str(path)))
 
 
 def _should_skip_dir(name):
@@ -129,7 +132,7 @@ def _is_probably_binary(path):
 def do_list_files(path):
     root = _safe_path(path)
     if root is None:
-        return "error: path escapes working directory"
+        return "error: empty or invalid path"
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if not _should_skip_dir(d)]
@@ -144,7 +147,7 @@ def do_list_files(path):
 def do_read_file(path):
     full = _safe_path(path)
     if full is None:
-        return "error: path escapes working directory"
+        return "error: empty or invalid path"
     if not os.path.isfile(full):
         return f"error: no such file: {path}"
     if os.path.getsize(full) > MAX_FILE_BYTES:
@@ -158,7 +161,7 @@ def do_read_file(path):
 def do_write_file(path, content, auto_yes):
     full = _safe_path(path)
     if full is None:
-        return "error: path escapes working directory"
+        return "error: empty or invalid path"
     if content and not content.endswith("\n"):
         content += "\n"
     existing_lines = 0
@@ -177,7 +180,7 @@ def do_write_file(path, content, auto_yes):
 def do_search_files(query, path):
     root = _safe_path(path)
     if root is None:
-        return "error: path escapes working directory"
+        return "error: empty or invalid path"
     matches = []
     overflow = False
     for dirpath, dirnames, filenames in os.walk(root):
@@ -216,7 +219,7 @@ def do_search_files(query, path):
 def do_edit_file(path, old_text, new_text, auto_yes):
     full = _safe_path(path)
     if full is None:
-        return "error: path escapes working directory"
+        return "error: empty or invalid path"
     if not os.path.isfile(full):
         return f"error: no such file: {path}"
     with open(full, "r", errors="replace") as f:

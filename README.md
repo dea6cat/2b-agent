@@ -92,6 +92,14 @@ model has to understand.
 - **Runs things — split by model.** Local models get `run_git` (git only, never a raw shell — no
   chaining/injection); cloud models get a full `run_command` shell (tests, build, git). Read-only git
   runs freely; anything that mutates is confirmation-gated and refused in plan mode.
+- **Delegates read-only exploration (cloud).** On the cloud path the model can `delegate` one or
+  more investigations to run in parallel, each in its own isolated context, and get back short
+  findings — so a big search-and-read never bloats the main conversation. Each sub-agent can only
+  `list_files`, `read_file`, and `search_files`; local models keep their frozen five tools
+  untouched, and delegation is cloud-only for now.
+- **Cheaper multi-turn cloud sessions.** Anthropic requests mark the system prompt and tool
+  definitions as cacheable, so a long conversation pays full price for that stable prefix once
+  instead of on every turn.
 - **MCP tools, curated.** Pull in tools from MCP servers (dart, mempalace, …) — but **per tool**, not
   wholesale, because flooding a small model with tools is exactly what breaks it. You enable a server
   and pick which of its tools the model sees (`/mcp`); local models are capped to a few so their

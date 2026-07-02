@@ -1,7 +1,7 @@
 #!/bin/sh
-# 2B installer — https://github.com/dea6cat/2B
+# 2B installer — https://github.com/dea6cat/2b-agent
 #
-#   curl -fsSL https://raw.githubusercontent.com/dea6cat/2B/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/dea6cat/2b-agent/main/install.sh | sh
 #
 # Installs uv (if missing) and the `2b` command, then offers to set up local
 # models: an optional clean-install of other agentic tools, a hardware grade to
@@ -17,7 +17,7 @@
 #   --no-models         install only uv + 2b, no model setup
 set -u
 
-REPO="git+https://github.com/dea6cat/2B"
+REPO="git+https://github.com/dea6cat/2b-agent"
 OLLAMA_HOST="${OLLAMA_API_BASE:-http://localhost:11434}"
 
 ASSUME_YES=0
@@ -181,7 +181,7 @@ if [ "$WANT_MODELS" = "no" ]; then
 elif [ "$INTERACTIVE" -ne 1 ] && [ "$WANT_MODELS" != "list" ] && [ "$ASSUME_YES" -ne 1 ]; then
   log "No terminal detected — installed uv + 2b only."
   info "For the guided model setup, run it interactively:"
-  info "  sh -c \"\$(curl -fsSL https://raw.githubusercontent.com/dea6cat/2B/main/install.sh)\""
+  info "  sh -c \"\$(curl -fsSL https://raw.githubusercontent.com/dea6cat/2b-agent/main/install.sh)\""
   SELECTED=""
 else
   # --- machine grade -------------------------------------------------------

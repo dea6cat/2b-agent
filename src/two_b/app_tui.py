@@ -238,7 +238,7 @@ class TwoBApp(App):
         yield Static("", id="plan")
         yield Static("", id="palette")
         inp = Input(placeholder="Type a task, or / for commands", id="input")
-        inp.border_title = "2B"
+        inp.border_title = "2B Agent"
         yield inp
         yield Static("", id="mode")
         yield Static("", id="status")
@@ -672,7 +672,7 @@ class TwoBApp(App):
         cwd = self.session.cwd
         path = "~" + cwd[len(home):] if cwd.startswith(home) else cwd
         t = Text()
-        t.append("2B", style=f"bold {self.c('ink')}")
+        t.append("2B Agent", style=f"bold {self.c('ink')}")
         t.append(f"  v{__version__}   ", style=self.c("dim"))
         t.append(self.session.default_model, style=self.c("accent"))
         if self._ctx_label:

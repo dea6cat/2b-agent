@@ -26,7 +26,7 @@ def _abbrev_cwd(cwd: str) -> str:
 
 def render(console: Console, model: str, cwd: str) -> None:
     name = Text()
-    name.append("2B", style=f"bold {CREAM}")
+    name.append("2B Agent", style=f"bold {CREAM}")
     name.append(f"  v{__version__}", style=DIM)
 
     meta = Text()

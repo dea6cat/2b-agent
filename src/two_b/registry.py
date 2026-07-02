@@ -17,7 +17,7 @@ from .providers.openai_compat import OpenAICompatProvider
 _OPENAI_COMPAT = [
     ("openai", "https://api.openai.com/v1", "OPENAI_API_KEY", True, [], {}),
     ("openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", True, [],
-     {"HTTP-Referer": "https://github.com/dea6cat/2B", "X-Title": "2B"}),
+     {"HTTP-Referer": "https://github.com/dea6cat/2b-agent", "X-Title": "2B Agent"}),
     ("mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", True,
      ["mistral-large-latest", "devstral-small-latest", "codestral-latest"], {}),
     ("nvidia", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", True, [], {}),

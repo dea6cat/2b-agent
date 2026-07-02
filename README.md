@@ -121,7 +121,7 @@ model has to understand.
 One line — paste it in your terminal:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dea6cat/2B/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/dea6cat/2b-agent/main/install.sh | sh
 ```
 
 It installs [`uv`](https://docs.astral.sh/uv/) if you don't have it, installs the `2b` command,
@@ -146,7 +146,7 @@ got. Your existing setup is left untouched.
 Prefer to do it by hand? If you already have `uv`:
 
 ```bash
-uv tool install git+https://github.com/dea6cat/2B
+uv tool install git+https://github.com/dea6cat/2b-agent
 ollama pull qwen3.5:9b        # my default — a good balance on an 18 GB machine
 ```
 

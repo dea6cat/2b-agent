@@ -47,3 +47,30 @@ def _explorer_specs():
     from .toolspec import TOOL_SPECS
     keep = {"list_files", "read_file", "search_files"}
     return [s for s in TOOL_SPECS if s.name in keep]
+
+
+MAX_PARALLEL = 4
+
+
+def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None) -> str:
+    tasks = [t for t in (tasks or []) if isinstance(t, dict) and t.get("goal")]
+    if not tasks:
+        return "error: delegate needs at least one {role, goal} task"
+
+    def _one(t):
+        role, goal = (t.get("role") or "explore"), t["goal"]
+        if role == "work":
+            return role, goal, "(worker delegation is not enabled yet — Phase 2)"
+        try:
+            return role, goal, run_explorer(goal, provider, model, read_cap=read_cap, cancel=cancel)
+        except Exception as e:  # a subagent failing must not kill the batch
+            return role, goal, f"(explorer error: {str(e)[:200]})"
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL) as ex:
+        for r in ex.map(_one, tasks):
+            results.append(r)
+    lines = [f"## delegate results ({len(results)} task(s))"]
+    for i, (role, goal, out) in enumerate(results, 1):
+        lines.append(f"\n### [{i}] {role}: {goal}\n{out}")
+    return "\n".join(lines)

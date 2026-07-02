@@ -26,3 +26,23 @@ class RunExplorer(unittest.TestCase):
                 return ProviderResponse(message=next(calls), raw={})
         out = subagents.run_explorer("find Widget", FakeProvider(), "m")
         self.assertEqual(out, "Widget is defined in a.py:1")
+
+
+class Delegate(unittest.TestCase):
+    def setUp(self):
+        self._orig_run_explorer = subagents.run_explorer
+
+    def tearDown(self):
+        subagents.run_explorer = self._orig_run_explorer
+
+    def test_digest_has_one_section_per_task(self):
+        subagents.run_explorer = lambda goal, *a, **k: f"found: {goal}"   # stub
+        out = subagents.delegate(
+            [{"role":"explore","goal":"A"}, {"role":"explore","goal":"B"}],
+            provider=None, model="m")
+        self.assertIn("A", out); self.assertIn("B", out)
+        self.assertIn("found: A", out); self.assertIn("found: B", out)
+
+    def test_work_role_stubbed(self):
+        out = subagents.delegate([{"role":"work","goal":"edit x"}], provider=None, model="m")
+        self.assertIn("not enabled yet", out)

@@ -151,3 +151,48 @@ class _WorkerFS:
     def changes(self):
         return [(ap, self._orig[ap], self._pending[ap])
                 for ap in self._pending if self._pending[ap] != self._orig[ap]]
+
+
+WORKER_PROMPT = (
+    "You are a coding worker. Investigate with list_files/read_file/search_files, then make "
+    "the change with edit_file/write_file. Your edits are captured and applied by the caller "
+    "after review — read_file reflects your own pending edits, so you can build on them. You "
+    "cannot run commands. When done, STOP and reply with a short report of what you changed and why."
+)
+
+
+def _worker_specs():
+    from .toolspec import TOOL_SPECS
+    keep = {"list_files", "read_file", "search_files", "edit_file", "write_file"}
+    return [s for s in TOOL_SPECS if s.name in keep]
+
+
+def _worker_dispatch(fs, name, args, read_cap):
+    if name == "list_files":
+        return tools.do_list_files(args.get("path", "."), max_chars=read_cap)
+    if name == "search_files":
+        return tools.do_search_files(args["query"], args.get("path", "."))
+    if name == "read_file":
+        return fs.read(args["path"])
+    if name == "edit_file":
+        return fs.edit(args["path"], args["old_text"], args["new_text"])
+    if name == "write_file":
+        return fs.write(args["path"], args["content"])
+    return f"error: '{name}' is not available to a worker"
+
+
+def run_worker(goal, provider, model, read_cap=None, max_turns=12, cancel=None):
+    fs = _WorkerFS()
+    conv = Conversation(system_prompt=WORKER_PROMPT)
+    conv.append(Message.user(goal))
+    specs = tuple(_worker_specs())
+    for _ in range(max_turns):
+        if cancel is not None and cancel.is_set():
+            return "worker cancelled", fs.changes()
+        msg = provider.stream(conv, model, specs, lambda _c: None).message
+        conv.append(msg)
+        if not msg.tool_calls:
+            return (msg.text or "").strip() or "(worker produced no report)", fs.changes()
+        conv.append(Message.results([ToolResult(tool_call_id=tc.id,
+            content=_worker_dispatch(fs, tc.name, tc.arguments, read_cap)) for tc in msg.tool_calls]))
+    return "(worker hit its turn limit)", fs.changes()

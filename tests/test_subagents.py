@@ -100,3 +100,23 @@ class WorkerFS(unittest.TestCase):
     def test_noop_write_not_a_change(self):
         p = self._file("same\n"); fs = subagents._WorkerFS(); fs.write(p, "same\n")
         self.assertEqual(fs.changes(), [])
+
+
+class RunWorker(unittest.TestCase):
+    def test_captures_edit_and_returns_report(self):
+        import tempfile
+        from two_b.conversation import Message, ToolCall
+        p = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False); p.write("v = 1\n"); p.close()
+        seq = iter([
+            Message.assistant(tool_calls=[ToolCall.new("edit_file", {"path": p.name, "old_text":"v = 1","new_text":"v = 2"})]),
+            Message.assistant(text="changed v to 2"),
+        ])
+        class FP:
+            name="anthropic"
+            def stream(self, conv, model, tools_, on_text):
+                from two_b.providers.base import ProviderResponse
+                return ProviderResponse(message=next(seq), raw={})
+        report, changes = subagents.run_worker("bump v", FP(), "m")
+        self.assertEqual(report, "changed v to 2")
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0][2], "v = 2\n")

@@ -1,6 +1,6 @@
 [project]
 name = "2b-agent"
-version = "0.2.0"
+dynamic = ["version"]                    # single source of truth: two_b.__version__
 description = "A local-first coding agent that keeps small local models focused instead of hallucinating."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,6 +18,9 @@ dependencies = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/two_b/__init__.py"           # reads __version__ — bump it in one place per release
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/two_b"]

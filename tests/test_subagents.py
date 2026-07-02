@@ -76,3 +76,27 @@ class Delegate(unittest.TestCase):
             subagents.DELEGATE_TIMEOUT = orig
         self.assertFalse(parent.is_set())          # parent task must NOT be cancelled
         self.assertIn("(timed out)", out)
+
+
+class WorkerFS(unittest.TestCase):
+    def _file(self, text):
+        f = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False); f.write(text); f.close(); return f.name
+    def test_edit_then_edit_stacks(self):
+        p = self._file("a = 1\nb = 2\n"); fs = subagents._WorkerFS()
+        self.assertIn("recorded", fs.edit(p, "a = 1", "a = 9"))
+        self.assertIn("recorded", fs.edit(p, "b = 2", "b = 8"))   # second edit sees the first
+        (path, orig, final), = fs.changes()
+        self.assertEqual(orig, "a = 1\nb = 2\n"); self.assertEqual(final, "a = 9\nb = 8\n")
+    def test_read_sees_pending(self):
+        p = self._file("x = 1\n"); fs = subagents._WorkerFS(); fs.edit(p, "x = 1", "x = 2")
+        self.assertIn("x = 2", fs.read(p))
+    def test_failed_edit_records_nothing(self):
+        p = self._file("x = 1\n"); fs = subagents._WorkerFS()
+        self.assertIn("error", fs.edit(p, "nope", "y"))
+        self.assertEqual(fs.changes(), [])
+    def test_write_then_change_detected(self):
+        p = self._file("old\n"); fs = subagents._WorkerFS(); fs.write(p, "new\n")
+        (path, orig, final), = fs.changes(); self.assertEqual((orig, final), ("old\n", "new\n"))
+    def test_noop_write_not_a_change(self):
+        p = self._file("same\n"); fs = subagents._WorkerFS(); fs.write(p, "same\n")
+        self.assertEqual(fs.changes(), [])

@@ -3,6 +3,7 @@ tool. Each runs in its own Conversation with only the read tools and returns a d
 findings report — heavy file reading happens here and never enters the parent context."""
 from __future__ import annotations
 import concurrent.futures
+import os
 import threading
 from . import tools
 from .conversation import Conversation, Message, ToolResult
@@ -108,3 +109,45 @@ def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None) 
                 out = out[:_MAX_SECTION] + " …[truncated]"
         lines.append(f"\n### [{i}] {role}: {goal}\n{out}")
     return "\n".join(lines)
+
+
+class _WorkerFS:
+    """In-memory file state for a worker: reads see the worker's own pending edits,
+    edits validate against that virtual content via tools.plan_edit but never write to
+    disk. `changes()` yields the final desired content per touched file."""
+    def __init__(self):
+        self._pending: dict[str, str] = {}    # abspath -> current virtual content
+        self._orig: dict[str, str] = {}       # abspath -> content first seen on disk
+
+    def _load(self, path: str) -> str:
+        ap = os.path.abspath(path)
+        if ap not in self._orig:
+            try:
+                with open(ap, "r", errors="replace") as f:
+                    disk = f.read()
+            except OSError:
+                disk = ""
+            self._orig[ap] = disk
+            self._pending.setdefault(ap, disk)
+        return ap
+
+    def read(self, path: str) -> str:
+        ap = self._load(path)
+        return self._pending[ap]
+
+    def edit(self, path: str, old_text: str, new_text: str) -> str:
+        ap = self._load(path)
+        status, *rest = tools.plan_edit(self._pending[ap], old_text, new_text)
+        if status == "error":
+            return rest[0]
+        self._pending[ap] = rest[0]
+        return f"recorded edit to {os.path.relpath(ap)}{rest[1]}"
+
+    def write(self, path: str, content: str) -> str:
+        ap = self._load(path)
+        self._pending[ap] = content if (content.endswith("\n") or not content) else content + "\n"
+        return f"recorded write to {os.path.relpath(ap)}"
+
+    def changes(self):
+        return [(ap, self._orig[ap], self._pending[ap])
+                for ap in self._pending if self._pending[ap] != self._orig[ap]]

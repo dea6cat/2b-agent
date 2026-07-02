@@ -104,6 +104,10 @@ model has to understand.
 - **Cheaper multi-turn cloud sessions.** Anthropic requests mark the system prompt and tool
   definitions as cacheable, so a long conversation pays full price for that stable prefix once
   instead of on every turn.
+- **Leaner, sturdier cloud sessions.** Old, bulky tool outputs are trimmed out of each request
+  before it's sent — the stored conversation is untouched, and it's off with `TWOB_NO_TRIM` —
+  transient provider errors (HTTP 429 / 5xx) are retried with backoff instead of killing the task,
+  and `TWOB_SUBAGENT_MODEL` runs delegated sub-agents on a cheaper model than the parent.
 - **MCP tools, curated.** Pull in tools from MCP servers (dart, mempalace, …) — but **per tool**, not
   wholesale, because flooding a small model with tools is exactly what breaks it. You enable a server
   and pick which of its tools the model sees (`/mcp`); local models are capped to a few so their

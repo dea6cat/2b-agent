@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import mcp_client, planparse, registry, tools
+from . import diagnostics, mcp_client, planparse, registry, tools
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers.base import ProviderError
 from .session import PendingConfirmation, Session, Task, TaskState
@@ -306,6 +306,7 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
     if result.startswith("wrote"):
         task.last_edit_snapshot = (path, pre)
         task.last_diff = preview
+        result += diagnostics.summarize(path)
     return result
 
 
@@ -317,14 +318,12 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
         return f"error: no such file: {path}"
     with open(full, "r", errors="replace") as f:
         pre = f.read()
-    count = pre.count(old_text)
-    if count == 0:
-        return "error: old_text not found in file — it must match exactly, including whitespace"
-    if count > 1:
-        return f"error: old_text matches {count} times — make it more specific so it matches exactly once"
+    status, *rest = tools.plan_edit(pre, old_text, new_text)
+    if status == "error":
+        return rest[0]
+    new_content, _note = rest
     import difflib
 
-    new_content = pre.replace(old_text, new_text, 1)
     diff = "\n".join(difflib.unified_diff(pre.splitlines(), new_content.splitlines(), lineterm="", n=1))
     if not request_confirmation(session, task, f"Apply edit to {path}?", diff):
         return "edit rejected by user"
@@ -334,6 +333,7 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     if result.startswith("edited"):
         task.last_edit_snapshot = (path, pre)
         task.last_diff = diff
+        result += diagnostics.summarize(path)
     return result
 
 

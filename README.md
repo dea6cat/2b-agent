@@ -48,6 +48,16 @@ model has to understand.
   `write_file`. That small, concrete surface is exactly what keeps a small model reliable. It
   explores before it edits — searching for where something lives instead of guessing paths — and
   prefers exact-snippet edits over rewriting whole files.
+- **Edits that survive small-model drift.** `edit_file` resolves the target host-side in tiers —
+  exact, then whitespace-tolerant, then indentation-agnostic (re-indenting your snippet to the
+  file) — so a model that gets the whitespace slightly wrong still lands the edit instead of
+  bouncing off an exact-match error. It never applies on an ambiguous match, and the tool the model
+  sees is unchanged — all the tolerance lives on the host.
+- **Catches its own mistakes.** After a successful edit, 2B runs the file's checker host-side
+  (`dart analyze`, `ruff` or `py_compile`, …) and folds any new errors straight into the tool
+  result — so a model that just broke the build sees it on the same turn, with no new tool to learn.
+  Bounded so it can't flood a small window, skipped silently when there's no checker, and off with
+  `TWOB_NO_DIAGNOSTICS`.
 - **Native protocols, never a shim.** Local Ollama models get Ollama's own `/api/chat` with NDJSON
   streaming. Each cloud provider gets its own native format. Nothing is translated through a
   lowest-common-denominator layer.

@@ -331,6 +331,121 @@ def do_search_files(query, path):
     return "\n".join(matches) or f"no matches for '{query}' under {path}"
 
 
+def _leading_ws(s: str) -> str:
+    """The leading-whitespace prefix of a line (no trailing newline expected)."""
+    return s[: len(s) - len(s.lstrip())]
+
+
+def _line_offsets(lines: list[str]) -> list[int]:
+    """Character offset in the joined text at which each line begins."""
+    offs, acc = [], 0
+    for ln in lines:
+        offs.append(acc)
+        acc += len(ln)
+    return offs
+
+
+def _block_hits(norm_content: list[str], norm_old: list[str]) -> list[int]:
+    """Indices where norm_old occurs as a contiguous block in norm_content."""
+    n = len(norm_old)
+    if n == 0:
+        return []
+    return [i for i in range(len(norm_content) - n + 1) if norm_content[i:i + n] == norm_old]
+
+
+def _shift_indent(text: str, add: str, cut: str) -> str:
+    """Re-indent every non-blank line of `text`: drop a leading `cut` prefix, then
+    prepend `add`. Blank lines are left untouched so we never create whitespace-only
+    lines. Preserves each line's own trailing newline."""
+    out = []
+    for ln in text.splitlines(keepends=True):
+        body = ln.rstrip("\r\n")
+        nl = ln[len(body):]
+        if not body.strip():
+            out.append(ln)
+            continue
+        if cut and body.startswith(cut):
+            body = body[len(cut):]
+        if add:
+            body = add + body
+        out.append(body + nl)
+    return "".join(out)
+
+
+def _make_reindenter(file_line: str, old_line: str):
+    """Build a render function that re-indents new_text from old_text's indentation to
+    the file's actual indentation, inferred from the first matched line. Falls back to
+    verbatim when the two indent prefixes aren't compatible (can't shift cleanly)."""
+    fw = _leading_ws(file_line.rstrip("\r\n"))
+    ow = _leading_ws(old_line)
+    if fw == ow:
+        return lambda nt: nt
+    if fw.startswith(ow):
+        return lambda nt: _shift_indent(nt, fw[len(ow):], "")
+    if ow.startswith(fw):
+        return lambda nt: _shift_indent(nt, "", ow[len(fw):])
+    return lambda nt: nt
+
+
+def _resolve_edit(content: str, old_text: str):
+    """Locate the region of `content` that `old_text` refers to, tolerant of the
+    whitespace drift small models produce. Tiers, tried in order:
+      1. exact substring (unchanged fast path),
+      2. trailing-whitespace + line-ending normalized (whole-line blocks),
+      3. leading-indent-agnostic, re-indenting new_text to the file.
+    Returns (start, end, render, note) for a unique match — content[start:end] is the
+    span to replace and render(new_text) is the replacement; ("ambiguous", n) when a
+    tier matches more than once; or None when nothing matched at any tier. Never
+    resolves to a location when a tier is ambiguous — matching stays exactly-once."""
+    count = content.count(old_text)
+    if count == 1:
+        s = content.index(old_text)
+        return (s, s + len(old_text), lambda nt: nt, "")
+    if count > 1:
+        return ("ambiguous", count)
+
+    content_lines = content.splitlines(keepends=True)
+    old_lines = old_text.splitlines()
+    if not old_lines:
+        return None
+    offsets = _line_offsets(content_lines)
+    owns_trailing_nl = old_text.endswith(("\n", "\r"))
+    tiers = (
+        (lambda ln: ln.rstrip(), False, " (whitespace-tolerant match)"),
+        (lambda ln: ln.strip(), True, " (indent-tolerant match)"),
+    )
+    for normalize, reindent, note in tiers:
+        norm_content = [normalize(ln) for ln in content_lines]
+        norm_old = [normalize(ln) for ln in old_lines]
+        hits = _block_hits(norm_content, norm_old)
+        if len(hits) > 1:
+            return ("ambiguous", len(hits))
+        if len(hits) == 1:
+            i, n = hits[0], len(old_lines)
+            start = offsets[i]
+            matched = "".join(content_lines[i:i + n])
+            end = start + len(matched)
+            if not owns_trailing_nl:                    # keep the line break old_text didn't include
+                end -= len(matched) - len(matched.rstrip("\r\n"))
+            render = _make_reindenter(content_lines[i], old_lines[0]) if reindent else (lambda nt: nt)
+            return (start, end, render, note)
+    return None
+
+
+def plan_edit(content: str, old_text: str, new_text: str):
+    """Resolve where old_text applies in `content` and build the edited text. Pure —
+    no file I/O — so the confirmation path (orchestrator.apply_edit) and the writer
+    (do_edit_file) share one matching decision. Returns ('ok', new_content, note) or
+    ('error', message) with the frozen, model-facing error strings."""
+    resolved = _resolve_edit(content, old_text)
+    if resolved is None:
+        return ("error", "error: old_text not found in file — it must match exactly, including whitespace")
+    if resolved[0] == "ambiguous":
+        return ("error", f"error: old_text matches {resolved[1]} times — make it more specific so it matches exactly once")
+    start, end, render, note = resolved
+    return ("ok", content[:start] + render(new_text) + content[end:], note)
+
+
 def do_edit_file(path, old_text, new_text, auto_yes):
     full = _safe_path(path)
     if full is None:
@@ -339,12 +454,10 @@ def do_edit_file(path, old_text, new_text, auto_yes):
         return f"error: no such file: {path}"
     with open(full, "r", errors="replace") as f:
         content = f.read()
-    count = content.count(old_text)
-    if count == 0:
-        return "error: old_text not found in file — it must match exactly, including whitespace"
-    if count > 1:
-        return f"error: old_text matches {count} times — make it more specific so it matches exactly once"
-    new_content = content.replace(old_text, new_text, 1)
+    status, *rest = plan_edit(content, old_text, new_text)
+    if status == "error":
+        return rest[0]
+    new_content, note = rest
     diff = "\n".join(difflib.unified_diff(content.splitlines(), new_content.splitlines(), lineterm="", n=1))
     print(f"\n--- proposed edit: {path} ---\n{diff}")
     if not auto_yes:
@@ -352,7 +465,7 @@ def do_edit_file(path, old_text, new_text, auto_yes):
             return "edit rejected by user"
     with open(full, "w") as f:
         f.write(new_content)
-    return f"edited {path}"
+    return f"edited {path}{note}"
 
 
 def git_is_read_only(args: str) -> bool:

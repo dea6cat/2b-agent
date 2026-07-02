@@ -464,6 +464,17 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
 
 # --- the turn loop -----------------------------------------------------------
 
+def _resolve_subagent_model(reg: dict, provider: Any, model: str) -> tuple[Any, str]:
+    """(provider, model) for subagents: TWOB_SUBAGENT_MODEL if set and resolvable, else
+    the parent's. Lets you run explorers/workers on a cheaper model than the parent."""
+    name = os.environ.get("TWOB_SUBAGENT_MODEL")
+    if name:
+        r = registry.resolve(reg, name)
+        if r is not None:
+            return r
+    return provider, model
+
+
 def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None],
              reg: dict | None = None) -> None:
     """Drive the tool-call loop for one task on the calling (worker) thread.
@@ -486,6 +497,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     # Local models get the constrained git-only tool; cloud (frontier) models get
     # the full shell tool. See toolspec.specs_for / _dispatch_tool.
     is_local = getattr(provider, "name", "") == "ollama" and getattr(provider, "api_key", None) is None
+    sub_provider, sub_model = _resolve_subagent_model(reg, provider, model)
 
     if task.conversation is None:
         doc = _project_context()
@@ -585,7 +597,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": tc.name, "shown": shown}))
                 if tc.name == "delegate" and not is_local:
                     from . import subagents
-                    digest, changes = subagents.delegate(tc.arguments.get("tasks", []), provider, model,
+                    digest, changes = subagents.delegate(tc.arguments.get("tasks", []), sub_provider, sub_model,
                                                 read_cap=read_cap, on_event=on_event, cancel=task.cancel_flag,
                                                 read_only=session.read_only)
                     result = digest + apply_worker_changes(session, task, changes)

@@ -270,7 +270,11 @@ def do_read_file(path, max_chars=None):
         return (f"{note}{rel} is {n_lines:,} lines (~{len(content) // 1024} KB) — too large to read whole "
                 f'with the current model\'s context. Read a section, e.g. read_file "{rel}:1-150", or '
                 "switch to a bigger model with /model.")
-    return note + content
+    from . import symbols                                  # symbol outline: file shape + line anchors
+    outline = symbols.outline(full)
+    if outline and max_chars and len(note) + len(content) + len(outline) > max_chars:
+        outline = ""                                       # never push the read past its budget
+    return note + content + outline
 
 
 def do_write_file(path, content, auto_yes):
@@ -296,8 +300,13 @@ def do_search_files(query, path):
     root = _safe_path(path)
     if root is None:
         return "error: empty or invalid path"
-    matches = []
-    overflow = False
+    from . import repomap, symbols
+    # Symbol enrichment only for bare-identifier queries — a definition of `query` is
+    # tagged and floated to the top, so search_files doubles as go-to-definition without
+    # a new tool. Phrase/regex-ish queries behave exactly as a plain literal search.
+    tag_defs = symbols.is_identifier(query)
+    matches = []                                  # (is_def, formatted_line)
+    overflow = saw_def = False
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if not _should_skip_dir(d)]
         for fname in filenames:
@@ -306,12 +315,16 @@ def do_search_files(query, path):
             full = os.path.join(dirpath, fname)
             if _is_probably_binary(full):
                 continue
+            ext = os.path.splitext(fname)[1].lower()
             try:
                 with open(full, "r", errors="ignore") as f:
                     for lineno, line in enumerate(f, start=1):
                         if query in line:
                             rel = os.path.relpath(full)
-                            matches.append(f"{rel}:{lineno}: {line.strip()[:300]}")
+                            is_def = tag_defs and repomap.declared_name(line, ext) == query
+                            saw_def = saw_def or is_def
+                            marker = "▸def " if is_def else ""
+                            matches.append((is_def, f"{marker}{rel}:{lineno}: {line.strip()[:300]}"))
                             if len(matches) > MAX_SEARCH_MATCHES:
                                 overflow = True
                                 break
@@ -321,14 +334,22 @@ def do_search_files(query, path):
                 break
         if overflow:
             break
+    # Definitions first (stable within each group), then usages.
+    ordered = [t for d, t in matches if d] + [t for d, t in matches if not d] if tag_defs \
+        else [t for _, t in matches]
+    # If the match cap may have hidden the definition, resolve it directly and point at it.
+    header = ""
+    if overflow and tag_defs and not saw_def:
+        locs = symbols.definitions(query, root)
+        if locs:
+            header = "defined in: " + "; ".join(f"{l.path}:{l.line}" for l in locs[:5]) + "\n"
     if overflow:
-        shown = matches[:MAX_SEARCH_MATCHES]
         return (
-            "\n".join(shown)
+            header + "\n".join(ordered[:MAX_SEARCH_MATCHES])
             + f"\n(stopped after {MAX_SEARCH_MATCHES} matches — too broad. "
             "Narrow the query, e.g. include a type/keyword, or add a more specific path.)"
         )
-    return "\n".join(matches) or f"no matches for '{query}' under {path}"
+    return header + "\n".join(ordered) if ordered else f"no matches for '{query}' under {path}"
 
 
 def _leading_ws(s: str) -> str:

@@ -173,13 +173,13 @@ class McpManager:
         server = qualified.split("__", 1)[0]
         return "__" in qualified and server in self._sessions
 
-    def call_tool(self, qualified: str, args: dict) -> str:
+    def call_tool(self, qualified: str, args: dict, timeout: float = CALL_TIMEOUT) -> str:
         server, _, tool = qualified.partition("__")
         session = self._sessions.get(server)
         if session is None:
             return f"error: MCP server '{server}' is not connected"
         try:
-            res = self._run(session.call_tool(tool, args or {}), CALL_TIMEOUT)
+            res = self._run(session.call_tool(tool, args or {}), timeout)
         except Exception as e:
             return f"error: MCP call {qualified} failed: {str(e)[:200]}"
         return self._flatten(res)
@@ -193,6 +193,34 @@ class McpManager:
         out = "\n".join(p for p in parts if p) or "(no output)"
         return f"error: {out}" if getattr(res, "isError", False) else out
 
+    # --- host-consumed symbol resolution (a symbols.py backend) -------------
+    def _find_resolver(self):
+        """An enabled+connected tool that resolves workspace symbols, if any:
+        (server, tool_name, tool_obj). Matches names like `resolve_workspace_symbol`."""
+        for server, names in load_enabled().items():
+            if server not in self._sessions:
+                continue
+            catalog = self._tools.get(server, {})
+            for tname in names:
+                low = tname.lower().replace("-", "").replace("_", "")
+                if "symbol" in low and ("resolve" in low or "workspace" in low):
+                    return server, tname, catalog.get(tname)
+        return None
+
+    def resolve_symbol(self, identifier: str, timeout: float = 8):
+        """Host-side (never model-facing) symbol resolution via an enabled MCP resolver
+        tool. Returns [(path, line), …] parsed from its output, or None when there's no
+        resolver, the call fails, or nothing parses — so symbols.py falls to regex.
+        Best-effort: the result text format is server-specific, so parsing is lenient."""
+        found = self._find_resolver()
+        if not found:
+            return None
+        server, tname, tool = found
+        text = self.call_tool(f"{server}__{tname}", {_resolver_arg(tool): identifier}, timeout)
+        if text.startswith("error:"):
+            return None
+        return _parse_locations(text) or None
+
     def shutdown(self) -> None:
         for name in list(self._stacks):
             try:
@@ -200,6 +228,34 @@ class McpManager:
             except Exception:
                 pass
         self._stacks.clear(); self._sessions.clear(); self._tools.clear()
+
+
+_LOC_RE = re.compile(r"([\w./\\-]+\.\w+):(\d+)")   # file.ext:line, tolerating an optional :col after
+
+
+def _parse_locations(text: str, cap: int = 10) -> list[tuple[str, int]]:
+    """Pull (path, line) pairs out of a resolver tool's flattened text output."""
+    hits, seen = [], set()
+    for m in _LOC_RE.finditer(text):
+        key = (m.group(1), int(m.group(2)))
+        if key in seen:
+            continue
+        seen.add(key)
+        hits.append(key)
+        if len(hits) >= cap:
+            break
+    return hits
+
+
+def _resolver_arg(tool) -> str:
+    """The query parameter name a resolver tool expects, read from its inputSchema."""
+    schema = getattr(tool, "inputSchema", None) or {}
+    props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    for cand in ("query", "name", "symbol", "pattern", "text"):
+        if cand in props:
+            return cand
+    req = schema.get("required") if isinstance(schema, dict) else None
+    return req[0] if req else "query"
 
 
 manager = McpManager()

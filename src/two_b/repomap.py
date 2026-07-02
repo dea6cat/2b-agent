@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+from functools import lru_cache
 
 from .tools import MAX_FILE_BYTES, _is_probably_binary, _should_skip_dir, _should_skip_file
 
@@ -38,13 +39,42 @@ _MAX_SYMBOLS_PER_FILE = 20
 _MAX_SYMBOL_LEN = 110
 
 
+@lru_cache(maxsize=None)
 def _compiled(ext: str):
-    return [re.compile(p) for p in _PATTERNS.get(ext, [])]
+    return tuple(re.compile(p) for p in _PATTERNS.get(ext, []))
 
 
-def extract_symbols(path: str) -> list[str]:
-    """Top-level declaration lines for a source file (trimmed, capped). [] for
-    unsupported types, binaries, or oversized files."""
+def is_declaration(line: str, ext: str) -> bool:
+    """True if `line` looks like a top-level declaration for this file type — the
+    same structural test the repo map uses."""
+    pats = _compiled(ext)
+    return bool(pats) and any(p.match(line) for p in pats)
+
+
+_KW_NAME_RE = re.compile(
+    r"\b(?:class|mixin|enum|extension|interface|trait|impl|struct|module|def|func|fn|"
+    r"type|const|let|var|protocol)\s+(\w+)")
+_NAME_BEFORE_PAREN_RE = re.compile(r"(\w+)\s*\(")
+
+
+def declared_name(line: str, ext: str) -> str | None:
+    """The identifier a declaration line *declares* (not merely mentions), so a line
+    like `def f(x: Session)` resolves to `f`, not `Session`. Returns None when the
+    line isn't a declaration or no name can be pulled out. Regex, so imperfect on
+    exotic signatures — advisory only."""
+    if not is_declaration(line, ext):
+        return None
+    m = _KW_NAME_RE.search(line)          # keyword-led: class/def/func/type Name …
+    if m:
+        return m.group(1)
+    m = _NAME_BEFORE_PAREN_RE.search(line)  # return-type-led / C-style: Type Name( …
+    return m.group(1) if m else None
+
+
+def symbols_with_lines(path: str) -> list[tuple[int, str]]:
+    """Top-level declarations as (line_no, trimmed_decl) for a source file, capped.
+    [] for unsupported types, binaries, or oversized files. A trailing (-1, "…")
+    sentinel marks truncation. This is the single scanner; extract_symbols is a view."""
     ext = os.path.splitext(path)[1].lower()
     pats = _compiled(ext)
     if not pats:
@@ -56,18 +86,24 @@ def extract_symbols(path: str) -> list[str]:
             lines = f.readlines()
     except OSError:
         return []
-    out = []
-    for line in lines:
+    out: list[tuple[int, str]] = []
+    for i, line in enumerate(lines, start=1):
         if len(line) > 400:                       # skip minified / generated lines
             continue
         if any(p.match(line) for p in pats):
             sym = " ".join(line.strip().rstrip("{").strip().split())
             if sym:
-                out.append(sym[:_MAX_SYMBOL_LEN])
+                out.append((i, sym[:_MAX_SYMBOL_LEN]))
         if len(out) >= _MAX_SYMBOLS_PER_FILE:
-            out.append("…")
+            out.append((-1, "…"))
             break
     return out
+
+
+def extract_symbols(path: str) -> list[str]:
+    """Top-level declaration lines for a source file (trimmed, capped). [] for
+    unsupported types, binaries, or oversized files."""
+    return [sym for _, sym in symbols_with_lines(path)]
 
 
 def _score(rel: str, symbols: int, focus: str) -> float:

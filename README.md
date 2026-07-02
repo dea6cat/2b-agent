@@ -58,6 +58,13 @@ model has to understand.
   result — so a model that just broke the build sees it on the same turn, with no new tool to learn.
   Bounded so it can't flood a small window, skipped silently when there's no checker, and off with
   `TWOB_NO_DIAGNOSTICS`.
+- **Finds definitions, not just matches.** `search_files` marks which hit is the *definition* of a
+  symbol and floats it to the top, and `read_file` appends a compact symbol outline with line
+  anchors — so "where is X defined?" is answered by the tools the model already calls, with no
+  navigation tool to learn. When a language server is installed (`dart language-server`, `pyright`,
+  `gopls`, …) it resolves symbols semantically over LSP, spoken as raw stdlib JSON-RPC; a curated MCP
+  resolver is used if one's enabled; with neither, it falls back to a dependency-free regex map.
+  Host-side, schema unchanged; off with `TWOB_NO_LSP`.
 - **Native protocols, never a shim.** Local Ollama models get Ollama's own `/api/chat` with NDJSON
   streaming. Each cloud provider gets its own native format. Nothing is translated through a
   lowest-common-denominator layer.

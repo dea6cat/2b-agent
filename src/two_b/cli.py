@@ -241,6 +241,8 @@ def main() -> None:
                         help="Run environment diagnostics (PATH, Ollama, default model) and exit")
     parser.add_argument("--rm", action="store_true",
                         help="Uninstall 2B and delete its config (~/.config/2b), then exit")
+    parser.add_argument("--update", action="store_true",
+                        help="Upgrade 2B to the latest release (uv tool upgrade) and exit")
     parser.add_argument("task", nargs="?", help="An initial task to run before dropping into the session")
     args = parser.parse_args()
 
@@ -263,6 +265,10 @@ def main() -> None:
             except EOFError:
                 return False
         raise SystemExit(uninstall.run(console.print, _confirm, args.yes))
+
+    if args.update:
+        from . import update
+        raise SystemExit(update.run_upgrade(console.print))
 
     if args.list_models:
         from . import registry
@@ -304,6 +310,12 @@ def main() -> None:
     if not args.model:
         src = "saved default" if config.get_prefs().get("default_model") == model else "autodetected"
         console.print(f"[dim]No --model given, {src}: {model}[/dim]")
+
+    # Best-effort update notice (from a prior background check; never blocks startup).
+    from . import update
+    _note = update.notice()
+    if _note:
+        console.print(f"[dim]{_note}[/dim]")
 
     # Connect any MCP servers with enabled tools (no-op if none are configured).
     from . import mcp_client

@@ -166,10 +166,25 @@ pipe with `... | sh -s -- --yes --models "qwen3.5:9b"`.
 2b --model qwen3.5:9b    # pin a model
 2b --list-models         # what's available across configured providers
 2b --doctor              # diagnose PATH, Ollama, and the default model, then exit
+2b --update              # upgrade to the latest release (uv tool upgrade)
 2b --rm                  # uninstall 2B and delete its config (asks first); --rm --yes to skip
 ```
 
 Then just type what you want done. Type `/` to see the commands.
+
+### Updating
+
+2B installs as a `uv` tool, so updating is one command:
+
+```bash
+2b --update                        # or: uv tool upgrade 2b-agent
+```
+
+Re-running the installer (`curl … | sh`) does the same. 2B also checks for a newer
+release in the background (at most once a day, never blocking startup) and prints a
+one-line notice next launch when one is available — set `TWOB_NO_UPDATE_CHECK=1` to
+turn that off. Releases are tagged `vMAJOR.MINOR.PATCH`; pin one for reproducibility
+with `uv tool install git+https://github.com/dea6cat/2b-agent@v0.2.0`.
 
 ### Providers
 

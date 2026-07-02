@@ -64,27 +64,47 @@ class Notice(unittest.TestCase):
         self.assertIsNone(update.notice(now=self.now))
 
 
+class InstallKind(unittest.TestCase):
+    def test_kind_from_path(self):
+        self.assertEqual(update._kind_from("/home/u/.local/share/uv/tools/2b-agent/lib"), "uv")
+        self.assertEqual(update._kind_from("/home/u/.local/pipx/venvs/2b-agent"), "pipx")
+        self.assertEqual(update._kind_from("/usr/lib/python3.12/site-packages"), "pip")
+
+
 class RunUpgrade(unittest.TestCase):
     def _patch(self, obj, attr, val):
         orig = getattr(obj, attr)
         setattr(obj, attr, val)
         self.addCleanup(setattr, obj, attr, orig)
 
-    def test_uv_absent_returns_1(self):
-        self._patch(update.shutil, "which", lambda n: None)
-        out = []
-        code = update.run_upgrade(out.append)
-        self.assertEqual(code, 1)
-        self.assertIn("uv not found", "\n".join(out))
-
-    def test_uv_present_invokes_upgrade(self):
-        self._patch(update.shutil, "which", lambda n: "/usr/bin/uv")
+    def _capture(self, kind, which_ok=True):
+        self._patch(update, "_install_kind", lambda: kind)
+        self._patch(update.shutil, "which", lambda n: "/usr/bin/" + n if which_ok else None)
         calls = []
         self._patch(update.subprocess, "run",
                     lambda argv, **kw: calls.append(argv) or types.SimpleNamespace(returncode=0))
         code = update.run_upgrade([].append)
+        return code, calls
+
+    def test_uv_install_uses_uv_tool(self):
+        code, calls = self._capture("uv")
         self.assertEqual(code, 0)
         self.assertIn(["uv", "tool", "upgrade", "2b-agent"], calls)
+
+    def test_pipx_install_uses_pipx(self):
+        code, calls = self._capture("pipx")
+        self.assertEqual(code, 0)
+        self.assertIn(["pipx", "upgrade", "2b-agent"], calls)
+
+    def test_pip_install_uses_pip(self):
+        code, calls = self._capture("pip")
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0][1:], ["-m", "pip", "install", "-U", "2b-agent"])   # sys.executable -m pip …
+
+    def test_uv_absent_returns_1(self):
+        code, calls = self._capture("uv", which_ok=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

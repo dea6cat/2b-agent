@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -99,15 +100,43 @@ def notice(now: float | None = None) -> str | None:
     return msg
 
 
+def _kind_from(paths: str) -> str:
+    """Classify an install from where its files live: uv tool, pipx, or plain pip."""
+    p = paths.replace(os.sep, "/").lower()
+    if "/uv/tools/" in p:
+        return "uv"
+    if "/pipx/" in p:
+        return "pipx"
+    return "pip"
+
+
+def _install_kind() -> str:
+    """How this 2b-agent was installed, inferred from its run location."""
+    return _kind_from(sys.prefix + "|" + os.path.abspath(__file__))
+
+
 def run_upgrade(emit) -> int:
-    """`2b --update`: upgrade the installed tool via uv. Returns uv's exit code (1 if uv
-    is unavailable). Lets uv's own progress print to the terminal."""
-    if not shutil.which("uv"):
-        emit(f"uv not found — update with your installer, e.g. 'uv tool upgrade {PKG}'.")
-        return 1
-    emit(f"Updating {PKG} via uv…")
+    """`2b --update`: upgrade using whatever installed it — `uv tool upgrade` (installer/
+    uv), `pipx upgrade` (pipx), or `pip install -U` (pip). Returns the tool's exit code
+    (1 if the needed tool isn't found). Lets the tool's own progress print to the terminal."""
+    kind = _install_kind()
+    if kind == "uv":
+        if not shutil.which("uv"):
+            emit(f"uv not found — run 'uv tool upgrade {PKG}' once it's on PATH.")
+            return 1
+        emit(f"Updating {PKG} via uv tool…")
+        cmd = ["uv", "tool", "upgrade", PKG]
+    elif kind == "pipx":
+        if not shutil.which("pipx"):
+            emit(f"pipx not found — run 'pipx upgrade {PKG}' once it's on PATH.")
+            return 1
+        emit(f"Updating {PKG} via pipx…")
+        cmd = ["pipx", "upgrade", PKG]
+    else:
+        emit(f"Updating {PKG} via pip…")
+        cmd = [sys.executable, "-m", "pip", "install", "-U", PKG]
     try:
-        return subprocess.run(["uv", "tool", "upgrade", PKG], timeout=300).returncode
+        return subprocess.run(cmd, timeout=600).returncode
     except Exception as e:
         emit(f"update failed: {e}")
         return 1

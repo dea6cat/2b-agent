@@ -143,10 +143,11 @@ Already have Ollama and some models? It skips what you already have — it lists
 models, offers to just use them (pulling nothing), and marks anything in the menu you've already
 got. Your existing setup is left untouched.
 
-Prefer to do it by hand? If you already have `uv`:
+Prefer to do it by hand? Install the published package from
+[PyPI](https://pypi.org/project/2b-agent/):
 
 ```bash
-uv tool install git+https://github.com/dea6cat/2b-agent
+pip install 2b-agent                              # latest release from PyPI
 ollama pull qwen3.5:9b        # my default — a good balance on an 18 GB machine
 ```
 
@@ -174,17 +175,23 @@ Then just type what you want done. Type `/` to see the commands.
 
 ### Updating
 
-2B installs as a `uv` tool, so updating is one command:
+One command, whatever you installed with — it detects the method and runs the right upgrade:
 
 ```bash
-2b --update                        # or: uv tool upgrade 2b-agent
+2b --update
 ```
 
-Re-running the installer (`curl … | sh`) does the same. 2B also checks for a newer
-release in the background (at most once a day, never blocking startup) and prints a
-one-line notice next launch when one is available — set `TWOB_NO_UPDATE_CHECK=1` to
-turn that off. Releases are tagged `vMAJOR.MINOR.PATCH`; pin one for reproducibility
-with `uv tool install git+https://github.com/dea6cat/2b-agent@v0.2.0`.
+That resolves to `uv tool upgrade 2b-agent` (the `curl … | sh` installer / `uv`),
+`pipx upgrade 2b-agent` (pipx), or `pip install -U 2b-agent` (pip). You can of course
+run the matching command yourself — e.g. **if you installed with pip**:
+
+```bash
+pip install -U 2b-agent
+```
+
+2B also checks for a newer release in the background (at most once a day, never blocking
+startup) and prints a one-line notice on the next launch when one is available — set
+`TWOB_NO_UPDATE_CHECK=1` to turn that off. Releases are tagged `vMAJOR.MINOR.PATCH`.
 
 ### Providers
 

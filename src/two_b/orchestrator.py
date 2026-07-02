@@ -347,6 +347,8 @@ def apply_worker_changes(session: Session, task: Task, changes) -> str:
     existing single-level /undo."""
     if not changes:
         return ""
+    if task.cancel_flag.is_set():
+        return "\n(cancelled — worker changes not applied)"
     if session.read_only:
         return "\n(plan mode — worker changes not applied)"
     by_path: dict[str, list] = {}
@@ -389,9 +391,13 @@ def apply_worker_changes(session: Session, task: Task, changes) -> str:
     for ap, group in to_apply:
         _, final, _ = group[0]
         pre = currents[ap]
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            res = tools.do_write_file(ap, final, auto_yes=True)
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                res = tools.do_write_file(ap, final, auto_yes=True)
+        except OSError as e:
+            applied.append(f"error writing {os.path.relpath(ap)}: {e}")
+            continue
         if res.startswith("wrote"):
             task.last_edit_snapshot = (ap, pre)
             task.last_diff = combined_preview

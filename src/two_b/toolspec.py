@@ -130,7 +130,10 @@ DELEGATE_SPEC = ToolSpec(
     "Run one or more independent sub-tasks in parallel, each in its own isolated context. "
     "role 'explore' investigates read-only and returns a concise findings report — use it to "
     "locate code or understand a flow without reading everything into this conversation. "
-    "role 'work' is reserved. Returns a digest of each task's result.",
+    "role 'work' makes changes: it edits files in an isolated context and the caller applies "
+    "the proposed edits after one review (read-only in plan mode; edits from two workers to the "
+    "same file are refused as a conflict; workers cannot run commands). Returns a digest of each "
+    "task's result.",
     raw_schema={
         "type": "object",
         "properties": {
@@ -140,7 +143,7 @@ DELEGATE_SPEC = ToolSpec(
                     "type": "object",
                     "properties": {
                         "role": {"type": "string", "enum": ["explore", "work"]},
-                        "goal": {"type": "string", "description": "What to find/understand (explore) — a clear, self-contained instruction."},
+                        "goal": {"type": "string", "description": "What to find/understand (explore) or what change to make (work) — a clear, self-contained instruction."},
                     },
                     "required": ["goal"],
                 },

@@ -31,7 +31,7 @@ from typing import Any, Callable
 
 from . import diagnostics, mcp_client, planparse, registry, tools
 from .conversation import Conversation, Message, Role, ToolResult
-from .providers.base import ProviderError
+from .providers.base import ProviderError, stream_with_retry
 from .session import PendingConfirmation, Session, Task, TaskState
 from .toolspec import TOOL_SPECS, specs_for, DELEGATE_SPEC
 
@@ -538,7 +538,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
 
             active_specs = _active_specs(is_local)
             try:
-                resp = provider.stream(conv, model, active_specs, on_text)
+                resp = stream_with_retry(provider, conv, model, active_specs, on_text, cancel=task.cancel_flag)
             except _Interrupted:
                 _finish_stopped(task, on_event)
                 return
@@ -613,7 +613,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
         try:
-            resp = provider.stream(conv, model, _active_specs(is_local), on_final)
+            resp = stream_with_retry(provider, conv, model, _active_specs(is_local), on_final, cancel=task.cancel_flag)
             planparse.finalize_steps(task.plan_steps)
             task.status_line = ""
             task.state = TaskState.DONE

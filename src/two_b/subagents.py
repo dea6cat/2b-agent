@@ -7,6 +7,7 @@ import os
 import threading
 from . import tools
 from .conversation import Conversation, Message, ToolResult
+from .providers.base import stream_with_retry
 
 EXPLORER_PROMPT = (
     "You are a read-only exploration agent. Investigate the goal using list_files, "
@@ -33,7 +34,7 @@ def run_explorer(goal, provider, model, read_cap=None, max_turns=8, cancel=None)
     for _ in range(max_turns):
         if cancel is not None and cancel.is_set():
             return "explorer cancelled"
-        resp = provider.stream(conv, model, specs, lambda _c: None)
+        resp = stream_with_retry(provider, conv, model, specs, lambda _c: None, cancel=cancel)
         msg = resp.message
         conv.append(msg)
         if not msg.tool_calls:
@@ -199,7 +200,7 @@ def run_worker(goal, provider, model, read_cap=None, max_turns=12, cancel=None):
     for _ in range(max_turns):
         if cancel is not None and cancel.is_set():
             return "worker cancelled", fs.changes()
-        msg = provider.stream(conv, model, specs, lambda _c: None).message
+        msg = stream_with_retry(provider, conv, model, specs, lambda _c: None, cancel=cancel).message
         conv.append(msg)
         if not msg.tool_calls:
             return (msg.text or "").strip() or "(worker produced no report)", fs.changes()

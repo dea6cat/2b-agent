@@ -92,11 +92,15 @@ model has to understand.
 - **Runs things — split by model.** Local models get `run_git` (git only, never a raw shell — no
   chaining/injection); cloud models get a full `run_command` shell (tests, build, git). Read-only git
   runs freely; anything that mutates is confirmation-gated and refused in plan mode.
-- **Delegates read-only exploration (cloud).** On the cloud path the model can `delegate` one or
-  more investigations to run in parallel, each in its own isolated context, and get back short
-  findings — so a big search-and-read never bloats the main conversation. Each sub-agent can only
-  `list_files`, `read_file`, and `search_files`; local models keep their frozen five tools
-  untouched, and delegation is cloud-only for now.
+- **Delegates read-only exploration, and edits, to sub-agents (cloud).** On the cloud path the
+  model can `delegate` one or more investigations to run in parallel, each in its own isolated
+  context, and get back short findings — so a big search-and-read never bloats the main
+  conversation. Each sub-agent can only `list_files`, `read_file`, and `search_files`. It can also
+  delegate `work` sub-tasks that propose file edits in their own isolated context; the parent
+  reviews the whole batch once and applies it (accept-edits auto-applies, plan mode keeps it
+  read-only), and if two workers touch the same file that's refused as a conflict rather than
+  applied. Workers can't run commands and the parent is still the only one that writes; local
+  models keep their frozen five tools untouched, and delegation is cloud-only for now.
 - **Cheaper multi-turn cloud sessions.** Anthropic requests mark the system prompt and tool
   definitions as cacheable, so a long conversation pays full price for that stable prefix once
   instead of on every turn.

@@ -9,6 +9,9 @@ I named it **2B**, after NieR: Automata. It's built to keep working when the pow
 internet don't — I live somewhere the grid isn't a guarantee, and I wanted a coding agent that
 doesn't fall apart the moment I'm offline.
 
+> **macOS only.** 2B is built and tested for macOS — the installer is a shell script that leans on
+> Homebrew, and the clipboard integration uses `pbcopy`. It hasn't been tested elsewhere.
+
 ---
 
 ## Why I built it
@@ -87,25 +90,41 @@ model has to understand.
 
 ## Install
 
-2B is a Python package. The simplest way to get the `2b` command:
+One line — paste it in your terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dea6cat/2B/main/install.sh | sh
+```
+
+It installs [`uv`](https://docs.astral.sh/uv/) if you don't have it, installs the `2b` command,
+then — on an interactive terminal — walks you through local model setup:
+
+1. **Optional clean install** — offers to remove other agentic tools that proved unreliable with
+   local models (opencode, Continue, Goose, Cline, OpenHands) and their configs. Off by default;
+   it asks first.
+2. **Grades your machine** — reads your RAM and chip and rates each candidate model
+   (`✓ fits well` / `~ tight` / `✗ needs NGB+`), defaulting to the best one your hardware can run.
+3. **You pick** one or several from the menu.
+4. **Installs Ollama and pulls** what you chose, with a live progress bar.
+5. **Self-tests** each model — tok/s + GPU residency, then a **correctness check that runs a real
+   one-line edit through 2B itself** and verifies the result (`✓ correct` / `✗ wrong`, ~20–90s per
+   model). It only reports — it never removes a model — and `--no-benchmark` skips it. Then it prints
+   how to launch 2B.
+
+Already have Ollama and some models? It skips what you already have — it lists your installed
+models, offers to just use them (pulling nothing), and marks anything in the menu you've already
+got. Your existing setup is left untouched.
+
+Prefer to do it by hand? If you already have `uv`:
 
 ```bash
 uv tool install git+https://github.com/dea6cat/2B
+ollama pull qwen3.5:9b        # my default — a good balance on an 18 GB machine
 ```
 
-Or from a local clone:
-
-```bash
-git clone https://github.com/dea6cat/2B
-uv tool install ./2B
-```
-
-You'll want [Ollama](https://ollama.com) running with at least one model pulled — I default to
-`qwen3.5:9b`, which is a good balance on an 18 GB machine:
-
-```bash
-ollama pull qwen3.5:9b
-```
+The installer is scriptable too: `--yes` (accept defaults, no prompts), `--clean` / `--no-clean`,
+`--models "qwen3.5:9b qwen3:8b"`, `--no-models`, `--no-benchmark` (skip the correctness check). Pass
+them through the pipe with `... | sh -s -- --yes --models "qwen3.5:9b"`.
 
 ---
 

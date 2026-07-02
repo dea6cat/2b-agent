@@ -129,6 +129,10 @@ def _describe_tool(name: str, args: dict) -> str:
         return f"Editing {p}"
     if name == "write_file":
         return f"Writing {p}"
+    if name == "run_git":
+        return f"Running git {args.get('args', '')}".strip()
+    if name == "run_command":
+        return f"Running {args.get('command', '')}".strip()
     if "__" in name:                       # MCP tool: server__tool
         server, _, tool = name.partition("__")
         return f"{server} · {tool}"

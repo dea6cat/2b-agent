@@ -73,7 +73,27 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
              "large ones — regenerating a whole large file is slow and risks a truncated/incorrect result.",
              (ToolParam("path", "string"),
               ToolParam("content", "string", "The complete new file contents."))),
+    ToolSpec("run_git",
+             "Run a git command in the project (git only — no other shell commands). Pass the "
+             "arguments that follow 'git', e.g. 'status', 'diff HEAD', 'add -A', "
+             "'commit -m \"message\"', 'log --oneline -5'. Use this for all version-control actions.",
+             (ToolParam("args", "string", "Arguments after 'git', e.g. 'status' or 'commit -m \"fix\"'"),)),
+    ToolSpec("run_command",
+             "Run a shell command in the project — tests, build, git, formatters, anything. "
+             "Returns combined stdout/stderr and the exit code.",
+             (ToolParam("command", "string", "The shell command, e.g. 'flutter test' or 'npm run build'"),)),
 )
+
+# Model-aware exposure: local models get the constrained git-only tool; cloud
+# (frontier) models get the full shell tool. The base file tools go to both.
+_EXEC_NAMES = {"run_git", "run_command"}
+
+
+def specs_for(is_local: bool) -> tuple[ToolSpec, ...]:
+    base = tuple(s for s in TOOL_SPECS if s.name not in _EXEC_NAMES)
+    exec_name = "run_git" if is_local else "run_command"
+    exec_spec = next(s for s in TOOL_SPECS if s.name == exec_name)
+    return base + (exec_spec,)
 
 
 def to_openai(specs: tuple[ToolSpec, ...] = TOOL_SPECS) -> list[dict]:

@@ -9,8 +9,16 @@ later milestones.
 import difflib
 import os
 import re
+import shlex
+import subprocess
 
 MAX_FILE_BYTES = 200_000
+GIT_TIMEOUT = 120
+CMD_TIMEOUT = 600        # general shell commands (tests/builds can be slow)
+# Always-safe inspection subcommands: run without confirmation and allowed in
+# plan mode. Anything not here is treated as mutating (confirmed / plan-blocked).
+READ_ONLY_GIT = {"status", "diff", "log", "show", "blame", "ls-files",
+                 "rev-parse", "shortlog", "rev-list", "diff-tree", "describe"}
 _RANGE_RE = re.compile(r"^(?P<base>.+):(?P<start>\d+)-(?P<end>\d+)$")   # "path:90-120"
 _MATCH_SCAN_CAP = 40   # stop walking once we've seen this many basename hits
 SKIP_DIRS = {".git", "build", ".dart_tool", "node_modules", ".idea", ".aider.tags.cache.v4"}
@@ -97,6 +105,41 @@ TOOLS = [
                     "content": {"type": "string", "description": "The complete new file contents."},
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_git",
+            "description": (
+                "Run a git command in the project (git only — no other shell commands). Pass the "
+                "arguments that follow 'git', e.g. 'status', 'diff HEAD', 'add -A', "
+                "'commit -m \"message\"', 'log --oneline -5'. Use this for all version-control actions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "args": {"type": "string", "description": "Arguments after 'git', e.g. 'status' or 'commit -m \"fix\"'"},
+                },
+                "required": ["args"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": (
+                "Run a shell command in the project — tests, build, git, formatters, anything. "
+                "Returns combined stdout/stderr and the exit code."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The shell command, e.g. 'flutter test' or 'npm run build'"},
+                },
+                "required": ["command"],
             },
         },
     },
@@ -310,3 +353,57 @@ def do_edit_file(path, old_text, new_text, auto_yes):
     with open(full, "w") as f:
         f.write(new_content)
     return f"edited {path}"
+
+
+def git_is_read_only(args: str) -> bool:
+    """True if these git args are a known inspection-only subcommand (safe to run
+    without confirmation and in plan mode). Anything else is treated as mutating."""
+    try:
+        parts = shlex.split(args or "")
+    except ValueError:
+        return False
+    return bool(parts) and parts[0] in READ_ONLY_GIT
+
+
+def do_run_git(args, max_chars=None):
+    """Run `git <args>` in the project — git only, never a shell (no chaining or
+    injection). Confirmation/plan-mode gating happens in the orchestrator; this
+    just executes. Output (stdout+stderr) is capped and non-zero exit is flagged."""
+    try:
+        parts = shlex.split(args or "")
+    except ValueError as e:
+        return f"error: could not parse git args: {e}"
+    if not parts:
+        return "error: no git command given"
+    try:
+        proc = subprocess.run(["git", *parts], cwd=os.getcwd(), capture_output=True,
+                              text=True, timeout=GIT_TIMEOUT)
+    except FileNotFoundError:
+        return "error: git is not installed"
+    except subprocess.TimeoutExpired:
+        return f"error: git {parts[0]} timed out after {GIT_TIMEOUT}s"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip() or f"(git {parts[0]}: no output)"
+    if max_chars and len(out) > max_chars:
+        head, tail = out[: max_chars * 2 // 3], out[-max_chars // 3:]
+        out = f"{head}\n… [git output truncated] …\n{tail}"
+    return f"error: git exited {proc.returncode}\n{out}" if proc.returncode else out
+
+
+def do_run_command(command, max_chars=None):
+    """Run an arbitrary shell command in the project (cloud models only — see the
+    orchestrator's model-aware tool exposure). Confirmation/plan gating happens
+    upstream; this just executes. Output is capped and non-zero exit is flagged."""
+    if not (command or "").strip():
+        return "error: no command given"
+    try:
+        proc = subprocess.run(command, shell=True, cwd=os.getcwd(),
+                              capture_output=True, text=True, timeout=CMD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"error: command timed out after {CMD_TIMEOUT}s"
+    except Exception as e:
+        return f"error: {e}"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip() or "(no output)"
+    if max_chars and len(out) > max_chars:
+        head, tail = out[: max_chars * 2 // 3], out[-max_chars // 3:]
+        out = f"{head}\n… [output truncated] …\n{tail}"
+    return f"error: command exited {proc.returncode}\n{out}" if proc.returncode else out

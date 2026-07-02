@@ -33,7 +33,7 @@ from . import mcp_client, planparse, registry, tools
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers.base import ProviderError
 from .session import PendingConfirmation, Session, Task, TaskState
-from .toolspec import TOOL_SPECS
+from .toolspec import TOOL_SPECS, specs_for
 
 MAX_TURNS = 40          # generous budget for real multi-step tasks
 DEFAULT_MODEL = "qwen3.5:9b"
@@ -60,8 +60,9 @@ COMPACT_SYSTEM = (
 )
 
 BASE_SYSTEM_PROMPT = (
-    "You are a careful local coding assistant with five tools: list_files, read_file, "
-    "search_files, edit_file, write_file. Explore before answering or editing — use "
+    "You are a careful coding assistant with file tools (list_files, read_file, search_files, "
+    "edit_file, write_file) and a command tool (run_git for version control; run_command for "
+    "shell commands like tests and builds, when available). Explore before answering or editing — use "
     "search_files to find where something is defined or used instead of guessing paths. "
     "For changes to existing files, prefer edit_file (an exact old_text/new_text "
     "replacement) over write_file — it's faster and safer, especially on large files. "
@@ -306,11 +307,39 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     return result
 
 
+def _run_git(session: Session, task: Task, git_args: str, read_cap: int | None) -> str:
+    """Read-only git runs immediately (and in plan mode); mutating git is
+    confirmation-gated and refused in plan mode."""
+    git_args = (git_args or "").strip()
+    if not git_args:
+        return "error: no git command given"
+    if tools.git_is_read_only(git_args):
+        return tools.do_run_git(git_args, max_chars=read_cap)
+    if session.read_only:
+        return (f"error: plan mode is on — not running mutating git (git {git_args}). Use read-only "
+                "git (status/diff/log) to inspect, and present a plan in your final answer.")
+    if not request_confirmation(session, task, f"Run: git {git_args}?", f"$ git {git_args}"):
+        return "git command rejected by user"
+    return tools.do_run_git(git_args, max_chars=read_cap)
+
+
 def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap: int | None = None) -> str:
     if session.read_only and name in ("edit_file", "write_file"):
         return ("error: plan mode is on — no changes are applied. Do not call edit_file or "
                 "write_file. Investigate with the read-only tools and present your proposed "
                 "changes as a concrete, numbered plan in your final answer instead.")
+    if name == "run_git":
+        return _run_git(session, task, args.get("args", ""), read_cap)
+    if name == "run_command":                       # cloud-only shell tool
+        if session.read_only:
+            return ("error: plan mode is on — not running shell commands. Investigate read-only and "
+                    "present a plan in your final answer.")
+        cmd = (args.get("command") or "").strip()
+        if not cmd:
+            return "error: no command given"
+        if not request_confirmation(session, task, "Run this shell command?", f"$ {cmd}"):
+            return "command rejected by user"
+        return tools.do_run_command(cmd, max_chars=read_cap)
     if mcp_client.manager.is_mcp_tool(name):        # curated MCP tool -> route to its server
         if session.read_only:                       # plan mode: MCP tools may have side effects
             return ("error: plan mode is on — external MCP tools are not run (they may change state). "
@@ -353,6 +382,9 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     # chars). Small local windows get a section suggestion for bigger files; large
     # cloud windows are effectively unbounded.
     read_cap = int(context_budget(provider, model) * 4 * 0.55)
+    # Local models get the constrained git-only tool; cloud (frontier) models get
+    # the full shell tool. See toolspec.specs_for / _dispatch_tool.
+    is_local = getattr(provider, "name", "") == "ollama" and getattr(provider, "api_key", None) is None
 
     if task.conversation is None:
         task.conversation = Conversation(system_prompt=SYSTEM_PROMPT)
@@ -401,7 +433,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 streamed["n"] += len(chunk)
                 on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
-            active_specs = TOOL_SPECS + mcp_client.manager.tool_specs()
+            active_specs = specs_for(is_local) + mcp_client.manager.tool_specs()
             try:
                 resp = provider.stream(conv, model, active_specs, on_text)
             except _Interrupted:
@@ -471,7 +503,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
         try:
-            resp = provider.stream(conv, model, TOOL_SPECS + mcp_client.manager.tool_specs(), on_final)
+            resp = provider.stream(conv, model, specs_for(is_local) + mcp_client.manager.tool_specs(), on_final)
             planparse.finalize_steps(task.plan_steps)
             task.status_line = ""
             task.state = TaskState.DONE

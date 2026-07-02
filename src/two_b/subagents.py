@@ -3,6 +3,7 @@ tool. Each runs in its own Conversation with only the read tools and returns a d
 findings report — heavy file reading happens here and never enters the parent context."""
 from __future__ import annotations
 import concurrent.futures
+import threading
 from . import tools
 from .conversation import Conversation, Message, ToolResult
 
@@ -49,6 +50,16 @@ def _explorer_specs():
     return [s for s in TOOL_SPECS if s.name in keep]
 
 
+class _AnyEvent:
+    """Read-only OR of several threading.Events: is_set() is True if any is set.
+    Lets an explorer honor both the parent task's cancel (esc) and delegate's own
+    batch-timeout signal, while delegate only ever sets its OWN event."""
+    def __init__(self, *events):
+        self._events = [e for e in events if e is not None]
+    def is_set(self) -> bool:
+        return any(e.is_set() for e in self._events)
+
+
 MAX_PARALLEL = 4
 DELEGATE_TIMEOUT = 180  # seconds, wall-clock budget for the whole batch
 _MAX_SECTION = 4000
@@ -59,12 +70,15 @@ def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None) 
     if not tasks:
         return "error: delegate needs at least one {role, goal} task"
 
+    sub_cancel = threading.Event()
+    combined = _AnyEvent(cancel, sub_cancel)
+
     def _one(t):
         role, goal = (t.get("role") or "explore"), t["goal"]
         if role == "work":
             return role, goal, "(worker delegation is not enabled yet — Phase 2)"
         try:
-            return role, goal, run_explorer(goal, provider, model, read_cap=read_cap, cancel=cancel)
+            return role, goal, run_explorer(goal, provider, model, read_cap=read_cap, cancel=combined)
         except Exception as e:  # a subagent failing must not kill the batch
             return role, goal, f"(explorer error: {str(e)[:200]})"
 
@@ -79,8 +93,7 @@ def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None) 
         for fut in concurrent.futures.as_completed(futures, timeout=DELEGATE_TIMEOUT):
             results[futures[fut]] = fut.result()
     except concurrent.futures.TimeoutError:
-        if cancel is not None:
-            cancel.set()
+        sub_cancel.set()
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
 

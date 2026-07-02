@@ -62,3 +62,17 @@ class Delegate(unittest.TestCase):
         self.assertIn("explorer error", out)
         self.assertIn("### [2] explore: good", out)
         self.assertIn("found: good", out)
+
+    def test_batch_timeout_does_not_touch_parent_cancel(self):
+        import threading, time
+        from two_b import subagents
+        parent = threading.Event()
+        subagents.run_explorer = lambda goal, *a, **k: (time.sleep(0.5) or "late")  # slower than the tiny budget
+        orig = subagents.DELEGATE_TIMEOUT
+        subagents.DELEGATE_TIMEOUT = 0.05
+        try:
+            out = subagents.delegate([{"role":"explore","goal":"slow"}], provider=None, model="m", cancel=parent)
+        finally:
+            subagents.DELEGATE_TIMEOUT = orig
+        self.assertFalse(parent.is_set())          # parent task must NOT be cancelled
+        self.assertIn("(timed out)", out)

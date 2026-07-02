@@ -24,7 +24,11 @@ class ToolParam:
 class ToolSpec:
     name: str
     description: str
-    params: tuple[ToolParam, ...]
+    params: tuple[ToolParam, ...] = ()
+    # MCP tools carry an arbitrary JSON Schema that ToolParam can't represent
+    # (nesting, enums, arrays). When set, it's used verbatim as the parameter
+    # schema; the built-in 5 leave it None so their serialized output is unchanged.
+    raw_schema: dict | None = None
 
     def _properties(self) -> dict[str, Any]:
         props: dict[str, Any] = {}
@@ -37,6 +41,11 @@ class ToolSpec:
 
     def _required(self) -> list[str]:
         return [p.name for p in self.params if p.required]
+
+    def _schema(self) -> dict[str, Any]:
+        if self.raw_schema is not None:
+            return self.raw_schema
+        return {"type": "object", "properties": self._properties(), "required": self._required()}
 
 
 TOOL_SPECS: tuple[ToolSpec, ...] = (
@@ -71,8 +80,7 @@ def to_openai(specs: tuple[ToolSpec, ...] = TOOL_SPECS) -> list[dict]:
     """OpenAI / Ollama / OpenRouter / Mistral / NVIDIA function-tool shape."""
     return [
         {"type": "function", "function": {
-            "name": s.name, "description": s.description,
-            "parameters": {"type": "object", "properties": s._properties(), "required": s._required()},
+            "name": s.name, "description": s.description, "parameters": s._schema(),
         }}
         for s in specs
     ]
@@ -80,8 +88,7 @@ def to_openai(specs: tuple[ToolSpec, ...] = TOOL_SPECS) -> list[dict]:
 
 def to_anthropic(specs: tuple[ToolSpec, ...] = TOOL_SPECS) -> list[dict]:
     return [
-        {"name": s.name, "description": s.description,
-         "input_schema": {"type": "object", "properties": s._properties(), "required": s._required()}}
+        {"name": s.name, "description": s.description, "input_schema": s._schema()}
         for s in specs
     ]
 
@@ -89,8 +96,7 @@ def to_anthropic(specs: tuple[ToolSpec, ...] = TOOL_SPECS) -> list[dict]:
 def to_gemini(specs: tuple[ToolSpec, ...] = TOOL_SPECS) -> list[dict]:
     """Gemini wants one tools entry holding functionDeclarations."""
     return [{"functionDeclarations": [
-        {"name": s.name, "description": s.description,
-         "parameters": {"type": "object", "properties": s._properties(), "required": s._required()}}
+        {"name": s.name, "description": s.description, "parameters": s._schema()}
         for s in specs
     ]}]
 

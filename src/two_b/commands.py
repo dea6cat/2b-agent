@@ -5,7 +5,7 @@ import with cli.py.
 """
 import os
 
-from . import config, orchestrator, registry, tools
+from . import config, mcp_client, orchestrator, registry, tools
 from .conversation import Conversation, Message
 from .session import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, MODE_LABELS
 
@@ -131,6 +131,88 @@ def _apply_connect(app, provider, key):
     config.connect(provider, key)
     app.registry = registry.build_registry()             # re-detect with the new key
     app.ui.print(f"Connected [bold]{provider}[/bold] ([dim]{config.mask(key)}[/dim]). Saved for future sessions.")
+
+
+@command("mcp")
+def _mcp(rest, app):
+    """Manage MCP servers/tools: /mcp · /mcp tools <server> · /mcp enable|disable <server> [tool…|all]."""
+    parts = rest.split()
+    if not parts:
+        _mcp_status(app)
+        return
+    sub, args = parts[0].lower(), parts[1:]
+    if sub == "tools" and args:
+        _mcp_list_tools(app, args[0])
+    elif sub in ("enable", "disable") and args:
+        _mcp_toggle(app, sub, args[0], args[1:])
+    else:
+        app.ui.print("Usage: /mcp · /mcp tools <server> · /mcp enable <server> <tool…|all> · "
+                     "/mcp disable <server> [tool…|all]")
+
+
+def _mcp_status(app):
+    servers = mcp_client.load_servers()
+    if not servers:
+        app.ui.print("No MCP servers configured. Add them under [bold]\"mcpServers\"[/bold] in "
+                     "[bold]~/.config/2b/mcp.json[/bold] or ./.mcp.json.")
+        return
+    enabled = mcp_client.load_enabled()
+    app.ui.print("[bold]MCP servers:[/bold]")
+    for name in servers:
+        en = enabled.get(name, [])
+        err = mcp_client.manager.error(name)
+        state = f"[green]{len(en)} tool(s) enabled[/green]" if en else "[dim]no tools enabled[/dim]"
+        note = f"  [red]({err})[/red]" if err else ""
+        app.ui.print(f"  {name:<16} {state}{note}")
+    app.ui.print("  [dim]/mcp tools <server> to list · /mcp enable <server> <tool…|all> to expose[/dim]")
+
+
+def _mcp_list_tools(app, server):
+    if server not in mcp_client.load_servers():
+        app.ui.print(f"[red]No MCP server '{server}' in config.[/red]")
+        return
+    app.ui.print(f"Connecting to [bold]{server}[/bold]…")
+    tools_list = mcp_client.manager.available_tools(server)
+    if not tools_list:
+        err = mcp_client.manager.error(server)
+        app.ui.print(f"[red]Could not list tools for {server}[/red]" + (f": {err}" if err else ""))
+        return
+    enabled = set(mcp_client.load_enabled().get(server, []))
+    app.ui.print(f"[bold]{server}[/bold] — {len(tools_list)} tools:")
+    for t in tools_list:
+        mark = "[green]x[/green]" if t.name in enabled else " "
+        desc = ((t.description or "").strip().splitlines() or [""])[0][:70]
+        app.ui.print(f"  [{mark}] {t.name:<30} [dim]{desc}[/dim]")
+    app.ui.print(f"  [dim]/mcp enable {server} <tool…|all>[/dim]")
+
+
+def _mcp_toggle(app, action, server, tool_args):
+    if server not in mcp_client.load_servers():
+        app.ui.print(f"[red]No MCP server '{server}' in config.[/red]")
+        return
+    available = {t.name for t in mcp_client.manager.available_tools(server)}
+    if not available and action == "enable":
+        err = mcp_client.manager.error(server)
+        app.ui.print(f"[red]Could not connect to {server}[/red]" + (f": {err}" if err else ""))
+        return
+    state = mcp_client.load_enabled()
+    current = set(state.get(server, []))
+    targets = set(available) if (tool_args and tool_args[0].lower() == "all") else set(tool_args)
+    if action == "enable":
+        unknown = targets - available
+        if unknown:
+            app.ui.print(f"[red]Unknown tool(s):[/red] {', '.join(sorted(unknown))}. Try /mcp tools {server}.")
+            return
+        current |= targets
+    else:
+        current = set() if not tool_args else (current - targets)
+    if current:
+        state[server] = sorted(current)
+    else:
+        state.pop(server, None)
+    mcp_client.save_enabled(state)
+    mcp_client.manager.refresh()
+    app.ui.print(f"{server}: [bold]{len(state.get(server, []))}[/bold] tool(s) enabled.")
 
 
 @command("disconnect")

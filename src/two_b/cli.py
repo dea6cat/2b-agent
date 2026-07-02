@@ -268,6 +268,10 @@ def main() -> None:
     if not args.model:
         console.print(f"[dim]No --model given, autodetected: {model}[/dim]")
 
+    # Connect any MCP servers with enabled tools (no-op if none are configured).
+    from . import mcp_client
+    mcp_client.manager.start()
+
     # Full-screen Textual TUI by default on an interactive terminal; the proven
     # line-mode REPL for --classic and for scripted/piped (non-TTY) use.
     interactive = sys.stdin.isatty() and sys.stdout.isatty()

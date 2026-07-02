@@ -9,6 +9,7 @@ dependencies = [
     "rich>=13.0",
     "prompt_toolkit>=3.0",
     "textual>=0.60",
+    "mcp>=1.0",
 ]
 
 [project.scripts]

@@ -129,6 +129,9 @@ def _describe_tool(name: str, args: dict) -> str:
         return f"Editing {p}"
     if name == "write_file":
         return f"Writing {p}"
+    if "__" in name:                       # MCP tool: server__tool
+        server, _, tool = name.partition("__")
+        return f"{server} · {tool}"
     return name
 
 
@@ -425,9 +428,9 @@ class TwoBApp(App):
 
     def action_interrupt(self) -> None:
         t = self.session.active_task
-        if t is not None:
-            t.cancel_flag.set()
-            self.log_write(Text("interrupting…", style="dim"))
+        if t is not None and t.state == TaskState.ACTIVE:
+            t.cancel_flag.set()                 # orchestrator aborts the stream and returns to idle
+            self.log_write(Text("stopping…", style=self.c("faint")))
 
     def action_cycle_mode(self) -> None:
         self.session.cycle_mode()
@@ -625,7 +628,7 @@ class TwoBApp(App):
         others = [t for t in self.session.tasks if t.id != self.session.active_task_id
                   and t.state in (TaskState.QUEUED, TaskState.BACKGROUNDED)]
         extra = f"  ·  {len(others)} queued/bg" if others else ""
-        st.update(f"{left}    │    {model}{extra}    ·  esc interrupt · ctrl+b bg · ctrl+d quit")
+        st.update(f"{left}    │    {model}{extra}    ·  esc stop · ctrl+b bg · ctrl+d quit")
 
     # ---- header / intro ----
     def _banner_header(self) -> Text:

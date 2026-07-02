@@ -68,11 +68,14 @@ model has to understand.
   re-serializes it fresh for whoever's active — so you can switch models *mid-task* with `/model`
   and keep every bit of context. Start a task on a local Qwen, hand it to Claude when it gets hard,
   keep going.
+- **MCP tools, curated.** Pull in tools from MCP servers (dart, mempalace, …) — but **per tool**, not
+  wholesale, because flooding a small model with tools is exactly what breaks it. You enable a server
+  and pick which of its tools the model sees (`/mcp`). See [MCP servers](#mcp-servers-extra-tools).
 - **Operating modes**, cycled with **Shift+Tab** or set with `/mode`:
   - **normal** — every write/edit asks first.
   - **accept edits** — writes apply automatically.
-  - **plan mode** — read-only; `edit_file`/`write_file` are refused and the model returns a plan
-    instead of touching disk.
+  - **plan mode** — read-only; `edit_file`/`write_file` *and* MCP tools are refused (they may change
+    state), so the model investigates and returns a plan instead of touching anything.
 - **Auto-compaction.** When a conversation nears the model's context window — which happens fast on
   small local windows — 2B folds the older turns into a summary and keeps going uninterrupted,
   instead of hitting the wall. It cuts on a safe boundary so nothing breaks, and shows you
@@ -172,6 +175,7 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | `/models [filter]` | List available models, grouped by provider |
 | `/connect [provider] [key]` | Connect a provider (hidden key prompt); bare shows status |
 | `/disconnect <provider>` | Remove a saved provider key |
+| `/mcp` | MCP servers/tools: status, `tools <server>`, `enable`/`disable <server> <tool…\|all>` |
 | `/mode [normal\|accept\|plan]` | Set operating mode (or **Shift+Tab** to cycle) |
 | `/theme [system\|light\|dark]` | Switch color theme |
 | `/context` | Show estimated context usage (auto-compacts near the limit) |
@@ -194,9 +198,41 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | **Ctrl+B** | Background the running task |
 | **Ctrl+Y** | Copy the last reply |
 | **Ctrl+C** | Copy the current mouse selection |
-| **Esc** | Interrupt the running task |
+| **Esc** | Stop the current stream/task immediately — back to idle |
 | **Ctrl+D** | Quit |
 | **Tab** | Accept the top `/`-command suggestion |
+
+### MCP servers (extra tools)
+
+2B can pull in tools from [MCP](https://modelcontextprotocol.io) servers (stdio) like `dart` or
+`mempalace`. But its whole reason for existing is that **small local models break when you flood them
+with tools** — so MCP tools are opt-in and **curated per tool**: you enable a server and pick exactly
+which of its tools reach the model. Nothing is exposed until you say so.
+
+Declare servers the usual way — a Claude-Code-style `mcpServers` block in `~/.config/2b/mcp.json` (or
+`./.mcp.json` in a project, which wins):
+
+```json
+{
+  "mcpServers": {
+    "dart": { "command": "dart", "args": ["mcp-server"] }
+  }
+}
+```
+
+Then curate from inside 2B:
+
+```
+/mcp                          # servers and how many tools each has enabled
+/mcp tools dart               # list a server's tools ([x] = enabled)
+/mcp enable dart hot_reload analyze_files
+/mcp enable dart all          # expose everything (careful on small models)
+/mcp disable dart hot_reload  # or /mcp disable dart  to turn the whole server off
+```
+
+Enabled tools appear to the model as `server__tool` (e.g. `dart__hot_reload`) and their results come
+straight back into the loop. Only the tools you enable are ever sent — the model's tool list stays as
+small as you keep it.
 
 ### Configuration
 

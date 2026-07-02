@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import planparse, registry, tools
+from . import mcp_client, planparse, registry, tools
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers.base import ProviderError
 from .session import PendingConfirmation, Session, Task, TaskState
@@ -97,6 +97,21 @@ class AgentEvent:
     type: EventType
     task_id: str
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+class _Interrupted(Exception):
+    """Raised inside the stream callback when the task's cancel flag is set, so
+    an in-flight generation aborts immediately (esc -> stop, not next-turn)."""
+
+
+def _finish_stopped(task: Task, on_event: Callable[["AgentEvent"], None]) -> None:
+    """Return a task to idle after the user stops it — commit whatever streamed,
+    show a quiet 'Stopped.' line, no red error."""
+    task.status_line = ""
+    task.state = TaskState.ERROR
+    task.error = "stopped"
+    on_event(AgentEvent(EventType.LOG, task.id, {"text": "Stopped."}))
+    on_event(AgentEvent(EventType.TASK_DONE, task.id))
 
 
 def pick_default_model() -> str:
@@ -283,6 +298,11 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict) -> str:
         return ("error: plan mode is on — no changes are applied. Do not call edit_file or "
                 "write_file. Investigate with the read-only tools and present your proposed "
                 "changes as a concrete, numbered plan in your final answer instead.")
+    if mcp_client.manager.is_mcp_tool(name):        # curated MCP tool -> route to its server
+        if session.read_only:                       # plan mode: MCP tools may have side effects
+            return ("error: plan mode is on — external MCP tools are not run (they may change state). "
+                    "Investigate with the read-only tools and present a concrete plan in your final answer.")
+        return mcp_client.manager.call_tool(name, args)
     if name == "edit_file":
         return apply_edit(session, task, args["path"], args["old_text"], args["new_text"])
     if name == "write_file":
@@ -330,9 +350,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     try:
         for _ in range(MAX_TURNS):
             if task.cancel_flag.is_set():
-                task.state = TaskState.ERROR
-                task.error = "cancelled"
-                on_event(AgentEvent(EventType.TASK_ERROR, task.id, {"error": "cancelled"}))
+                _finish_stopped(task, on_event)
                 return
 
             _maybe_compact(conv, provider, model, task, on_event)
@@ -353,6 +371,8 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             streamed = {"n": 0, "perf": False}
 
             def on_text(chunk: str, _t=task, _p=provider, _m=model) -> None:
+                if _t.cancel_flag.is_set():          # esc pressed mid-stream -> abort now
+                    raise _Interrupted()
                 if not streamed["perf"] and getattr(_p, "name", "") == "ollama" and hasattr(_p, "perf"):
                     streamed["perf"] = True
                     try:
@@ -364,8 +384,12 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 streamed["n"] += len(chunk)
                 on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
+            active_specs = TOOL_SPECS + mcp_client.manager.tool_specs()
             try:
-                resp = provider.stream(conv, model, TOOL_SPECS, on_text)
+                resp = provider.stream(conv, model, active_specs, on_text)
+            except _Interrupted:
+                _finish_stopped(task, on_event)
+                return
             except ProviderError as e:
                 task.state = TaskState.ERROR
                 task.error = str(e)
@@ -400,6 +424,9 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             conv.append(msg)
             results = []
             for tc in msg.tool_calls:
+                if task.cancel_flag.is_set():        # esc while tools are running
+                    _finish_stopped(task, on_event)
+                    return
                 planparse.infer_active_step(task.plan_steps, tc.name, tc.arguments)
                 task.status_line = _STATUS.get(tc.name, "Working")
                 shown = {k: (v if k != "content" else f"<{len(v)} chars>") for k, v in tc.arguments.items()}
@@ -421,11 +448,13 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
         got = {"n": 0}
 
         def on_final(chunk: str, _t=task) -> None:
+            if _t.cancel_flag.is_set():
+                raise _Interrupted()
             got["n"] += len(chunk)
             on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
         try:
-            resp = provider.stream(conv, model, TOOL_SPECS, on_final)
+            resp = provider.stream(conv, model, TOOL_SPECS + mcp_client.manager.tool_specs(), on_final)
             planparse.finalize_steps(task.plan_steps)
             task.status_line = ""
             task.state = TaskState.DONE
@@ -434,6 +463,8 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                     "(reached the tool-call limit without a final answer)"
                 on_event(AgentEvent(EventType.ASSISTANT_DELTA, task.id, {"chunk": txt}))
             on_event(AgentEvent(EventType.TASK_DONE, task.id))
+        except _Interrupted:
+            _finish_stopped(task, on_event)
         except Exception as e:
             task.state = TaskState.ERROR
             task.error = f"max turns reached; final attempt failed: {e}"

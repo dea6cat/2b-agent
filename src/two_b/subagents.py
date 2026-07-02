@@ -66,28 +66,36 @@ DELEGATE_TIMEOUT = 180  # seconds, wall-clock budget for the whole batch
 _MAX_SECTION = 4000
 
 
-def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None) -> str:
+def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None, read_only=False) -> tuple[str, list]:
     tasks = [t for t in (tasks or []) if isinstance(t, dict) and t.get("goal")]
     if not tasks:
-        return "error: delegate needs at least one {role, goal} task"
+        return "error: delegate needs at least one {role, goal} task", []
 
     sub_cancel = threading.Event()
     combined = _AnyEvent(cancel, sub_cancel)
 
     def _one(t):
         role, goal = (t.get("role") or "explore"), t["goal"]
-        if role == "work":
-            return role, goal, "(worker delegation is not enabled yet — Phase 2)"
+        run_as_worker = role == "work" and not read_only
         try:
-            return role, goal, run_explorer(goal, provider, model, read_cap=read_cap, cancel=combined)
+            if run_as_worker:
+                report, changes = run_worker(goal, provider, model, read_cap=read_cap, cancel=combined)
+                return "work", goal, report, changes
+            if role == "work":  # read_only (plan mode): no writes, run as an explorer
+                out = run_explorer(goal, provider, model, read_cap=read_cap, cancel=combined)
+                return "explore", goal, out, []
+            out = run_explorer(goal, provider, model, read_cap=read_cap, cancel=combined)
+            return role, goal, out, []
         except Exception as e:  # a subagent failing must not kill the batch
-            return role, goal, f"(explorer error: {str(e)[:200]})"
+            if run_as_worker:
+                return "work", goal, f"(worker error: {str(e)[:200]})", []
+            return "explore", goal, f"(explorer error: {str(e)[:200]})", []
 
     # Not a `with` block on purpose: ThreadPoolExecutor.__exit__ calls
     # shutdown(wait=True), which would block on any straggler exactly like the
     # timeout below is meant to avoid. We call shutdown() exactly once, with
     # wait=False, so this function returns as soon as the batch timeout hits.
-    results: list[tuple[str, str, str] | None] = [None] * len(tasks)
+    results: list[tuple[str, str, str, list] | None] = [None] * len(tasks)
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL)
     futures = {ex.submit(_one, t): i for i, t in enumerate(tasks)}
     try:
@@ -99,16 +107,18 @@ def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None) 
         ex.shutdown(wait=False, cancel_futures=True)
 
     lines = [f"## delegate results ({len(results)} task(s))"]
-    for i, (t, r) in enumerate(zip(tasks, results), 1):
+    changes_all: list[tuple[str, str, str, int]] = []
+    for i, (t, r) in enumerate(zip(tasks, results)):
         if r is None:
             role, goal = (t.get("role") or "explore"), t["goal"]
-            out = "(timed out)"
+            out, changes = "(timed out)", []
         else:
-            role, goal, out = r
+            role, goal, out, changes = r
             if len(out) > _MAX_SECTION:
                 out = out[:_MAX_SECTION] + " …[truncated]"
-        lines.append(f"\n### [{i}] {role}: {goal}\n{out}")
-    return "\n".join(lines)
+        lines.append(f"\n### [{i + 1}] {role}: {goal}\n{out}")
+        changes_all.extend((ap, orig, final, i) for (ap, orig, final) in changes)
+    return "\n".join(lines), changes_all
 
 
 class _WorkerFS:

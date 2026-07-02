@@ -39,15 +39,12 @@ class Delegate(unittest.TestCase):
 
     def test_digest_has_one_section_per_task(self):
         subagents.run_explorer = lambda goal, *a, **k: f"found: {goal}"   # stub
-        out = subagents.delegate(
+        digest, changes = subagents.delegate(
             [{"role":"explore","goal":"A"}, {"role":"explore","goal":"B"}],
             provider=None, model="m")
-        self.assertIn("A", out); self.assertIn("B", out)
-        self.assertIn("found: A", out); self.assertIn("found: B", out)
-
-    def test_work_role_stubbed(self):
-        out = subagents.delegate([{"role":"work","goal":"edit x"}], provider=None, model="m")
-        self.assertIn("not enabled yet", out)
+        self.assertIn("A", digest); self.assertIn("B", digest)
+        self.assertIn("found: A", digest); self.assertIn("found: B", digest)
+        self.assertEqual(changes, [])
 
     def test_batch_failure_isolation(self):
         def flaky(goal, *a, **k):
@@ -55,13 +52,14 @@ class Delegate(unittest.TestCase):
                 raise RuntimeError("boom")
             return f"found: {goal}"
         subagents.run_explorer = flaky
-        out = subagents.delegate(
+        digest, changes = subagents.delegate(
             [{"role": "explore", "goal": "bad"}, {"role": "explore", "goal": "good"}],
             provider=None, model="m")
-        self.assertIn("### [1] explore: bad", out)
-        self.assertIn("explorer error", out)
-        self.assertIn("### [2] explore: good", out)
-        self.assertIn("found: good", out)
+        self.assertIn("### [1] explore: bad", digest)
+        self.assertIn("explorer error", digest)
+        self.assertIn("### [2] explore: good", digest)
+        self.assertIn("found: good", digest)
+        self.assertEqual(changes, [])
 
     def test_batch_timeout_does_not_touch_parent_cancel(self):
         import threading, time
@@ -71,11 +69,49 @@ class Delegate(unittest.TestCase):
         orig = subagents.DELEGATE_TIMEOUT
         subagents.DELEGATE_TIMEOUT = 0.05
         try:
-            out = subagents.delegate([{"role":"explore","goal":"slow"}], provider=None, model="m", cancel=parent)
+            digest, changes = subagents.delegate([{"role":"explore","goal":"slow"}], provider=None, model="m", cancel=parent)
         finally:
             subagents.DELEGATE_TIMEOUT = orig
         self.assertFalse(parent.is_set())          # parent task must NOT be cancelled
-        self.assertIn("(timed out)", out)
+        self.assertIn("(timed out)", digest)
+        self.assertEqual(changes, [])
+
+
+class DelegateWorkers(unittest.TestCase):
+    def setUp(self):
+        self._w, self._e = subagents.run_worker, subagents.run_explorer
+
+    def tearDown(self):
+        subagents.run_worker, subagents.run_explorer = self._w, self._e
+
+    def test_work_collects_changes(self):
+        subagents.run_worker = lambda g, *a, **k: (f"did {g}", [("/x/a.py", "old\n", "new\n")])
+        digest, changes = subagents.delegate([{"role": "work", "goal": "A"}], provider=None, model="m")
+        self.assertIn("did A", digest)
+        self.assertEqual(changes, [("/x/a.py", "old\n", "new\n", 0)])
+
+    def test_read_only_runs_work_as_explore(self):
+        subagents.run_explorer = lambda g, *a, **k: f"explored {g}"
+        digest, changes = subagents.delegate([{"role": "work", "goal": "A"}], provider=None, model="m", read_only=True)
+        self.assertIn("explored A", digest); self.assertIn("### [1] explore: A", digest)
+        self.assertEqual(changes, [])
+
+    def test_multiple_workers_tag_changes_with_task_index(self):
+        subagents.run_worker = lambda g, *a, **k: (f"did {g}", [(f"/x/{g}.py", "old\n", "new\n")])
+        subagents.run_explorer = lambda g, *a, **k: f"explored {g}"
+        digest, changes = subagents.delegate(
+            [{"role": "explore", "goal": "look"}, {"role": "work", "goal": "B"}],
+            provider=None, model="m")
+        self.assertIn("explored look", digest); self.assertIn("did B", digest)
+        self.assertEqual(changes, [("/x/B.py", "old\n", "new\n", 1)])
+
+    def test_worker_error_isolated_with_no_changes(self):
+        def flaky(g, *a, **k):
+            raise RuntimeError("boom")
+        subagents.run_worker = flaky
+        digest, changes = subagents.delegate([{"role": "work", "goal": "A"}], provider=None, model="m")
+        self.assertIn("worker error", digest)
+        self.assertEqual(changes, [])
 
 
 class WorkerFS(unittest.TestCase):

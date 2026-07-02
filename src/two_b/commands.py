@@ -95,6 +95,50 @@ def _model(rest, app):
     app.ui.print(f"Model set to [bold]{provider.name}:{model}[/bold] (context preserved).")
 
 
+def _model_label(app, qualified: str) -> str:
+    """' (local)' / ' (cloud)' for a 'provider:model' string, by its provider prefix
+    (independent of whether that provider is currently reachable). '' if unknown."""
+    prefix = qualified.split(":", 1)[0] if ":" in qualified else ""
+    prov = app.registry.get(prefix)
+    if prov is None:
+        return ""
+    return " (local)" if registry.is_local(prov) else " (cloud)"
+
+
+@command("default")
+def _default(rest, app):
+    """Show or set the persisted default model (local or cloud)."""
+    saved = config.get_prefs().get("default_model")
+    if not rest.strip():
+        if saved:
+            app.ui.print(f"Default model: [bold]{saved}[/bold]{_model_label(app, saved)}")
+        else:
+            app.ui.print("No default model saved — set one with [bold]/default <model>[/bold].")
+        active = app.session.default_model
+        if active and active != saved:
+            app.ui.print(f"Active this session: [bold]{active}[/bold]{_model_label(app, active)}")
+        return
+    name = rest.strip()
+    resolved = registry.resolve(app.registry, name)
+    if resolved is None:
+        app.ui.print(
+            f"[red]Could not resolve model:[/red] {name}. "
+            "It may be ambiguous — try [bold]provider:model[/bold]. See /models."
+        )
+        return
+    provider, model = resolved
+    qualified = f"{provider.name}:{model}"
+    # Switch it in for this session (context preserved, exactly like /model)…
+    app.session.default_model = qualified
+    active = app.session.active_task
+    if active is not None:
+        active.model_override = qualified
+    # …and remember it as the startup default for future sessions.
+    config.set_pref("default_model", qualified)
+    kind = "local" if registry.is_local(provider) else "cloud"
+    app.ui.print(f"Default set to [bold]{qualified}[/bold] ({kind}), context preserved.")
+
+
 def _show_connections(app):
     saved = config.saved_providers()
     app.ui.print("[bold]Providers:[/bold]")

@@ -151,8 +151,10 @@ ollama pull qwen3.5:9b        # my default — a good balance on an 18 GB machin
 ```
 
 The installer is scriptable too: `--yes` (accept defaults, no prompts), `--clean` / `--no-clean`,
-`--models "qwen3.5:9b qwen3:8b"`, `--no-models`, `--no-benchmark` (skip the correctness check). Pass
-them through the pipe with `... | sh -s -- --yes --models "qwen3.5:9b"`.
+`--models "qwen3.5:9b qwen3:8b"`, `--no-models`, `--no-benchmark` (skip the correctness check),
+`--fix-path` / `--no-fix-path` (add uv's tool dir to your PATH for you via `uv tool update-shell`,
+or leave it — otherwise it asks, and never edits a profile without consent). Pass them through the
+pipe with `... | sh -s -- --yes --models "qwen3.5:9b"`.
 
 ---
 
@@ -163,6 +165,8 @@ them through the pipe with `... | sh -s -- --yes --models "qwen3.5:9b"`.
 2b "add a docstring to lib/main.dart"   # run one task, then drop into the session
 2b --model qwen3.5:9b    # pin a model
 2b --list-models         # what's available across configured providers
+2b --doctor              # diagnose PATH, Ollama, and the default model, then exit
+2b --rm                  # uninstall 2B and delete its config (asks first); --rm --yes to skip
 ```
 
 Then just type what you want done. Type `/` to see the commands.

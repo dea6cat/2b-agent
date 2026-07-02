@@ -25,6 +25,7 @@ WANT_CLEAN=""        # "", "yes", "no"
 WANT_MODELS=""       # "", "no", or an explicit space list
 MODELS_ARG=""
 WANT_BENCH=1         # correctness self-test runs by default; --no-benchmark skips
+WANT_FIXPATH=""      # "", "yes", "no" — put uv's tool dir on PATH (else just print how)
 for a in "$@"; do
   case "$a" in
     -y|--yes)   ASSUME_YES=1 ;;
@@ -32,6 +33,8 @@ for a in "$@"; do
     --no-clean) WANT_CLEAN="no" ;;
     --no-models) WANT_MODELS="no" ;;
     --no-benchmark) WANT_BENCH=0 ;;
+    --fix-path) WANT_FIXPATH="yes" ;;
+    --no-fix-path) WANT_FIXPATH="no" ;;
     --models)   WANT_MODELS="list"; MODELS_ARG="__next__" ;;
     *)          if [ "$MODELS_ARG" = "__next__" ]; then MODELS_ARG="$a"; fi ;;
   esac
@@ -53,8 +56,9 @@ run_with_timeout() {  # $1=seconds, rest=command
   return "$rwt_status"
 }
 
-# Report-only correctness check: drive `2b` headlessly on a real one-line edit
-# and verify the result. Prints a per-model line; returns non-zero if it failed.
+# Report-only correctness check: drive `2b` headlessly on a small two-change coding
+# task (edit an existing method + add a new one) and verify the result. Prints a
+# per-model line, records a row in GRADE_FILE (if set), and returns non-zero on failure.
 correctness_test() {  # $1=model
   ct_model="$1"
   have 2b || { info "2b not on PATH — skipping correctness check for $ct_model"; return 0; }
@@ -66,7 +70,7 @@ class Greeter {
   String greet(String name) => 'Hello, $name!';
 }
 DART
-  ct_task="In sample.dart, change the greeting inside greet() from 'Hello, \$name!' to 'Hi there, \$name!'. Make ONLY that change — do not touch anything else."
+  ct_task="In sample.dart, make exactly two changes to the Greeter class and nothing else: (1) change the greeting returned by greet() from 'Hello, \$name!' to 'Hi there, \$name!'; (2) add a new method to the class: String farewell(String name) => 'Bye, \$name!';"
   ct_start=$(date +%s 2>/dev/null || echo 0)
   ( cd "$ct_dir" && export OLLAMA_API_BASE="$OLLAMA_HOST" && \
     run_with_timeout 150 2b --classic --model "$ct_model" --yes "$ct_task" \
@@ -74,11 +78,18 @@ DART
   ct_end=$(date +%s 2>/dev/null || echo 0)
   ct_wall=$((ct_end - ct_start))
   ct_content=$(cat "$ct_dir/sample.dart" 2>/dev/null)
-  ct_new=0; ct_old=0
+  ct_new=0; ct_old=0; ct_fw=0; ct_bye=0
   case "$ct_content" in *'Hi there, $name!'*) ct_new=1 ;; esac
   case "$ct_content" in *'Hello, $name!'*) ct_old=1 ;; esac
+  case "$ct_content" in *farewell*) ct_fw=1 ;; esac
+  case "$ct_content" in *'Bye, $name!'*) ct_bye=1 ;; esac
   rm -rf "$ct_dir"
-  if [ "$ct_new" -eq 1 ] && [ "$ct_old" -eq 0 ]; then
+  ct_correct=no
+  if [ "$ct_new" -eq 1 ] && [ "$ct_old" -eq 0 ] && [ "$ct_fw" -eq 1 ] && [ "$ct_bye" -eq 1 ]; then
+    ct_correct=yes
+  fi
+  [ -n "${GRADE_FILE:-}" ] && printf '%s|%s|%s\n' "$ct_model" "$ct_correct" "$ct_wall" >> "$GRADE_FILE"
+  if [ "$ct_correct" = yes ]; then
     printf '  %-20s ✓ correct   (%ss)\n' "$ct_model" "$ct_wall"
     return 0
   fi
@@ -291,6 +302,7 @@ EOF
 
     # --- self-test each pulled model --------------------------------------
     log "Self-testing (tok/s + GPU residency on a short prompt)…"
+    PERF_FILE=$(mktemp)
     for m in $SELECTED; do
       ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$m" || continue
       ollama stop "$m" >/dev/null 2>&1 || true
@@ -316,6 +328,7 @@ PYEOF
       GPU=no; printf '%s' "$PS" | grep -q "100% GPU" && GPU=yes
       CTX=$(2b --print-ctx "$m" 2>/dev/null | sed -E 's/.*: ([0-9]+) tokens.*/\1/')
       printf '  %-20s %6s tok/s   [%s]   100%%GPU=%s   ctx=%s\n' "$m" "$TOKS" "$MEM" "$GPU" "${CTX:-?}"
+      printf '%s|%s|%s|%s|%s\n' "$m" "$TOKS" "$MEM" "$GPU" "${CTX:-?}" >> "$PERF_FILE"
     done
   fi
 
@@ -326,8 +339,9 @@ PYEOF
       BENCH_SET=$(printf '%s\n' $EXISTING | awk 'NR==1{print}')   # one representative
     fi
     if [ -n "$BENCH_SET" ]; then
-      log "Correctness self-test — a real one-line edit, run through 2B itself (up to ~2 min per model)…"
+      log "Correctness self-test — a real two-change coding task, run through 2B itself (up to ~2 min per model)…"
       FAILED_MODELS=""
+      GRADE_FILE=$(mktemp)
       for m in $BENCH_SET; do
         correctness_test "$m" || FAILED_MODELS="$FAILED_MODELS $m"
       done
@@ -346,9 +360,37 @@ case " ${SELECTED:-} ${EXISTING:-} " in *" qwen3.5:9b "*) DEFAULT_MODEL="qwen3.5
 [ -z "$DEFAULT_MODEL" ] && DEFAULT_MODEL=$(printf '%s\n' ${EXISTING:-} | awk 'NR==1{print}')
 [ -z "$DEFAULT_MODEL" ] && DEFAULT_MODEL="qwen3.5:9b"
 
-case " ${FAILED_MODELS:-} " in
-  *" $DEFAULT_MODEL "*) info "note: $DEFAULT_MODEL failed the correctness self-test — it may struggle with edits in 2B. Try another model with /model, or re-run and pick a different one." ;;
-esac
+# Combined grade: join perf (tok/s/mem/GPU) with correctness into a KEEP/REMOVE
+# table — all measured through 2B, never a generic harness that unfairly fails
+# small models. Only when the benchmark actually ran and produced rows.
+if [ "${WANT_BENCH:-0}" -eq 1 ] && [ -n "${GRADE_FILE:-}" ] && [ -s "$GRADE_FILE" ]; then
+  log "Grade (measured through 2B — verdict per model)"
+  printf '  %-20s %8s  %-12s %-8s %-7s %s\n' MODEL TOK/S MEMORY 100%GPU CODING VERDICT
+  awk -F'|' -v pf="${PERF_FILE:-/dev/null}" -v def="$DEFAULT_MODEL" '
+    BEGIN {
+      while ((getline line < pf) > 0) {
+        split(line, a, "|"); toks[a[1]]=a[2]; mem[a[1]]=a[3]; gpu[a[1]]=a[4];
+      }
+      best=""; bestv=-1;
+    }
+    {
+      m=$1; ok=$2; wall=$3;
+      verdict=(ok=="yes")?"KEEP":"REMOVE";
+      t=(m in toks)?toks[m]:"?"; mm=(m in mem)?mem[m]:"?"; g=(m in gpu)?gpu[m]:"?";
+      printf "  %-20s %8s  %-12s %-8s %-7s %s\n", m, t, mm, g, wall"s", verdict;
+      if (ok=="yes") { keep[m]=1; if ((t+0)>bestv) { bestv=t+0; best=m; } }
+    }
+    END {
+      if (best!="") {
+        if (!(def in keep))
+          printf "\n  note: %s was graded REMOVE — pick a KEEP model, e.g. /default %s (fastest that passed).\n", def, best;
+        else
+          printf "\n  suggested default: %s (fastest model that passed).\n", best;
+      }
+    }
+  ' "$GRADE_FILE"
+fi
+rm -f "${PERF_FILE:-}" "${GRADE_FILE:-}"
 
 log "2B is ready."
 cat <<EOF
@@ -374,9 +416,22 @@ BIN_DIR=$(uv tool dir --bin 2>/dev/null) || BIN_DIR=""
 case ":$ORIG_PATH:" in
   *":$BIN_DIR:"*) ;;   # already persistent — nothing to do
   *)
-    log "One more step: put 2B on your PATH so '2b' works in new terminals."
-    info "$BIN_DIR isn't on your PATH yet. Run this, then open a new terminal:"
-    info "  uv tool update-shell"
-    info "or add it to your shell profile yourself:"
-    info "  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc" ;;
+    # Decide whether to add it for the user: --fix-path forces it, --no-fix-path
+    # opts out, otherwise ask (interactive only). We never edit a profile silently.
+    DO_FIX=0
+    case "$WANT_FIXPATH" in
+      yes) DO_FIX=1 ;;
+      no)  DO_FIX=0 ;;
+      *)   [ "$INTERACTIVE" -eq 1 ] && confirm "Put 2B on your PATH now (runs 'uv tool update-shell')?" y && DO_FIX=1 ;;
+    esac
+    if [ "$DO_FIX" -eq 1 ] && have uv && uv tool update-shell >/dev/null 2>&1; then
+      log "Added uv's tool directory to your PATH."
+      info "Open a new terminal (or re-source your shell profile), then '2b' works everywhere."
+    else
+      log "One more step: put 2B on your PATH so '2b' works in new terminals."
+      info "$BIN_DIR isn't on your PATH yet. Run this, then open a new terminal:"
+      info "  uv tool update-shell"
+      info "or add it to your shell profile yourself:"
+      info "  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc"
+    fi ;;
 esac

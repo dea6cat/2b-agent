@@ -237,6 +237,10 @@ def main() -> None:
     parser.add_argument("--version", action="version", version=f"2b {__version__}")
     parser.add_argument("--print-ctx", metavar="MODEL", nargs="?", const="",
                         help="Print the context window 2B will run a local model at (sized to this machine), and exit")
+    parser.add_argument("--doctor", action="store_true",
+                        help="Run environment diagnostics (PATH, Ollama, default model) and exit")
+    parser.add_argument("--rm", action="store_true",
+                        help="Uninstall 2B and delete its config (~/.config/2b), then exit")
     parser.add_argument("task", nargs="?", help="An initial task to run before dropping into the session")
     args = parser.parse_args()
 
@@ -245,6 +249,20 @@ def main() -> None:
     config.load_into_env()
 
     console = Console()
+
+    if args.doctor:
+        from . import doctor
+        raise SystemExit(doctor.run(console.print))
+
+    if args.rm:
+        from . import uninstall
+
+        def _confirm(prompt: str) -> bool:
+            try:
+                return input(f"{prompt} [y/N] ").strip().lower() == "y"
+            except EOFError:
+                return False
+        raise SystemExit(uninstall.run(console.print, _confirm, args.yes))
 
     if args.list_models:
         from . import registry
@@ -272,11 +290,20 @@ def main() -> None:
         raise SystemExit(0)
 
     try:
-        model = args.model or orchestrator.pick_default_model()
+        if args.model:
+            model = args.model
+        else:
+            # Prefer a persisted /default, but only if it still resolves (provider
+            # reachable / key present); otherwise fall back to local autodetect.
+            from . import registry
+            saved = config.get_prefs().get("default_model")
+            model = saved if (saved and registry.resolve(registry.build_registry(), saved) is not None) else None
+            model = model or orchestrator.pick_default_model()
     except SystemExit:
         raise
     if not args.model:
-        console.print(f"[dim]No --model given, autodetected: {model}[/dim]")
+        src = "saved default" if config.get_prefs().get("default_model") == model else "autodetected"
+        console.print(f"[dim]No --model given, {src}: {model}[/dim]")
 
     # Connect any MCP servers with enabled tools (no-op if none are configured).
     from . import mcp_client

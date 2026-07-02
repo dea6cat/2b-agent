@@ -53,7 +53,7 @@ class SlashCompleter(Completer):
                                      display=f"/{name}", display_meta=doc)
             return
         cmd, _, arg = text[1:].partition(" ")      # completing an argument
-        if cmd == "model":
+        if cmd in ("model", "default"):
             for full in self._models():
                 if arg.lower() in full.lower():
                     yield Completion(full, start_position=-len(arg))

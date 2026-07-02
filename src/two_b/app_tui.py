@@ -373,8 +373,8 @@ class TwoBApp(App):
                 matches = [(f"/{n}", d) for n, d in command_specs() if n.startswith(body)]
             else:
                 cmd, _, arg = body.partition(" ")
-                if cmd == "model":                          # completing a model name
-                    matches = [(f"/model {full}", "") for full in self._model_candidates()
+                if cmd in ("model", "default"):             # completing a model name
+                    matches = [(f"/{cmd} {full}", "") for full in self._model_candidates()
                                if arg.lower() in full.lower()]
                 elif cmd in ("connect", "login", "disconnect"):   # completing a provider
                     matches = [(f"/{cmd} {p}", "connected" if config.is_connected(p) else "")

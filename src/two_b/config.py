@@ -26,6 +26,7 @@ PROVIDER_KEY_ENV = {
 
 CONFIG_DIR = Path(os.path.expanduser("~/.config/2b"))
 KEYS_FILE = CONFIG_DIR / "keys.json"
+PREFS_FILE = CONFIG_DIR / "prefs.json"     # non-secret settings, e.g. the persisted default model
 
 
 def _load() -> dict:
@@ -87,6 +88,26 @@ def is_connected(provider: str) -> bool:
 
 def saved_providers() -> set:
     return set(_load().keys())
+
+
+def get_prefs() -> dict:
+    """Non-secret persisted preferences (currently just the default model). {} if none."""
+    try:
+        data = json.loads(PREFS_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def set_pref(key: str, value) -> None:
+    """Persist one preference key (value=None removes it), leaving the rest intact."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    data = get_prefs()
+    if value is None:
+        data.pop(key, None)
+    else:
+        data[key] = value
+    PREFS_FILE.write_text(json.dumps(data, indent=2))
 
 
 def mask(key: str) -> str:

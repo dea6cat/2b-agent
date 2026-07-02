@@ -135,6 +135,36 @@ def pick_default_model() -> str:
     return DEFAULT_MODEL if DEFAULT_MODEL in models else models[0]
 
 
+PROJECT_DOC_MAX = 2800   # cap on the /init 2B.md folded into the system prompt
+MCP_LOCAL_CAP = 6        # max MCP tools shown to a local model (protect its context/focus)
+
+
+def _project_context() -> str:
+    """The /init project map (2B.md), capped, to orient the model up front — so it
+    knows the layout instead of hunting for files. AGENTS.md is a fallback."""
+    for name in ("2B.md", "AGENTS.md"):
+        path = os.path.join(os.getcwd(), name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", errors="replace") as f:
+                doc = f.read().strip()
+        except OSError:
+            continue
+        if doc:
+            return doc[:PROJECT_DOC_MAX] + ("\n… [truncated]" if len(doc) > PROJECT_DOC_MAX else "")
+    return ""
+
+
+def _active_specs(is_local: bool):
+    """Base file tools + the model's exec tool + curated MCP tools. Local models
+    get a small MCP cap so a big enabled set can't flood their tool list."""
+    mcp = mcp_client.manager.tool_specs()
+    if is_local:
+        mcp = mcp[:MCP_LOCAL_CAP]
+    return specs_for(is_local) + mcp
+
+
 def context_budget(provider, model: str) -> int:
     """Token budget for a provider/model. For local Ollama this is the window 2B
     actually pins via num_ctx — detected from the model (min of its trained max and
@@ -387,7 +417,9 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     is_local = getattr(provider, "name", "") == "ollama" and getattr(provider, "api_key", None) is None
 
     if task.conversation is None:
-        task.conversation = Conversation(system_prompt=SYSTEM_PROMPT)
+        doc = _project_context()
+        sysprompt = SYSTEM_PROMPT + (f"\n\n# Project map (from /init)\n{doc}" if doc else "")
+        task.conversation = Conversation(system_prompt=sysprompt)
     conv = task.conversation
     desc = task.description
     if session.read_only:
@@ -433,7 +465,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 streamed["n"] += len(chunk)
                 on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
-            active_specs = specs_for(is_local) + mcp_client.manager.tool_specs()
+            active_specs = _active_specs(is_local)
             try:
                 resp = provider.stream(conv, model, active_specs, on_text)
             except _Interrupted:
@@ -503,7 +535,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
         try:
-            resp = provider.stream(conv, model, specs_for(is_local) + mcp_client.manager.tool_specs(), on_final)
+            resp = provider.stream(conv, model, _active_specs(is_local), on_final)
             planparse.finalize_steps(task.plan_steps)
             task.status_line = ""
             task.state = TaskState.DONE

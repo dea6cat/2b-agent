@@ -5,7 +5,7 @@ import with cli.py.
 """
 import os
 
-from . import config, mcp_client, orchestrator, registry, tools
+from . import config, mcp_client, orchestrator, registry, repomap, tools
 from .conversation import Conversation, Message
 from .session import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, MODE_LABELS, TaskState
 
@@ -366,6 +366,44 @@ def _diff(rest, app):
         app.ui.print("No diff available.")
         return
     app.ui.print(task.last_diff)
+
+
+@command("init")
+def _init(rest, app):
+    """Scan the project and write 2B.md — a compact map auto-loaded into context on new tasks."""
+    root = app.session.cwd
+    stack = repomap.detect_stack(root)
+    dirs = repomap.top_dirs(root)
+    mp = repomap.build_map(root, budget_chars=2800)
+    lines = ["# 2B project map", ""]
+    if stack:
+        lines.append("**Stack:** " + ", ".join(stack))
+    if dirs:
+        lines.append("**Top-level dirs:** " + ", ".join(dirs))
+    lines += ["", "## Symbols (ranked, most central first)", "", mp]
+    doc = "\n".join(lines)
+    path = os.path.join(root, "2B.md")
+    try:
+        with open(path, "w") as f:
+            f.write(doc)
+    except OSError as e:
+        app.ui.print(f"[red]Could not write 2B.md: {e}[/red]")
+        return
+    app.ui.print(f"Wrote [bold]2B.md[/bold] ({len(doc)} chars). It's loaded into context on new tasks, "
+                 "so 2B knows the layout instead of hunting for files.")
+
+
+@command("map")
+def _map(rest, app):
+    """Show a budget-bounded symbol outline of the project: /map [subdir]."""
+    root = app.session.cwd
+    arg = rest.strip()
+    sub = os.path.join(root, arg)
+    if arg and os.path.isdir(sub):
+        out = repomap.build_map(sub, budget_chars=4000)
+    else:
+        out = repomap.build_map(root, budget_chars=4000, focus=arg)
+    app.ui.print(out)
 
 
 @command("add")

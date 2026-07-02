@@ -68,9 +68,17 @@ model has to understand.
   re-serializes it fresh for whoever's active — so you can switch models *mid-task* with `/model`
   and keep every bit of context. Start a task on a local Qwen, hand it to Claude when it gets hard,
   keep going.
+- **Knows the project.** `/init` scans the repo and writes a compact `2B.md` — stack, layout, and a
+  ranked symbol map — that's auto-loaded into context, so the model starts knowing where things are
+  instead of hunting for files. `/map` shows a budget-bounded outline on demand. All bounded, so it
+  never floods a small local window.
+- **Runs things — split by model.** Local models get `run_git` (git only, never a raw shell — no
+  chaining/injection); cloud models get a full `run_command` shell (tests, build, git). Read-only git
+  runs freely; anything that mutates is confirmation-gated and refused in plan mode.
 - **MCP tools, curated.** Pull in tools from MCP servers (dart, mempalace, …) — but **per tool**, not
   wholesale, because flooding a small model with tools is exactly what breaks it. You enable a server
-  and pick which of its tools the model sees (`/mcp`). See [MCP servers](#mcp-servers-extra-tools).
+  and pick which of its tools the model sees (`/mcp`); local models are capped to a few so their
+  context stays lean. See [MCP servers](#mcp-servers-extra-tools).
 - **Operating modes**, cycled with **Shift+Tab** or set with `/mode`:
   - **normal** — every write/edit asks first.
   - **accept edits** — writes apply automatically.
@@ -175,6 +183,8 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | `/models [filter]` | List available models, grouped by provider |
 | `/connect [provider] [key]` | Connect a provider (hidden key prompt); bare shows status |
 | `/disconnect <provider>` | Remove a saved provider key |
+| `/init` | Scan the project → write `2B.md` (a compact map auto-loaded into context on new tasks) |
+| `/map [subdir]` | Show a budget-bounded symbol outline of the project |
 | `/mcp` | MCP servers/tools: status, `tools <server>`, `enable`/`disable <server> <tool…\|all>` |
 | `/mode [normal\|accept\|plan]` | Set operating mode (or **Shift+Tab** to cycle) |
 | `/theme [system\|light\|dark]` | Switch color theme |

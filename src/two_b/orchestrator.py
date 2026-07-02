@@ -33,7 +33,7 @@ from . import diagnostics, mcp_client, planparse, registry, tools
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers.base import ProviderError
 from .session import PendingConfirmation, Session, Task, TaskState
-from .toolspec import TOOL_SPECS, specs_for
+from .toolspec import TOOL_SPECS, specs_for, DELEGATE_SPEC
 
 MAX_TURNS = 40          # generous budget for real multi-step tasks
 DEFAULT_MODEL = "qwen3.5:9b"
@@ -158,11 +158,13 @@ def _project_context() -> str:
 
 def _active_specs(is_local: bool):
     """Base file tools + the model's exec tool + curated MCP tools. Local models
-    get a small MCP cap so a big enabled set can't flood their tool list."""
+    get a small MCP cap so a big enabled set can't flood their tool list.
+    delegate (fan-out to sub-agents) is exposed to cloud models only."""
     mcp = mcp_client.manager.tool_specs()
     if is_local:
         mcp = mcp[:MCP_LOCAL_CAP]
-    return specs_for(is_local) + mcp
+    base = specs_for(is_local) + mcp
+    return base if is_local else base + (DELEGATE_SPEC,)
 
 
 def context_budget(provider, model: str) -> int:
@@ -512,7 +514,12 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 task.status_line = _STATUS.get(tc.name, "Working")
                 shown = {k: (v if k != "content" else f"<{len(v)} chars>") for k, v in tc.arguments.items()}
                 on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": tc.name, "shown": shown}))
-                result = _dispatch_tool(session, task, tc.name, tc.arguments, read_cap)
+                if tc.name == "delegate":
+                    from . import subagents
+                    result = subagents.delegate(tc.arguments.get("tasks", []), provider, model,
+                                                read_cap=read_cap, on_event=on_event, cancel=task.cancel_flag)
+                else:
+                    result = _dispatch_tool(session, task, tc.name, tc.arguments, read_cap)
                 on_event(AgentEvent(EventType.TOOL_CALL_RESULT, task.id, {"name": tc.name, "result": result}))
                 results.append(ToolResult(tool_call_id=tc.id, content=result))
             conv.append(Message.results(results))

@@ -123,3 +123,30 @@ def to_gemini(specs: tuple[ToolSpec, ...] = TOOL_SPECS) -> list[dict]:
 
 # Guarantee the local-Ollama payload is byte-identical to the proven constant.
 assert to_openai() == tools.TOOLS, "toolspec.to_openai() drifted from tools.TOOLS"
+
+
+DELEGATE_SPEC = ToolSpec(
+    "delegate",
+    "Run one or more independent sub-tasks in parallel, each in its own isolated context. "
+    "role 'explore' investigates read-only and returns a concise findings report — use it to "
+    "locate code or understand a flow without reading everything into this conversation. "
+    "role 'work' is reserved. Returns a digest of each task's result.",
+    raw_schema={
+        "type": "object",
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string", "enum": ["explore", "work"]},
+                        "goal": {"type": "string", "description": "What to find/understand (explore) — a clear, self-contained instruction."},
+                    },
+                    "required": ["goal"],
+                },
+                "description": "Independent sub-tasks run in parallel.",
+            }
+        },
+        "required": ["tasks"],
+    },
+)

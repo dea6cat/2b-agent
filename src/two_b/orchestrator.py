@@ -16,20 +16,23 @@ unchanged):
   - Plan steps are parsed from the model's own first-turn text and their
     active/done state inferred from tool calls (planparse), purely for display.
 
-Provider abstraction (Anthropic/OpenAI) is Milestone 3; this still speaks
-Ollama's native protocol directly.
+Milestone 3: the model I/O now goes through a provider adapter (resolved from
+the registry by the active model), driven by the canonical Conversation. The
+loop, confirmation routing, plan parsing, and events are unchanged — only the
+transport is abstracted. Local Ollama still reaches its native /api/chat.
 """
 import io
-import json
 import os
-import urllib.request
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import planparse, tools
+from . import planparse, registry, tools
+from .conversation import Conversation, Message, ToolResult
+from .providers.base import ProviderError
 from .session import PendingConfirmation, Session, Task, TaskState
+from .toolspec import TOOL_SPECS
 
 MAX_TURNS = 12
 DEFAULT_MODEL = "qwen3.5:9b"
@@ -54,19 +57,10 @@ _STATUS = {
 }
 
 
-def ollama_host() -> str:
-    """OLLAMA_API_BASE (what the user's shell exports) first, then OLLAMA_HOST
-    (what the prototype read), then default. Fixes the prototype's latent bug."""
-    return (
-        os.environ.get("OLLAMA_API_BASE")
-        or os.environ.get("OLLAMA_HOST")
-        or "http://localhost:11434"
-    )
-
-
 class EventType(Enum):
     TURN_START = "turn_start"
-    ASSISTANT_TEXT = "assistant_text"
+    ASSISTANT_DELTA = "assistant_delta"    # a streamed chunk of the reply
+    ASSISTANT_TEXT = "assistant_text"      # (legacy; kept for non-stream callers)
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_RESULT = "tool_call_result"
     LOG = "log"                # captured tool stdout, to print to scrollback
@@ -81,35 +75,23 @@ class AgentEvent:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
-def call_ollama(model: str, messages: list[dict]) -> dict:
-    payload = json.dumps(
-        {"model": model, "messages": messages, "tools": tools.TOOLS, "stream": False}
-    ).encode()
-    req = urllib.request.Request(
-        f"{ollama_host()}/api/chat",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        return json.loads(resp.read())
-
-
-def list_installed_models() -> list[str]:
-    req = urllib.request.Request(f"{ollama_host()}/api/tags")
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
-    return [m["name"] for m in data.get("models", [])]
-
-
 def pick_default_model() -> str:
-    models = list_installed_models()
+    """Default model at startup: prefer local Ollama's qwen3.5:9b if present,
+    else the first local model. (Cloud providers aren't auto-defaulted.)"""
+    reg = registry.build_registry()
+    ol = reg.get("ollama")
+    models = []
+    if ol is not None:
+        try:
+            models = ol.list_models()
+        except Exception:
+            models = []
     if not models:
         raise SystemExit(
-            f"No models installed in Ollama at {ollama_host()}. Run 'ollama pull {DEFAULT_MODEL}' first."
+            f"No local Ollama models found. Run 'ollama pull {DEFAULT_MODEL}' first, "
+            "or configure a cloud provider (set an API key) and pass --model provider:name."
         )
-    if DEFAULT_MODEL in models:
-        return DEFAULT_MODEL
-    return models[0]
+    return DEFAULT_MODEL if DEFAULT_MODEL in models else models[0]
 
 
 # --- confirmation routed to the UI thread -----------------------------------
@@ -199,18 +181,30 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict) -> str:
 
 # --- the turn loop -----------------------------------------------------------
 
-def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None]) -> None:
+def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None],
+             reg: dict | None = None) -> None:
     """Drive the tool-call loop for one task on the calling (worker) thread.
-    Emits events for the UI thread; never writes the terminal itself."""
+    Resolves the active model to a provider, then drives it via the canonical
+    Conversation. Emits events for the UI thread; never writes the terminal."""
     import time
 
-    model = task.model_override or session.default_model
-    messages = task.history
-    if not messages:
-        messages.append({"role": "system", "content": SYSTEM_PROMPT})
-    messages.append({"role": "user", "content": task.description})
+    reg = reg if reg is not None else registry.build_registry()
+    model_str = task.model_override or session.default_model
+    resolved = registry.resolve(reg, model_str)
+    if resolved is None:
+        err = f"could not resolve model '{model_str}' to a configured provider (try /models)"
+        task.state = TaskState.ERROR
+        task.error = err
+        on_event(AgentEvent(EventType.TASK_ERROR, task.id, {"error": err}))
+        return
+    provider, model = resolved
 
-    first_turn = True
+    if task.conversation is None:
+        task.conversation = Conversation(system_prompt=SYSTEM_PROMPT)
+    conv = task.conversation
+    conv.append(Message.user(task.description))
+
+    first_turn = not any(m.role.value == "assistant" for m in conv.messages)
     try:
         for _ in range(MAX_TURNS):
             if task.cancel_flag.is_set():
@@ -221,19 +215,47 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
 
             task.status_line = "Thinking"
             task.turn_started_at = time.monotonic()
+            # Best-effort perf readout (local models). May be blank on the very
+            # first turn until the model finishes loading; refreshed on the first
+            # streamed token below, and persists across turns once set.
+            if hasattr(provider, "perf"):
+                try:
+                    p = provider.perf(model)
+                    if p:
+                        task.perf = p
+                except Exception:
+                    pass
             on_event(AgentEvent(EventType.TURN_START, task.id))
 
+            streamed = {"n": 0, "perf": False}
+
+            def on_text(chunk: str, _t=task, _p=provider, _m=model) -> None:
+                if not streamed["perf"] and hasattr(_p, "perf"):
+                    streamed["perf"] = True
+                    try:
+                        val = _p.perf(_m)
+                        if val:
+                            _t.perf = val
+                    except Exception:
+                        pass
+                streamed["n"] += len(chunk)
+                on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
+
             try:
-                resp = call_ollama(model, messages)
+                resp = provider.stream(conv, model, TOOL_SPECS, on_text)
+            except ProviderError as e:
+                task.state = TaskState.ERROR
+                task.error = str(e)
+                on_event(AgentEvent(EventType.TASK_ERROR, task.id, {"error": str(e)}))
+                return
             except Exception as e:
                 task.state = TaskState.ERROR
                 task.error = str(e)
                 on_event(AgentEvent(EventType.TASK_ERROR, task.id, {"error": str(e)}))
                 return
 
-            msg = resp.get("message", {})
-            tool_calls = msg.get("tool_calls") or []
-            content = (msg.get("content") or "").strip()
+            msg = resp.message
+            content = (msg.text or "").strip()
 
             if first_turn and content:
                 parsed = planparse.extract_plan(content)
@@ -241,30 +263,28 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                     task.plan_steps = parsed
             first_turn = False
 
-            if not tool_calls:
-                final = content
-                if not final:
-                    final = (msg.get("thinking") or "").strip() or "(model returned an empty response)"
+            if not msg.tool_calls:
                 planparse.finalize_steps(task.plan_steps)
                 task.status_line = ""
                 task.state = TaskState.DONE
-                on_event(AgentEvent(EventType.ASSISTANT_TEXT, task.id, {"text": final}))
+                # If nothing streamed (e.g. answer landed in `thinking`), emit it now.
+                if streamed["n"] == 0:
+                    fallback = content or (msg.thinking or "").strip() or "(model returned an empty response)"
+                    on_event(AgentEvent(EventType.ASSISTANT_DELTA, task.id, {"chunk": fallback}))
                 on_event(AgentEvent(EventType.TASK_DONE, task.id))
                 return
 
-            messages.append(msg)
-            for call in tool_calls:
-                fn = call["function"]["name"]
-                args = call["function"]["arguments"]
-                if isinstance(args, str):
-                    args = json.loads(args)
-                planparse.infer_active_step(task.plan_steps, fn, args)
-                task.status_line = _STATUS.get(fn, "Working")
-                shown = {k: (v if k != "content" else f"<{len(v)} chars>") for k, v in args.items()}
-                on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": fn, "shown": shown}))
-                result = _dispatch_tool(session, task, fn, args)
-                on_event(AgentEvent(EventType.TOOL_CALL_RESULT, task.id, {"name": fn, "result": result}))
-                messages.append({"role": "tool", "content": result})
+            conv.append(msg)
+            results = []
+            for tc in msg.tool_calls:
+                planparse.infer_active_step(task.plan_steps, tc.name, tc.arguments)
+                task.status_line = _STATUS.get(tc.name, "Working")
+                shown = {k: (v if k != "content" else f"<{len(v)} chars>") for k, v in tc.arguments.items()}
+                on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": tc.name, "shown": shown}))
+                result = _dispatch_tool(session, task, tc.name, tc.arguments)
+                on_event(AgentEvent(EventType.TOOL_CALL_RESULT, task.id, {"name": tc.name, "result": result}))
+                results.append(ToolResult(tool_call_id=tc.id, content=result))
+            conv.append(Message.results(results))
 
         task.state = TaskState.ERROR
         task.error = "max turns reached without a final answer"

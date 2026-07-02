@@ -42,7 +42,8 @@ def render_task(task: Task) -> Group:
     lines: list = []
 
     if task.status_line:
-        lines.append(Text(f"{_spinner_frame()}  {task.status_line}… {_elapsed(task)}"))
+        perf = f"  ·  {task.perf}" if task.perf else ""
+        lines.append(Text(f"{_spinner_frame()}  {task.status_line}… {_elapsed(task)}{perf}"))
         lines.append(Text("  (ctrl+b to run in background)", style="dim"))
 
     if task.plan_steps:

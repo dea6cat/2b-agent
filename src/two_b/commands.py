@@ -5,7 +5,8 @@ import with cli.py.
 """
 import os
 
-from . import orchestrator, tools
+from . import orchestrator, registry, tools
+from .conversation import Conversation, Message
 
 COMMANDS = {}
 
@@ -70,34 +71,46 @@ def _help(rest, app):
 
 @command("model")
 def _model(rest, app):
-    """Show or switch the model (Ollama models in M2)."""
+    """Show or switch the model. Bare name or provider:name; context is preserved."""
     if not rest.strip():
         app.console.print(f"Current model: [bold]{app.session.default_model}[/bold]")
         return
     name = rest.strip()
-    try:
-        installed = orchestrator.list_installed_models()
-    except Exception as e:
-        app.console.print(f"[red]Could not reach Ollama: {e}[/red]")
+    resolved = registry.resolve(app.registry, name)
+    if resolved is None:
+        app.console.print(
+            f"[red]Could not resolve model:[/red] {name}. "
+            "It may be ambiguous — try [bold]provider:model[/bold]. See /models."
+        )
         return
-    if name not in installed:
-        app.console.print(f"[red]Model not installed:[/red] {name}. Try /models.")
-        return
-    app.session.default_model = name
-    app.console.print(f"Model set to [bold]{name}[/bold] (applies to new tasks).")
+    provider, model = resolved
+    # Context is preserved: the active task keeps its canonical Conversation and
+    # simply gets re-serialized for the new provider on the next turn. We store
+    # the fully-qualified 'provider:model' so resolution is unambiguous later.
+    app.session.default_model = f"{provider.name}:{model}"
+    active = app.session.active_task
+    if active is not None:
+        active.model_override = f"{provider.name}:{model}"
+    app.console.print(f"Model set to [bold]{provider.name}:{model}[/bold] (context preserved).")
 
 
 @command("models")
 def _models(rest, app):
-    """List installed models."""
-    try:
-        installed = orchestrator.list_installed_models()
-    except Exception as e:
-        app.console.print(f"[red]Could not reach Ollama: {e}[/red]")
+    """List available models, grouped by configured provider."""
+    reg = registry.usable(app.registry)
+    if not reg:
+        app.console.print("[red]No providers configured.[/red] Start Ollama or set a provider API key.")
         return
-    for m in installed:
-        marker = "  (current)" if m == app.session.default_model else ""
-        app.console.print(f"  {m}{marker}")
+    for pname, prov in reg.items():
+        try:
+            models = prov.list_models()
+        except Exception as e:
+            app.console.print(f"  [red]{pname}: {e}[/red]")
+            continue
+        app.console.print(f"[bold]{pname}[/bold]")
+        for m in models:
+            marker = "  (current)" if app.session.default_model in (m, f"{pname}:{m}") else ""
+            app.console.print(f"    {m}{marker}")
 
 
 @command("task")
@@ -194,9 +207,9 @@ def _add(rest, app):
     if content.startswith("error:"):
         app.console.print(f"[red]{content}[/red]")
         return
-    if not task.history:
-        task.history.append({"role": "system", "content": orchestrator.SYSTEM_PROMPT})
-    task.history.append({"role": "user", "content": f"[pre-loaded file: {rest.strip()}]\n{content}"})
+    if task.conversation is None:
+        task.conversation = Conversation(system_prompt=orchestrator.SYSTEM_PROMPT)
+    task.conversation.append(Message.user(f"[pre-loaded file: {rest.strip()}]\n{content}"))
     app.console.print(f"Loaded {rest.strip()} into task context ({len(content)} bytes).")
 
 
@@ -207,7 +220,7 @@ def _clear(rest, app):
     if task is None:
         app.console.print("No task to clear.")
         return
-    task.history.clear()
+    task.conversation = None
     task.plan_steps.clear()
     app.console.print(f"Cleared history for [{task.id}] {task.title}.")
 

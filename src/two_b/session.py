@@ -14,6 +14,8 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .conversation import Conversation
+
 
 class TaskState(str, Enum):
     QUEUED = "queued"           # created, not yet started
@@ -50,10 +52,11 @@ class Task:
     description: str
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     title: str = ""
-    history: list = field(default_factory=list)      # conversation messages (raw dicts in M2)
+    conversation: Conversation | None = None         # canonical history (M3); built on first run
     plan_steps: list[PlanStep] = field(default_factory=list)
     state: TaskState = TaskState.QUEUED
     status_line: str = ""                            # e.g. "Reading" / "" when idle
+    perf: str = ""                                    # local-model RAM/GPU readout, e.g. "5.6GB · 100% GPU"
     turn_started_at: float = 0.0
     model_override: str | None = None                # set by /model --task scope
     thread: threading.Thread | None = None

@@ -13,7 +13,7 @@ import time
 
 from rich.console import Console
 
-from . import __version__, banner, orchestrator
+from . import __version__, banner, orchestrator, registry
 from .commands import dispatch_input
 from .prompt import make_session, prompt_line
 from .rawkey import CTRL_B, KeyListener
@@ -29,6 +29,7 @@ class App:
         # divert the UI's terminal writes.
         self.console = Console(file=sys.stdout)
         self.session = Session(default_model=model, auto_yes=auto_yes, cwd=os.getcwd())
+        self.registry = registry.build_registry()
         self.listener = KeyListener(on_key=self._on_key)
         self._session = make_session()
         self._quit = False
@@ -67,11 +68,6 @@ class App:
         elif ev.type == EventType.TASK_ERROR:
             self.console.print(f"[bold red]error: {ev.payload.get('error', 'unknown')}[/bold red]")
 
-    def _drain_events(self) -> None:
-        q = self.session.events
-        while not q.empty():
-            self._print_event(q.get())
-
     # --- the watch loop for the foregrounded task ---
     def _watch(self, task: Task) -> None:
         self.session.active_task_id = task.id
@@ -79,7 +75,7 @@ class App:
             task.state = TaskState.ACTIVE
             task.thread = threading.Thread(
                 target=orchestrator.run_task,
-                args=(self.session, task, self.session.events.put),
+                args=(self.session, task, self.session.events.put, self.registry),
                 daemon=True,
             )
             task.thread.start()
@@ -90,52 +86,83 @@ class App:
     def _watch_loop(self, task: Task) -> None:
         from rich.live import Live
 
-        # The key listener (raw/cbreak mode) is active ONLY while watching a
-        # running task, so it never competes with the idle REPL prompt's
-        # input(). Confirmation prompts inside this loop use listener.paused().
+        # Live spinner+checklist is shown while WAITING (thinking / running a
+        # tool). When the model starts streaming its reply, the Live region is
+        # stopped and tokens are written inline; the line is closed before any
+        # tool output or completion. The key listener (raw mode) runs only here,
+        # never competing with the idle prompt.
         self._background_requested = False
         self.listener.start()
+        live = None
+        mid_stream = False
+
+        def stop_live():
+            nonlocal live
+            if live is not None:
+                live.stop()
+                live = None
+
+        def close_stream():
+            nonlocal mid_stream
+            if mid_stream:
+                self.console.print()   # end the streamed paragraph
+                mid_stream = False
+
+        q = self.session.events
         try:
             while True:
-                action = "done"
-                with Live(render_session(self.session), console=self.console,
-                          refresh_per_second=15, transient=True) as live:
-                    while True:
-                        self._drain_events_live(live)
-                        if task.pending is not None:
-                            action = "confirm"
-                            break
-                        if self._background_requested:
-                            action = "background"
-                            break
-                        if (task.thread is None or not task.thread.is_alive()) and self.session.events.empty():
-                            action = "done"
-                            break
-                        live.update(render_session(self.session))
-                        time.sleep(0.06)
-                # Live has fully exited here — safe to prompt / print.
-                if action == "confirm":
+                while not q.empty():
+                    ev = q.get()
+                    if ev.type == EventType.ASSISTANT_DELTA:
+                        stop_live()
+                        if not mid_stream:
+                            self.console.print()   # blank line before the reply
+                            mid_stream = True
+                        self.console.print(ev.payload["chunk"], end="",
+                                           markup=False, highlight=False, soft_wrap=True)
+                    elif ev.type == EventType.TURN_START:
+                        close_stream()
+                    elif ev.type in (EventType.TOOL_CALL_START, EventType.TOOL_CALL_RESULT,
+                                     EventType.LOG, EventType.ASSISTANT_TEXT, EventType.TASK_ERROR):
+                        close_stream()
+                        stop_live()
+                        self._print_event(ev)
+                    elif ev.type == EventType.TASK_DONE:
+                        close_stream()
+
+                if task.pending is not None:
+                    close_stream()
+                    stop_live()
                     self._prompt_confirmation(task)
                     continue
-                if action == "background":
+                if self._background_requested:
                     self._background_requested = False
+                    close_stream()
+                    stop_live()
                     task.state = TaskState.BACKGROUNDED
                     self.console.print(
                         f"[dim]Backgrounded [{task.id}] {task.title}. /tasks to check, /fg {task.id} to resume.[/dim]"
                     )
                     self.session.active_task_id = None
                     return
-                # done
-                self._drain_events()
-                self.session.active_task_id = None
-                return
-        finally:
-            self.listener.stop()
+                if (task.thread is None or not task.thread.is_alive()) and q.empty():
+                    close_stream()
+                    stop_live()
+                    self.session.active_task_id = None
+                    return
 
-    def _drain_events_live(self, live) -> None:
-        q = self.session.events
-        while not q.empty():
-            self._print_event(q.get())
+                if not mid_stream:
+                    if live is None:
+                        live = Live(render_session(self.session), console=self.console,
+                                    refresh_per_second=12, transient=True)
+                        live.start()
+                    else:
+                        live.update(render_session(self.session))
+                time.sleep(0.05)
+        finally:
+            close_stream()
+            stop_live()
+            self.listener.stop()
 
     def _prompt_confirmation(self, task: Task) -> None:
         pc = task.pending
@@ -202,7 +229,7 @@ def main() -> None:
     )
     parser.add_argument("--model", help="Ollama model tag, e.g. qwen3.5:9b (default: autodetect)")
     parser.add_argument("--yes", action="store_true", help="Auto-apply file writes/edits without confirmation")
-    parser.add_argument("--list-models", action="store_true", help="List installed Ollama models and exit")
+    parser.add_argument("--list-models", action="store_true", help="List available models across configured providers and exit")
     parser.add_argument("--version", action="version", version=f"2b {__version__}")
     parser.add_argument("task", nargs="?", help="An initial task to run before dropping into the session")
     args = parser.parse_args()
@@ -210,17 +237,20 @@ def main() -> None:
     console = Console()
 
     if args.list_models:
-        try:
-            models = orchestrator.list_installed_models()
-        except Exception as e:
-            console.print(f"[red]Could not reach Ollama at {orchestrator.ollama_host()}: {e}[/red]")
+        from . import registry
+        reg = registry.usable(registry.build_registry())
+        if not reg:
+            console.print("[red]No providers configured. Start Ollama, or set a provider API key.[/red]")
             raise SystemExit(1)
-        if not models:
-            console.print(f"No models installed in Ollama at {orchestrator.ollama_host()}.")
-        else:
+        for pname, prov in reg.items():
+            try:
+                models = prov.list_models()
+            except Exception as e:
+                console.print(f"[red]{pname}: {e}[/red]")
+                continue
             for m in models:
-                marker = "  (default)" if m == orchestrator.DEFAULT_MODEL else ""
-                console.print(f"{m}{marker}")
+                marker = "  (default)" if pname == "ollama" and m == orchestrator.DEFAULT_MODEL else ""
+                console.print(f"{pname}:{m}{marker}")
         raise SystemExit(0)
 
     try:

@@ -514,7 +514,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 task.status_line = _STATUS.get(tc.name, "Working")
                 shown = {k: (v if k != "content" else f"<{len(v)} chars>") for k, v in tc.arguments.items()}
                 on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": tc.name, "shown": shown}))
-                if tc.name == "delegate":
+                if tc.name == "delegate" and not is_local:
                     from . import subagents
                     result = subagents.delegate(tc.arguments.get("tasks", []), provider, model,
                                                 read_cap=read_cap, on_event=on_event, cancel=task.cancel_flag)

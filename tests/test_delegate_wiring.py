@@ -22,7 +22,10 @@ class Exposure(unittest.TestCase):
 
     def test_frozen_schema_still_holds(self):
         # two_b.tools import triggers the toolspec.py assert (to_openai() == tools.TOOLS)
-        import two_b.tools  # noqa: F401
+        import two_b.tools as tools
+        from two_b.toolspec import to_openai, TOOL_SPECS
+        self.assertEqual(to_openai(), tools.TOOLS)
+        self.assertNotIn("delegate", [s.name for s in TOOL_SPECS])
 
 
 if __name__ == "__main__":

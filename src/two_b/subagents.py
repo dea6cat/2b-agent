@@ -50,6 +50,8 @@ def _explorer_specs():
 
 
 MAX_PARALLEL = 4
+DELEGATE_TIMEOUT = 180  # seconds, wall-clock budget for the whole batch
+_MAX_SECTION = 4000
 
 
 def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None) -> str:
@@ -66,11 +68,30 @@ def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None) 
         except Exception as e:  # a subagent failing must not kill the batch
             return role, goal, f"(explorer error: {str(e)[:200]})"
 
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL) as ex:
-        for r in ex.map(_one, tasks):
-            results.append(r)
+    # Not a `with` block on purpose: ThreadPoolExecutor.__exit__ calls
+    # shutdown(wait=True), which would block on any straggler exactly like the
+    # timeout below is meant to avoid. We call shutdown() exactly once, with
+    # wait=False, so this function returns as soon as the batch timeout hits.
+    results: list[tuple[str, str, str] | None] = [None] * len(tasks)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL)
+    futures = {ex.submit(_one, t): i for i, t in enumerate(tasks)}
+    try:
+        for fut in concurrent.futures.as_completed(futures, timeout=DELEGATE_TIMEOUT):
+            results[futures[fut]] = fut.result()
+    except concurrent.futures.TimeoutError:
+        if cancel is not None:
+            cancel.set()
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
     lines = [f"## delegate results ({len(results)} task(s))"]
-    for i, (role, goal, out) in enumerate(results, 1):
+    for i, (t, r) in enumerate(zip(tasks, results), 1):
+        if r is None:
+            role, goal = (t.get("role") or "explore"), t["goal"]
+            out = "(timed out)"
+        else:
+            role, goal, out = r
+            if len(out) > _MAX_SECTION:
+                out = out[:_MAX_SECTION] + " …[truncated]"
         lines.append(f"\n### [{i}] {role}: {goal}\n{out}")
     return "\n".join(lines)

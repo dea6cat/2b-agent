@@ -7,7 +7,9 @@ class ReadDispatch(unittest.TestCase):
         self.assertIn("not available", subagents._read_dispatch("edit_file", {"path":"x"}, None))
         self.assertIn("not available", subagents._read_dispatch("run_command", {"command":"ls"}, None))
     def test_read_tools_allowed(self):
-        d = tempfile.mkdtemp(); open(os.path.join(d,"a.py"),"w").write("x=1\n")
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "a.py"), "w") as f:
+            f.write("x=1\n")
         out = subagents._read_dispatch("list_files", {"path": d}, None)
         self.assertIn("a.py", out)
 
@@ -46,3 +48,17 @@ class Delegate(unittest.TestCase):
     def test_work_role_stubbed(self):
         out = subagents.delegate([{"role":"work","goal":"edit x"}], provider=None, model="m")
         self.assertIn("not enabled yet", out)
+
+    def test_batch_failure_isolation(self):
+        def flaky(goal, *a, **k):
+            if goal == "bad":
+                raise RuntimeError("boom")
+            return f"found: {goal}"
+        subagents.run_explorer = flaky
+        out = subagents.delegate(
+            [{"role": "explore", "goal": "bad"}, {"role": "explore", "goal": "good"}],
+            provider=None, model="m")
+        self.assertIn("### [1] explore: bad", out)
+        self.assertIn("explorer error", out)
+        self.assertIn("### [2] explore: good", out)
+        self.assertIn("found: good", out)

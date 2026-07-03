@@ -222,12 +222,21 @@ class McpManager:
         return _parse_locations(text) or None
 
     def shutdown(self) -> None:
-        for name in list(self._stacks):
+        # Swap the registries out atomically first, then close the transports
+        # outside the lock (aclose can block up to its cap). Clearing before the
+        # slow close means a concurrent is_mcp_tool/call_tool immediately sees the
+        # server as disconnected — no window where a torn-down tool still routes.
+        # (Callers that want the tools back — e.g. esc teardown — follow with start().)
+        with self._lock:
+            stacks = list(self._stacks.items())
+            self._stacks = {}
+            self._sessions = {}
+            self._tools = {}
+        for _name, stack in stacks:
             try:
-                self._run(self._stacks[name].aclose(), 10)
+                self._run(stack.aclose(), 10)
             except Exception:
                 pass
-        self._stacks.clear(); self._sessions.clear(); self._tools.clear()
 
 
 _LOC_RE = re.compile(r"([\w./\\-]+\.\w+):(\d+)")   # file.ext:line, tolerating an optional :col after

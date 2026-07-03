@@ -10,7 +10,9 @@ import difflib
 import os
 import re
 import shlex
+import signal
 import subprocess
+import time
 
 MAX_FILE_BYTES = 200_000
 GIT_TIMEOUT = 120
@@ -499,10 +501,74 @@ def git_is_read_only(args: str) -> bool:
     return bool(parts) and parts[0] in READ_ONLY_GIT
 
 
-def do_run_git(args, max_chars=None):
+def _killpg(proc) -> bool:
+    """Kill a process and its whole group: SIGTERM, a short grace, then SIGKILL.
+    Grouping (see `start_new_session=True` below) means a shell's children —
+    npm, pytest, a compiler — die with it instead of being orphaned. Returns True
+    when the process is confirmed dead, False when it may still be running — e.g. a
+    group we lack permission to signal (a `sudo`'d child), or one wedged in
+    uninterruptible I/O that even SIGKILL can't preempt — so the caller can report
+    honestly instead of claiming it stopped."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return True   # already gone
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return True   # exited between checks
+        except OSError:
+            # e.g. PermissionError signalling a root-owned group — we can't kill it.
+            return proc.poll() is not None
+        try:
+            proc.wait(timeout=0.5)
+            return True
+        except subprocess.TimeoutExpired:
+            continue
+    return proc.poll() is not None   # SIGKILL didn't take (rare: D-state I/O wait)
+
+
+def _run_cancellable(cmd, *, shell, timeout, cancel):
+    """Run a subprocess in its own process group, polling `cancel` (a threading.Event
+    or None) so esc can kill it — and everything it spawned — within ~100ms instead
+    of waiting out `timeout`. Returns (returncode, combined_output, status) where
+    status is 'ok' | 'timeout' | 'cancelled'; returncode is None unless status='ok'.
+    Raises FileNotFoundError if the program isn't found (caller maps the message)."""
+    if cancel is not None and cancel.is_set():   # already stopped — don't fork/exec
+        return (None, "", "cancelled")
+    proc = subprocess.Popen(
+        cmd, shell=shell, cwd=os.getcwd(),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, start_new_session=True,
+    )
+    start = time.monotonic()
+    try:
+        while True:
+            if cancel is not None and cancel.is_set():
+                return (None, "", "cancelled" if _killpg(proc) else "kill_failed")
+            if timeout is not None and (time.monotonic() - start) > timeout:
+                return (None, "", "timeout" if _killpg(proc) else "kill_failed")
+            try:
+                out, _ = proc.communicate(timeout=0.1)
+                return (proc.returncode, out or "", "ok")
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        # On the kill paths we bail before communicate() drains the pipe; close it
+        # so the fd doesn't leak. (No-op after a clean communicate().)
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+
+
+def do_run_git(args, max_chars=None, cancel=None):
     """Run `git <args>` in the project — git only, never a shell (no chaining or
     injection). Confirmation/plan-mode gating happens in the orchestrator; this
-    just executes. Output (stdout+stderr) is capped and non-zero exit is flagged."""
+    just executes. Output (stdout+stderr) is capped and non-zero exit is flagged.
+    `cancel` (a threading.Event) lets esc kill a long-running git immediately."""
     try:
         parts = shlex.split(args or "")
     except ValueError as e:
@@ -510,34 +576,46 @@ def do_run_git(args, max_chars=None):
     if not parts:
         return "error: no git command given"
     try:
-        proc = subprocess.run(["git", *parts], cwd=os.getcwd(), capture_output=True,
-                              text=True, timeout=GIT_TIMEOUT)
+        rc, out, status = _run_cancellable(["git", *parts], shell=False,
+                                           timeout=GIT_TIMEOUT, cancel=cancel)
     except FileNotFoundError:
         return "error: git is not installed"
-    except subprocess.TimeoutExpired:
+    except Exception as e:
+        return f"error: {e}"
+    if status == "kill_failed":
+        return f"error: tried to stop git {parts[0]} but it may still be running (could not signal its process group)"
+    if status == "cancelled":
+        return f"stopped: git {parts[0]} interrupted"
+    if status == "timeout":
         return f"error: git {parts[0]} timed out after {GIT_TIMEOUT}s"
-    out = ((proc.stdout or "") + (proc.stderr or "")).strip() or f"(git {parts[0]}: no output)"
+    out = out.strip() or f"(git {parts[0]}: no output)"
     if max_chars and len(out) > max_chars:
         head, tail = out[: max_chars * 2 // 3], out[-max_chars // 3:]
         out = f"{head}\n… [git output truncated] …\n{tail}"
-    return f"error: git exited {proc.returncode}\n{out}" if proc.returncode else out
+    return f"error: git exited {rc}\n{out}" if rc else out
 
 
-def do_run_command(command, max_chars=None):
+def do_run_command(command, max_chars=None, cancel=None):
     """Run an arbitrary shell command in the project (cloud models only — see the
     orchestrator's model-aware tool exposure). Confirmation/plan gating happens
-    upstream; this just executes. Output is capped and non-zero exit is flagged."""
+    upstream; this just executes. Output is capped and non-zero exit is flagged.
+    `cancel` (a threading.Event) lets esc kill the command — and the whole process
+    group it spawns (tests, builds) — immediately instead of blocking on timeout."""
     if not (command or "").strip():
         return "error: no command given"
     try:
-        proc = subprocess.run(command, shell=True, cwd=os.getcwd(),
-                              capture_output=True, text=True, timeout=CMD_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return f"error: command timed out after {CMD_TIMEOUT}s"
+        rc, out, status = _run_cancellable(command, shell=True,
+                                           timeout=CMD_TIMEOUT, cancel=cancel)
     except Exception as e:
         return f"error: {e}"
-    out = ((proc.stdout or "") + (proc.stderr or "")).strip() or "(no output)"
+    if status == "kill_failed":
+        return "error: tried to stop the command but it may still be running (could not signal its process group)"
+    if status == "cancelled":
+        return "stopped: command interrupted"
+    if status == "timeout":
+        return f"error: command timed out after {CMD_TIMEOUT}s"
+    out = out.strip() or "(no output)"
     if max_chars and len(out) > max_chars:
         head, tail = out[: max_chars * 2 // 3], out[-max_chars // 3:]
         out = f"{head}\n… [output truncated] …\n{tail}"
-    return f"error: command exited {proc.returncode}\n{out}" if proc.returncode else out
+    return f"error: command exited {rc}\n{out}" if rc else out

@@ -27,7 +27,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
-from . import config, orchestrator, registry, theme
+from . import config, difffmt, orchestrator, registry, theme
 from .commands import command_specs, dispatch_input
 from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
@@ -40,38 +40,31 @@ _MODE_STYLE = {
 }
 
 
-class ConfirmScreen(ModalScreen[bool]):
-    """Modal shown when a task needs a write/edit confirmed. Returns True/False."""
-    CSS = """
-    ConfirmScreen { align: center middle; }
-    #box { width: 80%; max-width: 110; height: auto; border: round #8A7A45;
-           background: #C7C1AE; color: #454235; padding: 1 2; }
-    #q { color: #454235; padding-top: 1; }
-    #btns { height: auto; padding-top: 1; align-horizontal: right; }
-    Button { margin-left: 2; }
-    """
+_DIFF_ADD_BG = "on #12331a"   # dark green — added lines
+_DIFF_DEL_BG = "on #3a1519"   # dark red   — removed lines
 
-    def __init__(self, prompt: str, diff: str):
-        super().__init__()
-        self._prompt = prompt
-        self._diff = diff
 
-    def compose(self) -> ComposeResult:
-        with Vertical(id="box"):
-            yield Static(self._diff or "(no preview)")
-            yield Static(f"{self._prompt}  (y / n)", id="q")
-            with Horizontal(id="btns"):
-                yield Button("Apply", variant="success", id="apply")
-                yield Button("Cancel", variant="error", id="cancel")
+def render_diff(diff: str) -> Text:
+    """Render a unified diff inline, Claude-Code style: a `+N -M` summary, then each
+    line numbered with a green/red background for added/removed and dim for context.
+    A non-diff preview (e.g. a whole-file overwrite note) renders plainly."""
+    diff = diff or "(no preview)"
+    t = Text()
+    if not difffmt.is_unified_diff(diff):
+        for line in diff.splitlines():
+            t.append(line + "\n", style="dim")
+        return t
+    add, rem = difffmt.diff_counts(diff)
+    t.append(f"  +{add} -{rem}\n", style="dim")
+    for old_no, new_no, kind, text in difffmt.diff_rows(diff):
+        if kind == "add":
+            t.append(f"{new_no:>5} + {text}\n", style=_DIFF_ADD_BG)
+        elif kind == "del":
+            t.append(f"{old_no:>5} - {text}\n", style=_DIFF_DEL_BG)
+        else:
+            t.append(f"{new_no:>5}   {text}\n", style="dim")
+    return t
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "apply")
-
-    def on_key(self, event) -> None:
-        if event.key == "y":
-            self.dismiss(True)
-        elif event.key in ("n", "escape"):
-            self.dismiss(False)
 
 class ConnectScreen(ModalScreen[str | None]):
     """Masked prompt for a provider API key, so it never lands in the log.
@@ -201,7 +194,8 @@ class TwoBApp(App):
         self.ui = _LogConsole(self)               # provider-neutral output for commands.py
         self._stream_text = ""
         self._stream_widget = None                # the in-flow Static currently being streamed into
-        self._confirm_open = False                # a ConfirmScreen modal is currently shown
+        self._pending_confirm = None              # PendingConfirmation shown inline (answered y/n in view)
+        self._default_placeholder = "Type a task, or / for commands"
         self._pal: list[tuple[str, str]] = []     # current command-palette matches
         self._pal_index = 0                       # highlighted match (↑/↓ navigation)
         self._pending_tool = None                 # (name, args) between a tool START and its RESULT
@@ -610,18 +604,62 @@ class TwoBApp(App):
                 self._commit_stream()
                 self._close_tool_group()
 
-        # write confirmation waiting? show it as a modal.
+        # Write/edit confirmation waiting? Show it INLINE in the conversation (diff +
+        # y/n), never a popup. Answered by _resolve_confirm on a keypress.
         active = self.session.active_task
-        if not self._confirm_open and active is not None and active.pending is not None:
-            self._confirm_open = True
-            pc = active.pending
+        pc = active.pending if active is not None else None
+        if pc is not None and self._pending_confirm is not pc:
+            self._pending_confirm = pc
+            self._show_inline_confirm(pc)
+        elif pc is None and self._pending_confirm is not None:
+            # the worker cleared it out from under us (e.g. esc cancelled the task) —
+            # reset the inline state so the input works again.
+            self._pending_confirm = None
+            self._restore_input()
 
-            def _resolved(approved, _pc=pc):
-                _pc.approved = bool(approved)
-                _pc.answered.set()
-                self._confirm_open = False
+    def _show_inline_confirm(self, pc) -> None:
+        """Render the proposed change inline in the view and arm y/n. No modal."""
+        self._commit_stream()
+        self.log_write(render_diff(pc.diff))
+        q = Text(f"{pc.prompt}  ", style=f"bold {self.c('ink')}")
+        q.append("y", style="green")
+        q.append(" apply · ", style=self.c("dim"))
+        q.append("n", style="red")
+        q.append(" skip · ", style=self.c("dim"))
+        q.append("esc", style=self.c("dim"))
+        q.append(" stop", style=self.c("dim"))
+        self.log_write(q)
+        inp = self.query_one("#input", Input)
+        inp.placeholder = "y apply · n skip · esc stop"
+        inp.disabled = True
 
-            self.push_screen(ConfirmScreen(pc.prompt, pc.diff), _resolved)
+    def _resolve_confirm(self, approved: bool) -> None:
+        pc = self._pending_confirm
+        self._pending_confirm = None
+        if pc is not None:
+            pc.approved = bool(approved)
+            pc.answered.set()
+        self.log_write(Text("  ✔ applied" if approved else "  ✗ skipped", style=self.c("dim")))
+        self._restore_input()
+
+    def _restore_input(self) -> None:
+        inp = self.query_one("#input", Input)
+        inp.disabled = False
+        inp.placeholder = self._default_placeholder
+        inp.focus()
+
+    def on_key(self, event) -> None:
+        # While an inline confirmation is armed, y/enter apply and n skips; the keys
+        # are consumed so they don't leak into the input. esc is left to the normal
+        # interrupt binding (which cancels the whole task via the worker's cancel check).
+        if self._pending_confirm is None:
+            return
+        if event.key in ("y", "Y", "enter"):
+            event.stop()
+            self._resolve_confirm(True)
+        elif event.key in ("n", "N"):
+            event.stop()
+            self._resolve_confirm(False)
 
     def _maybe_start_next(self) -> None:
         # explicit /fg foregrounding request takes priority

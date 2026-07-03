@@ -94,6 +94,16 @@ class EditFileMatching(unittest.TestCase):
         self.assertIn("not found", result)
         self.assertEqual(out, "only = 1\n")
 
+    def test_not_found_error_hints_at_nearest_line(self):
+        # A genuine mismatch (typo, not just whitespace) that the tolerant tiers can't
+        # absorb should point the model at the closest real line instead of a dead end.
+        content = "def run():\n    total = compute(x)\n    return total\n"
+        result, out = self._edit(content, "    totl = compute(x)", "    total = compute(y)")
+        self.assertIn("old_text not found", result)
+        self.assertIn("closest line in the file is line 2", result.lower())
+        self.assertIn("total = compute(x)", result)
+        self.assertEqual(out, content)   # file left unchanged on failure
+
     def test_missing_file(self):
         result = tools.do_edit_file("/no/such/path/xyz.py", "a", "b", auto_yes=True)
         self.assertTrue(result.startswith("error: no such file"))

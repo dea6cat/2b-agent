@@ -55,11 +55,20 @@ class AnthropicProvider:
         return out
 
     def send(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...]) -> ProviderResponse:
+        # Prompt caching (GA — no beta header needed): mark the stable prefix
+        # (system prompt, last tool definition) with cache_control so repeated
+        # requests reuse Anthropic's cache instead of paying full price every
+        # turn. OpenAI-compatible providers cache automatically server-side —
+        # no payload change needed there.
+        tools_json = to_anthropic(tools)
+        if tools_json:
+            tools_json[-1] = {**tools_json[-1], "cache_control": {"type": "ephemeral"}}
         payload = {
             "model": model,
             "max_tokens": 4096,
-            "system": conversation.system_prompt,
-            "tools": to_anthropic(tools),
+            "system": [{"type": "text", "text": conversation.system_prompt,
+                        "cache_control": {"type": "ephemeral"}}],
+            "tools": tools_json,
             "messages": self._messages(conversation),
         }
         raw = post_json(API_URL, payload, headers=self._headers(), provider=self.name)

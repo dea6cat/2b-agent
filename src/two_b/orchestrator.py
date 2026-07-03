@@ -29,11 +29,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import diagnostics, mcp_client, planparse, registry, tools
+from . import conversation, diagnostics, mcp_client, planparse, registry, tools
 from .conversation import Conversation, Message, Role, ToolResult
-from .providers.base import ProviderError
+from .providers.base import ProviderError, stream_with_retry
 from .session import PendingConfirmation, Session, Task, TaskState
-from .toolspec import TOOL_SPECS, specs_for
+from .toolspec import TOOL_SPECS, specs_for, DELEGATE_SPEC
 
 MAX_TURNS = 40          # generous budget for real multi-step tasks
 DEFAULT_MODEL = "qwen3.5:9b"
@@ -177,11 +177,13 @@ def _project_context() -> str:
 
 def _active_specs(is_local: bool):
     """Base file tools + the model's exec tool + curated MCP tools. Local models
-    get a small MCP cap so a big enabled set can't flood their tool list."""
+    get a small MCP cap so a big enabled set can't flood their tool list.
+    delegate (fan-out to sub-agents) is exposed to cloud models only."""
     mcp = mcp_client.manager.tool_specs()
     if is_local:
         mcp = mcp[:MCP_LOCAL_CAP]
-    return specs_for(is_local) + mcp
+    base = specs_for(is_local) + mcp
+    return base if is_local else base + (DELEGATE_SPEC,)
 
 
 def context_budget(provider, model: str) -> int:
@@ -356,6 +358,75 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     return result
 
 
+def apply_worker_changes(session: Session, task: Task, changes) -> str:
+    """Apply file changes collected from `delegate` workers as a single batch: a
+    path touched by more than one worker is a conflict (applied for none, reported);
+    non-conflicting paths get one combined confirmation, then are written and
+    diagnosed like apply_write. Snapshot is last-applied-wins, matching the
+    existing single-level /undo."""
+    if not changes:
+        return ""
+    if task.cancel_flag.is_set():
+        return "\n(cancelled — worker changes not applied)"
+    if session.read_only:
+        return "\n(plan mode — worker changes not applied)"
+    by_path: dict[str, list] = {}
+    for ap, orig, final, idx in changes:
+        by_path.setdefault(ap, []).append((orig, final, idx))
+    to_apply, conflicts = [], []
+    for ap, group in by_path.items():
+        (conflicts if len(group) > 1 else to_apply).append((ap, group))
+
+    import difflib
+
+    previews = []
+    currents: dict[str, str] = {}
+    for ap, group in to_apply:
+        orig, final, _ = group[0]
+        cur = orig
+        try:
+            with open(ap, "r", errors="replace") as f:
+                cur = f.read()
+        except OSError:
+            pass
+        currents[ap] = cur
+        previews.append("\n".join(difflib.unified_diff(
+            cur.splitlines(), final.splitlines(), lineterm="", n=1,
+            fromfile=os.path.relpath(ap), tofile=os.path.relpath(ap))))
+
+    lines = []
+    if conflicts:
+        lines.append("conflict — not applied (multiple workers changed the same file): "
+                     + ", ".join(os.path.relpath(ap) for ap, _ in conflicts))
+    if not to_apply:
+        return "\n" + "\n".join(lines)
+
+    combined_preview = "\n\n".join(previews)
+    if not request_confirmation(session, task,
+            f"Apply {len(to_apply)} worker change(s)?", combined_preview):
+        return "\n" + "\n".join(lines + ["worker changes rejected by user"])
+
+    applied = []
+    for ap, group in to_apply:
+        _, final, _ = group[0]
+        pre = currents[ap]
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                res = tools.do_write_file(ap, final, auto_yes=True)
+        except OSError as e:
+            applied.append(f"error writing {os.path.relpath(ap)}: {e}")
+            continue
+        if res.startswith("wrote"):
+            task.last_edit_snapshot = (ap, pre)
+            task.last_diff = combined_preview
+            res += diagnostics.summarize(ap)
+        applied.append(res)
+    lines.append(f"applied {len(to_apply)} worker change(s):")
+    lines.extend(applied)
+    return "\n" + "\n".join(lines)
+
+
 def _run_git(session: Session, task: Task, git_args: str, read_cap: int | None) -> str:
     """Read-only git runs immediately (and in plan mode); mutating git is
     confirmation-gated and refused in plan mode."""
@@ -412,6 +483,17 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
 
 # --- the turn loop -----------------------------------------------------------
 
+def _resolve_subagent_model(reg: dict, provider: Any, model: str) -> tuple[Any, str]:
+    """(provider, model) for subagents: TWOB_SUBAGENT_MODEL if set and resolvable, else
+    the parent's. Lets you run explorers/workers on a cheaper model than the parent."""
+    name = os.environ.get("TWOB_SUBAGENT_MODEL")
+    if name:
+        r = registry.resolve(reg, name)
+        if r is not None:
+            return r
+    return provider, model
+
+
 def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None],
              reg: dict | None = None) -> None:
     """Drive the tool-call loop for one task on the calling (worker) thread.
@@ -434,6 +516,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     # Local models get the constrained git-only tool; cloud (frontier) models get
     # the full shell tool. See toolspec.specs_for / _dispatch_tool.
     is_local = getattr(provider, "name", "") == "ollama" and getattr(provider, "api_key", None) is None
+    sub_provider, sub_model = _resolve_subagent_model(reg, provider, model)
 
     if task.conversation is None:
         doc = _project_context()
@@ -485,8 +568,9 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
             active_specs = _active_specs(is_local)
+            req_conv = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
             try:
-                resp = provider.stream(conv, model, active_specs, on_text)
+                resp = stream_with_retry(provider, req_conv, model, active_specs, on_text, cancel=task.cancel_flag)
             except _Interrupted:
                 _finish_stopped(task, on_event)
                 return
@@ -565,8 +649,9 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             got["n"] += len(chunk)
             on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
+        req_conv = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
         try:
-            resp = provider.stream(conv, model, _active_specs(is_local), on_final)
+            resp = stream_with_retry(provider, req_conv, model, _active_specs(is_local), on_final, cancel=task.cancel_flag)
             planparse.finalize_steps(task.plan_steps)
             task.status_line = ""
             task.state = TaskState.DONE

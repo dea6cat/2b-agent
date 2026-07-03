@@ -7,6 +7,7 @@ to keep 2B dependency-light and self-contained — no per-provider SDKs.
 from __future__ import annotations
 
 import json
+import time as _time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -61,7 +62,7 @@ def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int
             body = e.read().decode(errors="replace")[:500]
         except Exception:
             pass
-        raise ProviderError(provider, f"HTTP {e.code}: {body or e.reason}", retryable=e.code >= 500) from e
+        raise ProviderError(provider, f"HTTP {e.code}: {body or e.reason}", retryable=(e.code == 429 or e.code >= 500)) from e
     except urllib.error.URLError as e:
         raise ProviderError(provider, f"connection failed: {e.reason}", retryable=True) from e
 
@@ -83,12 +84,30 @@ def post_stream(url: str, payload: dict, headers: dict | None = None, timeout: i
             body = e.read().decode(errors="replace")[:500]
         except Exception:
             pass
-        raise ProviderError(provider, f"HTTP {e.code}: {body or e.reason}", retryable=e.code >= 500) from e
+        raise ProviderError(provider, f"HTTP {e.code}: {body or e.reason}", retryable=(e.code == 429 or e.code >= 500)) from e
     except urllib.error.URLError as e:
         raise ProviderError(provider, f"connection failed: {e.reason}", retryable=True) from e
     with resp:
         for raw in resp:
             yield raw.decode("utf-8", errors="replace")
+
+
+def stream_with_retry(provider, conversation, model, tools, on_text, *, retries=3, cancel=None):
+    """provider.stream with backoff on retryable ProviderError (429/5xx/conn). Honors a
+    cancel Event (re-raises immediately) and re-raises the last error after `retries`."""
+    delay = 1.0
+    for attempt in range(retries + 1):
+        try:
+            return provider.stream(conversation, model, tools, on_text)
+        except ProviderError as e:
+            if not e.retryable or attempt == retries or (cancel is not None and cancel.is_set()):
+                raise
+            waited = 0.0
+            while waited < delay:
+                if cancel is not None and cancel.is_set():
+                    raise
+                _time.sleep(0.1); waited += 0.1
+            delay = min(delay * 2, 8.0)
 
 
 def get_json(url: str, headers: dict | None = None, timeout: int = 15, provider: str = "http") -> dict:

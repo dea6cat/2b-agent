@@ -391,30 +391,50 @@ def _sessions(rest, app):
         app.ui.print(f"{r['id']}  {when}  {r['title'] or '(untitled)'}")
 
 
-@command("undo")
-def _undo(rest, app):
-    """Revert the last file write/edit (single level)."""
-    task = _target_task(app)
-    if task is None or task.last_edit_snapshot is None:
-        app.ui.print("Nothing to undo.")
-        return
-    path, pre = task.last_edit_snapshot
+def _revert_edit(path, pre, app) -> bool:
+    """Restore one recorded edit: rewrite `pre`, or remove a newly-created file
+    (pre is None). Prints the outcome; returns True on success."""
     full = tools._safe_path(path)
     if full is None:
         app.ui.print("[red]Cannot undo: empty or invalid path.[/red]")
-        return
-    if pre is None:
-        # It was a newly created file — undo means remove it.
-        try:
+        return False
+    try:
+        if pre is None:
             os.remove(full)
             app.ui.print(f"Removed newly-created {path}.")
-        except OSError as e:
-            app.ui.print(f"[red]Undo failed: {e}[/red]")
-    else:
-        with open(full, "w") as f:
-            f.write(pre)
-        app.ui.print(f"Reverted {path} to its previous contents.")
-    task.last_edit_snapshot = None
+        else:
+            with open(full, "w") as f:
+                f.write(pre)
+            app.ui.print(f"Reverted {path} to its previous contents.")
+        return True
+    except OSError as e:
+        app.ui.print(f"[red]Undo failed for {path}: {e}[/red]")
+        return False
+
+
+@command("undo")
+def _undo(rest, app):
+    """Revert recent file edits (multi-level). `/undo` = the last edit; `/undo N` =
+    the last N; `/undo <path>` = the most recent edit to that file."""
+    task = _target_task(app)
+    if task is None or not task.edit_history:
+        app.ui.print("Nothing to undo.")
+        return
+    arg = (rest or "").strip()
+    if arg and not arg.isdigit():
+        # Undo the most recent edit to a specific file.
+        for i in range(len(task.edit_history) - 1, -1, -1):
+            if task.edit_history[i][0] == arg:
+                path, pre = task.edit_history.pop(i)
+                _revert_edit(path, pre, app)
+                task.last_diff = None
+                return
+        app.ui.print(f"No recorded edit to {arg}.")
+        return
+    n = min(int(arg), len(task.edit_history)) if arg else 1
+    for _ in range(n):
+        path, pre = task.edit_history.pop()
+        _revert_edit(path, pre, app)
     task.last_diff = None
 
 

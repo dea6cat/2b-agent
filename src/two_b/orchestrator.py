@@ -457,7 +457,7 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
     with redirect_stdout(buf):
         result = tools.do_write_file(path, content, auto_yes=True)
     if result.startswith("wrote"):
-        task.last_edit_snapshot = (path, pre)
+        task.push_edit(path, pre)
         task.last_diff = preview
         _refresh_mtime(task, path)
         result += diagnostics.summarize(path)
@@ -488,7 +488,7 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     with redirect_stdout(buf):
         result = tools.do_edit_file(path, old_text, new_text, auto_yes=True)
     if result.startswith("edited"):
-        task.last_edit_snapshot = (path, pre)
+        task.push_edit(path, pre)
         task.last_diff = diff
         _refresh_mtime(task, path)
         result += diagnostics.summarize(path)
@@ -564,7 +564,7 @@ def apply_worker_changes(session: Session, task: Task, changes) -> str:
             applied.append(f"error writing {os.path.relpath(ap)}: {e}")
             continue
         if res.startswith("wrote"):
-            task.last_edit_snapshot = (ap, pre)
+            task.push_edit(ap, pre)
             task.last_diff = combined_preview
             _refresh_mtime(task, ap)
             res += diagnostics.summarize(ap)

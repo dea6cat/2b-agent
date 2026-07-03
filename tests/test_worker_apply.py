@@ -14,7 +14,7 @@ def _app(mode):
     s = Session.__new__(Session)
     s.mode = mode
     t = Task.__new__(Task)
-    t.last_edit_snapshot = None
+    t.edit_history = []
     t.last_diff = None
     t.read_mtimes = {}
     t.cancel_flag = threading.Event()   # unset — apply proceeds normally
@@ -32,7 +32,7 @@ class ApplyWorkerChanges(unittest.TestCase):
             with open(f.name) as fh:
                 self.assertEqual(fh.read(), "v = 2\n")
             self.assertIn("applied", out.lower())
-            self.assertEqual(t.last_edit_snapshot, (f.name, "v = 1\n"))
+            self.assertEqual(t.edit_history[-1], (f.name, "v = 1\n"))
         finally:
             os.unlink(f.name)
 
@@ -109,7 +109,7 @@ class ApplyWorkerChanges(unittest.TestCase):
             s = Session.__new__(Session)
             s.mode = MODE_ACCEPT
             t = Task.__new__(Task)
-            t.last_edit_snapshot = None
+            t.edit_history = []
             t.last_diff = None
             t.cancel_flag = threading.Event()
             t.cancel_flag.set()

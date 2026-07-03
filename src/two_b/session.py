@@ -72,7 +72,7 @@ class Task:
     thread: threading.Thread | None = None
     cancel_flag: threading.Event = field(default_factory=threading.Event)
     last_diff: str | None = None                     # for /diff
-    last_edit_snapshot: tuple | None = None          # (path, pre_content_or_None) for /undo
+    edit_history: list = field(default_factory=list)  # stack of (path, pre_content_or_None) for multi-level /undo
     read_mtimes: dict = field(default_factory=dict)  # abspath -> mtime when last read, for stale-edit detection
     pending: "PendingConfirmation | None" = None     # set when blocked on a backgrounded write
     error: str | None = None
@@ -81,6 +81,13 @@ class Task:
     def __post_init__(self):
         if not self.title:
             self.title = _short_title(self.description)
+
+    def push_edit(self, path: str, pre: str | None) -> None:
+        """Record a file's pre-edit content on the undo stack (newest last), capped so
+        a long session can't grow it without bound. `pre` is None for a new file."""
+        self.edit_history.append((path, pre))
+        if len(self.edit_history) > 50:
+            self.edit_history.pop(0)
 
     def status_glyph(self) -> str:
         return {

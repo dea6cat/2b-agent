@@ -60,12 +60,11 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 ### Phase 3 — Session persistence (local-first, stdlib `sqlite3`)
 
-> **3.1 (persistence) + 3.2 (resume/list) are shipped** — specs removed. `persist.py` saves each task's conversation to `~/.config/2b/history.db` (stdlib sqlite3, zero deps; `TWOB_NO_HISTORY` to disable) at task end, keyed by `(task id, cwd)`. `conversation.to_jsonable/from_jsonable` round-trip the thread. `2b --continue` / `--resume <id>` / `--list-sessions` and `/sessions`; the resumed thread (and its id) attaches to the first task so the next message continues it and updates the same row. Tests: `tests/test_persist.py`.
+**Phase 3 is shipped in full** — specs removed.
 
-#### 3.3 Edit history → multi-level `/undo`  (T5) — *remaining*
-- **Spec:** On each successful edit/write, snapshot pre-content into a `file_versions(session_id, path, version, content, created_at)` table (full content, not diffs — simple + robust). `/undo` reverts the last N edits; `/undo <path>` reverts a specific file. Also snapshot when the on-disk content differs from the last recorded version (captures external edits — ties to Phase 2). Today 2B has only single-level in-memory `/undo` (`last_edit_snapshot`).
-- **Files:** `persist.py`, `orchestrator.apply_edit/apply_write` (snapshot hook), `commands.py` (`/undo`).
-- **Effort:** M (rides the shipped persistence layer). Separable from the session-persistence core above — kept as its own item.
+> **3.1 (persistence) + 3.2 (resume/list):** `persist.py` saves each task's conversation to `~/.config/2b/history.db` (stdlib sqlite3, zero deps; `TWOB_NO_HISTORY` to disable) at task end, keyed by `(task id, cwd)`. `conversation.to_jsonable/from_jsonable` round-trip the thread. `2b --continue` / `--resume <id>` / `--list-sessions` and `/sessions`; the resumed thread (and its id) attaches to the first task so the next message continues it and updates the same row. Tests: `tests/test_persist.py`.
+
+> **3.3 (multi-level `/undo`):** each edit/write pushes its pre-content onto a per-task stack (`Task.edit_history`, `Task.push_edit`, capped at 50); `/undo` reverts the last edit, `/undo N` the last N, `/undo <path>` the most recent edit to that file (new files are removed). In-memory rather than a persistent `file_versions` table — a deliberate simplicity call, since undo is a within-session action. Tests: `tests/test_undo.py`.
 
 ### Phase 4 — TUI enhancements (the "improve 2B's TUI" ask)
 
@@ -127,7 +126,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 1. ~~Phase 1 (loop detection + recoverable edit errors)~~ — **shipped.**
 2. ~~Phase 2 (stale-file detection)~~ — **shipped.**
 3. **Phase 4.1** — one-afternoon TUI win (context meter) that serves the local-window thesis.
-4. ~~Phase 3 (3.1 persistence + 3.2 resume/list)~~ — **shipped**; stdlib-only. 3.3 (multi-level undo history) remains.
+4. ~~Phase 3 (persistence + resume/list + multi-level undo)~~ — **shipped**; stdlib-only.
 5. **Phase 4.2–4.6** — TUI polish, incrementally.
 6. **Phase 5 / 6** — optional, as needed.
 

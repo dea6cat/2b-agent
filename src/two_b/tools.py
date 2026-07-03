@@ -463,6 +463,25 @@ def _resolve_edit(content: str, old_text: str):
     return None
 
 
+def _nearest_hint(content: str, old_text: str) -> str:
+    """When old_text didn't match even the tolerant tiers, point the model at the
+    closest real line so it can re-copy it exactly instead of re-guessing the same
+    near-miss (small models otherwise loop on 'not found'). Empty when nothing is
+    close enough."""
+    old_lines = [ln for ln in old_text.splitlines() if ln.strip()]
+    file_lines = content.splitlines()
+    if not old_lines or not file_lines:
+        return ""
+    needle = old_lines[0].strip()
+    stripped = [ln.strip() for ln in file_lines]
+    match = difflib.get_close_matches(needle, stripped, n=1, cutoff=0.6)
+    if not match:
+        return ""
+    i = stripped.index(match[0])
+    return (f"\nThe closest line in the file is line {i + 1}: {file_lines[i]!r}. "
+            "Read the file again and copy old_text exactly from it (including indentation).")
+
+
 def plan_edit(content: str, old_text: str, new_text: str):
     """Resolve where old_text applies in `content` and build the edited text. Pure —
     no file I/O — so the confirmation path (orchestrator.apply_edit) and the writer
@@ -470,7 +489,8 @@ def plan_edit(content: str, old_text: str, new_text: str):
     ('error', message) with the frozen, model-facing error strings."""
     resolved = _resolve_edit(content, old_text)
     if resolved is None:
-        return ("error", "error: old_text not found in file — it must match exactly, including whitespace")
+        return ("error", "error: old_text not found in file — it must match exactly, including whitespace"
+                + _nearest_hint(content, old_text))
     if resolved[0] == "ambiguous":
         return ("error", f"error: old_text matches {resolved[1]} times — make it more specific so it matches exactly once")
     start, end, render, note = resolved

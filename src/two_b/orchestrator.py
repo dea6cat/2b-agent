@@ -21,6 +21,8 @@ the registry by the active model), driven by the canonical Conversation. The
 loop, confirmation routing, plan parsing, and events are unchanged — only the
 transport is abstracted. Local Ollama still reaches its native /api/chat.
 """
+import collections
+import hashlib
 import io
 import json
 import os
@@ -116,6 +118,51 @@ def _finish_stopped(task: Task, on_event: Callable[["AgentEvent"], None]) -> Non
     task.error = "stopped"
     on_event(AgentEvent(EventType.LOG, task.id, {"text": "Stopped."}))
     on_event(AgentEvent(EventType.TASK_DONE, task.id))
+
+
+class _LoopGuard:
+    """Detects a model stuck repeating the same tool call with the same result —
+    e.g. re-submitting an edit whose old_text keeps not matching (a real failure
+    mode: without this the loop runs until the tool-call budget or a timeout).
+    Host-side and model-agnostic. record() returns 'nudge' the first time a
+    signature reaches `nudge_at`, 'stop' once it reaches `stop_at`, else ''."""
+
+    def __init__(self, window: int = 10, nudge_at: int = 3, stop_at: int = 5):
+        self._recent: collections.deque[str] = collections.deque(maxlen=window)
+        self.nudge_at, self.stop_at = nudge_at, stop_at
+        self._nudged: set[str] = set()
+
+    @staticmethod
+    def _sig(name: str, args: dict, result: str) -> str:
+        # Hash the WHOLE result, not just line 1: run_command/run_git failures all
+        # start "error: command exited 1", so a first-line key would collapse every
+        # distinct test failure into one and falsely stop a fix→rerun→fix loop. A
+        # genuinely-stuck repeat (same edit, same "not found" hint) still hashes equal.
+        body = hashlib.sha1((result or "").encode("utf-8", "replace")).hexdigest()[:16]
+        # Put `path` first so it survives truncation even when a large old_text/new_text
+        # would otherwise push it past the arg-string cap and collide across files.
+        path = args.get("path", "") if isinstance(args, dict) else ""
+        return f"{name}|{path}|{json.dumps(args, sort_keys=True, default=str)[:150]}|{body}"
+
+    def record(self, name: str, args: dict, result: str) -> str:
+        sig = self._sig(name, args, result)
+        self._recent.append(sig)
+        self._nudged &= set(self._recent)   # forget signatures that aged out of the window
+        n = self._recent.count(sig)
+        if n >= self.stop_at:
+            return "stop"
+        if n >= self.nudge_at and sig not in self._nudged:
+            self._nudged.add(sig)
+            return "nudge"
+        return ""
+
+
+_LOOP_NUDGE = (
+    "You've made the same tool call and gotten the same result several times — that "
+    "approach isn't working, so stop repeating it. If an edit_file old_text isn't "
+    "matching, read_file the file again and copy the exact text (including indentation) "
+    "from what you see; otherwise try a genuinely different approach."
+)
 
 
 def teardown_helpers() -> None:
@@ -554,6 +601,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     conv.append(Message.user(desc))
 
     first_turn = not any(m.role.value == "assistant" for m in conv.messages)
+    loop_guard = _LoopGuard()
     try:
         for _ in range(MAX_TURNS):
             if task.cancel_flag.is_set():
@@ -631,6 +679,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
 
             conv.append(msg)
             results = []
+            nudge_pending = False
             for tc in msg.tool_calls:
                 if task.cancel_flag.is_set():        # esc while tools are running
                     _finish_stopped(task, on_event)
@@ -654,7 +703,19 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                     raise
                 on_event(AgentEvent(EventType.TOOL_CALL_RESULT, task.id, {"name": tc.name, "result": result}))
                 results.append(ToolResult(tool_call_id=tc.id, content=result))
+                verdict = loop_guard.record(tc.name, tc.arguments, result)
+                if verdict == "stop":
+                    conv.append(Message.results(results))
+                    task.status_line = ""
+                    on_event(AgentEvent(EventType.LOG, task.id,
+                                        {"text": f"Stopped: {tc.name} repeated with no progress."}))
+                    _finish_stopped(task, on_event)
+                    return
+                if verdict == "nudge":
+                    nudge_pending = True
             conv.append(Message.results(results))
+            if nudge_pending:
+                conv.append(Message.user(_LOOP_NUDGE))
 
         # Tool budget exhausted — one final turn for a best-effort answer (no more
         # tools), so the user gets a summary instead of a bare error.

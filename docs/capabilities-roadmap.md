@@ -54,23 +54,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 ## C. Roadmap (phased, with specs + implementation plans)
 
-### Phase 1 — Small-model reliability (do first; fixes what the eval found)
-
-The D3 eval failures this session were the model looping on `old_text not found` until the 180s timeout. Crush has two mechanisms that address exactly this.
-
-#### 1.1 Loop detection  (T1)
-- **Spec:** In the tool loop, keep a rolling window (last ~8 tool calls) of a signature `hash(tool_name + normalized_args + first_line_of_result)`. If any signature repeats ≥3× in the window, intervene: inject a one-shot system nudge ("You've repeated the same failing call N times — change your approach: re-read the file, or try a different old_text"), and if it repeats again, stop the turn with a clear message rather than burning the budget/timeout.
-- **Files:** `src/two_b/orchestrator.py` — the `for tc in msg.tool_calls` loop (~line 507) and `run_task`. Add a `_LoopGuard` helper (rolling deque of signatures on the `task`).
-- **Approach:** signature = `f"{tc.name}|{json.dumps(args,sort_keys=True)[:200]}|{result.splitlines()[0][:80]}"`. Count in a `collections.deque(maxlen=8)`. On threshold, append a synthetic `Message.user(...)` nudge before the next turn; on a second threshold, `_finish_stopped` with `"stopped: repeated the same tool call with no progress"`.
-- **Tests:** unit-test the guard (feed signatures → asserts nudge/stop thresholds). No model needed.
-- **Effort:** S. **Risk:** low (host-side, additive).
-
-#### 1.2 Recoverable edit errors  (T2)
-- **Spec:** When `edit_file` fails with "old_text not found," don't just return the frozen string — append host-side recovery hints: the closest actual lines in the file (difflib ratio over line windows) and, if the near-miss is whitespace-only, say so ("your old_text matches a line ignoring leading whitespace at L42 — re-copy it exactly"). This turns a dead-end into a fix path for small models.
-- **Files:** `src/two_b/tools.py` — `plan_edit` / `_resolve_edit` (the `None` return path, ~line 472). Add `_nearest_hint(content, old_text)`.
-- **Approach:** on no-match, take `old_text`'s first non-blank line, run `difflib.get_close_matches` against file lines; if a strong match exists, report its line number + the exact text. Keep the frozen leading error string intact (append the hint after it, so existing behavior/tests hold).
-- **Tests:** extend `tests/test_edit_file.py` — a near-miss returns a hint pointing at the right line.
-- **Effort:** S. **Risk:** low. **Note:** pairs with 1.1 — better errors reduce loops, loop detection catches the rest.
+> **Phase 1 (loop detection + recoverable edit errors) is shipped** — its spec has been removed from this roadmap. See `orchestrator._LoopGuard` and `tools._nearest_hint` (tests: `tests/test_loop_guard.py`, `tests/test_edit_file.py`).
 
 ### Phase 2 — Edit safety
 
@@ -159,8 +143,8 @@ The D3 eval failures this session were the model looping on `old_text not found`
 
 ## Suggested order
 
-1. **Phase 1 (1.1 + 1.2)** — small, high-ROI, fixes a *measured* failure. Do immediately.
-2. **Phase 2 (2.1)** — small safety win; complements Phase 1.
+1. ~~Phase 1 (loop detection + recoverable edit errors)~~ — **shipped.**
+2. **Phase 2 (2.1)** — small safety win; complements the shipped reliability work.
 3. **Phase 4.1** — one-afternoon TUI win (context meter) that serves the local-window thesis.
 4. **Phase 3 (3.1 → 3.2 → 3.3)** — the big capability (persistence/resume/undo); stdlib-only.
 5. **Phase 4.2–4.6** — TUI polish, incrementally.

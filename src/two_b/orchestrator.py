@@ -492,7 +492,36 @@ def _run_git(session: Session, task: Task, git_args: str, read_cap: int | None) 
     return tools.do_run_git(git_args, max_chars=read_cap, cancel=task.cancel_flag)
 
 
+# Required arguments per frozen tool. A small model sometimes emits a tool call with
+# args missing (or an empty {}); without this, args["path"] raised KeyError and crashed
+# the run with a traceback instead of giving the model a recoverable error. (run_git,
+# run_command, list_files read their args with .get and handle emptiness themselves.)
+_REQUIRED_ARGS = {
+    "read_file": ("path",),
+    "search_files": ("query",),
+    "edit_file": ("path", "old_text", "new_text"),
+    "write_file": ("path", "content"),
+}
+
+
+def _missing_required(name: str, args) -> list[str]:
+    """Which required args a tool call is missing — absent OR explicitly null (an
+    empty string is allowed: e.g. write_file content=''). All of them if args isn't
+    a dict."""
+    req = _REQUIRED_ARGS.get(name, ())
+    if not req:
+        return []
+    if not isinstance(args, dict):
+        return list(req)
+    return [k for k in req if args.get(k) is None]
+
+
 def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap: int | None = None) -> str:
+    missing = _missing_required(name, args)
+    if missing:
+        need = ", ".join(_REQUIRED_ARGS[name])
+        return (f"error: {name} call is missing required argument(s): {', '.join(missing)}. "
+                f"Call {name} again with all of: {need}.")
     if session.read_only and name in ("edit_file", "write_file"):
         return ("error: plan mode is on — no changes are applied. Do not call edit_file or "
                 "write_file. Investigate with the read-only tools and present your proposed "

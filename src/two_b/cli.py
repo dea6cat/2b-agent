@@ -230,6 +230,12 @@ def main() -> None:
         from . import setup
         raise SystemExit(setup.main(sys.argv[2:]))
 
+    # `2b eval …` — host-side technique scorer (drives the real agent over a fixed
+    # task set). Intercepted before the parser so its own flags pass through.
+    if sys.argv[1:2] == ["eval"]:
+        from . import evals
+        raise SystemExit(evals.main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(
         prog="2b",
         description="A local-first coding agent that keeps small models focused.",

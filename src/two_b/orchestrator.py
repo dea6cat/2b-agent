@@ -22,6 +22,7 @@ loop, confirmation routing, plan parsing, and events are unchanged — only the
 transport is abstracted. Local Ollama still reaches its native /api/chat.
 """
 import io
+import json
 import os
 import time
 from contextlib import redirect_stdout
@@ -494,11 +495,29 @@ def _resolve_subagent_model(reg: dict, provider: Any, model: str) -> tuple[Any, 
     return provider, model
 
 
+def _traced(on_event: Callable[["AgentEvent"], None], path: str) -> Callable[["AgentEvent"], None]:
+    """Tee AgentEvents to a JSONL file (the TWOB_TRACE tap consumed by the eval
+    harness) as well as the real sink. Off by default and best-effort — a write
+    failure never disturbs the run, and it adds nothing to the model's world."""
+    def tee(ev: "AgentEvent") -> None:
+        try:
+            with open(path, "a") as fh:
+                fh.write(json.dumps({"t": ev.type.value, "task": ev.task_id, **ev.payload},
+                                    default=str) + "\n")
+        except Exception:
+            pass
+        on_event(ev)
+    return tee
+
+
 def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None],
              reg: dict | None = None) -> None:
     """Drive the tool-call loop for one task on the calling (worker) thread.
     Resolves the active model to a provider, then drives it via the canonical
     Conversation. Emits events for the UI thread; never writes the terminal."""
+    _trace_path = os.environ.get("TWOB_TRACE")
+    if _trace_path:
+        on_event = _traced(on_event, _trace_path)
     reg = reg if reg is not None else registry.build_registry()
     model_str = task.model_override or session.default_model
     resolved = registry.resolve(reg, model_str)

@@ -86,12 +86,9 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 ### Phase 5 — Control refinements (optional / power-user)
 
-#### 5.1 Per-session "always allow" + allowlist  (T11)
-- **Spec:** In normal mode, a confirm dialog offers "allow once / allow for session / deny." "Allow for session" remembers `(tool, action, dir)` grants in-memory (like Crush's `sessionPermissions`); a config `allowed_tools` list pre-grants. YOLO already ≈ `--yes`.
-- **Files:** `session.py` (grant store), `orchestrator.request_confirmation`, `app_tui.py` (3-way dialog), `config.py`.
-- **Effort:** M.
+> **5.1 (per-session allow) is shipped.** The inline confirm now offers a third key — `a` "allow all edits/writes/git/commands this session" — alongside `y`/`n`. `Session.granted` holds the tool keys allowed this session; `request_confirmation(grant_key=…)` auto-approves a granted tool without prompting; a config `allowed_tools` list pre-grants at startup. Per-tool granularity (not the coarse accept-edits mode), so you can trust `run_command` while still reviewing edits. Tests: `tests/test_grants.py`.
 
-#### 5.2 PreToolUse hooks  (T14)
+#### 5.2 PreToolUse hooks  (T14) — *remaining*
 - **Spec:** Optional `hooks` config: shell commands run before a tool call that can block (exit 2), allow, or inject context (stdout). Host-side; off by default.
 - **Files:** new `hooks.py`, `orchestrator._dispatch_tool`, `config.py`.
 - **Effort:** M. **Note:** power-user; low priority.

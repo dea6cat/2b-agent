@@ -382,13 +382,17 @@ def _maybe_compact(conv: Conversation, provider, model: str, task: Task,
 
 # --- confirmation routed to the UI thread -----------------------------------
 
-def request_confirmation(session: Session, task: Task, prompt: str, diff: str) -> bool:
-    """Called from a worker thread. If auto-approve is on, approve immediately.
-    Otherwise hand a PendingConfirmation to the UI thread and block until it is
-    answered (a backgrounded task simply waits here until foregrounded)."""
+def request_confirmation(session: Session, task: Task, prompt: str, diff: str,
+                         grant_key: str | None = None) -> bool:
+    """Called from a worker thread. Auto-approve when accept-edits mode is on, or when
+    `grant_key` was 'allowed for this session' (via the confirm's 'a', or config
+    `allowed_tools`). Otherwise hand a PendingConfirmation to the UI thread and block
+    until answered (a backgrounded task simply waits here until foregrounded)."""
     if session.approve_writes:
         return True
-    pc = PendingConfirmation(prompt=prompt, diff=diff)
+    if grant_key and grant_key in session.granted:
+        return True
+    pc = PendingConfirmation(prompt=prompt, diff=diff, grant_key=grant_key)
     task.pending = pc
     try:
         while not pc.answered.wait(timeout=0.2):
@@ -461,7 +465,7 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
             pre = f.read()
     normalized = content if content.endswith("\n") or not content else content + "\n"
     preview = f"(full overwrite of {path}: {len(normalized.splitlines())} lines)"
-    if not request_confirmation(session, task, f"Apply write to {path}?", preview):
+    if not request_confirmation(session, task, f"Apply write to {path}?", preview, grant_key="write_file"):
         return "write rejected by user"
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -492,7 +496,7 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     import difflib
 
     diff = "\n".join(difflib.unified_diff(pre.splitlines(), new_content.splitlines(), lineterm="", n=1))
-    if not request_confirmation(session, task, f"Apply edit to {path}?", diff):
+    if not request_confirmation(session, task, f"Apply edit to {path}?", diff, grant_key="edit_file"):
         return "edit rejected by user"
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -599,7 +603,7 @@ def _run_git(session: Session, task: Task, git_args: str, read_cap: int | None) 
     if session.read_only:
         return (f"error: plan mode is on — not running mutating git (git {git_args}). Use read-only "
                 "git (status/diff/log) to inspect, and present a plan in your final answer.")
-    if not request_confirmation(session, task, f"Run: git {git_args}?", f"$ git {git_args}"):
+    if not request_confirmation(session, task, f"Run: git {git_args}?", f"$ git {git_args}", grant_key="run_git"):
         return "git command rejected by user"
     return tools.do_run_git(git_args, max_chars=read_cap, cancel=task.cancel_flag)
 
@@ -647,7 +651,7 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
         cmd = (args.get("command") or "").strip()
         if not cmd:
             return "error: no command given"
-        if not request_confirmation(session, task, "Run this shell command?", f"$ {cmd}"):
+        if not request_confirmation(session, task, "Run this shell command?", f"$ {cmd}", grant_key="run_command"):
             return "command rejected by user"
         return tools.do_run_command(cmd, max_chars=read_cap, cancel=task.cancel_flag)
     if mcp_client.manager.is_mcp_tool(name):        # curated MCP tool -> route to its server

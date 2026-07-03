@@ -43,6 +43,10 @@ _MODE_STYLE = {
 _DIFF_ADD_BG = "on #12331a"   # dark green — added lines
 _DIFF_DEL_BG = "on #3a1519"   # dark red   — removed lines
 
+# Friendly words for the confirm's "allow all … this session" (keyed by grant_key).
+_GRANT_LABEL = {"edit_file": "edits", "write_file": "writes",
+                "run_git": "git", "run_command": "commands"}
+
 
 def render_diff(diff: str) -> Text:
     """Render a unified diff inline, Claude-Code style: a `+N -M` summary, then each
@@ -708,25 +712,36 @@ class TwoBApp(App):
         """Render the proposed change inline in the view and arm y/n. No modal."""
         self._commit_stream()
         self.log_write(render_diff(pc.diff))
+        label = _GRANT_LABEL.get(getattr(pc, "grant_key", None))
         q = Text(f"{pc.prompt}  ", style=f"bold {self.c('ink')}")
         q.append("y", style="green")
         q.append(" apply · ", style=self.c("dim"))
+        if label:
+            q.append("a", style="green")
+            q.append(f" allow {label} · ", style=self.c("dim"))
         q.append("n", style="red")
         q.append(" skip · ", style=self.c("dim"))
         q.append("esc", style=self.c("dim"))
         q.append(" stop", style=self.c("dim"))
         self.log_write(q)
         inp = self.query_one("#input", Input)
-        inp.placeholder = "y apply · n skip · esc stop"
+        inp.placeholder = (f"y apply · a allow {label} this session · n skip · esc stop"
+                           if label else "y apply · n skip · esc stop")
         inp.disabled = True
 
-    def _resolve_confirm(self, approved: bool) -> None:
+    def _resolve_confirm(self, approved: bool, grant: bool = False) -> None:
         pc = self._pending_confirm
         self._pending_confirm = None
         if pc is not None:
+            if grant and pc.grant_key:
+                self.session.granted.add(pc.grant_key)   # stop asking for this tool this session
             pc.approved = bool(approved)
             pc.answered.set()
-        self.log_write(Text("  ✔ applied" if approved else "  ✗ skipped", style=self.c("dim")))
+        if approved and grant and pc is not None and pc.grant_key:
+            msg = f"  ✔ applied · allowing {_GRANT_LABEL.get(pc.grant_key, pc.grant_key)} this session"
+        else:
+            msg = "  ✔ applied" if approved else "  ✗ skipped"
+        self.log_write(Text(msg, style=self.c("dim")))
         self._restore_input()
 
     def _restore_input(self) -> None:
@@ -744,6 +759,9 @@ class TwoBApp(App):
         if event.key in ("y", "Y", "enter"):
             event.stop()
             self._resolve_confirm(True)
+        elif event.key in ("a", "A") and getattr(self._pending_confirm, "grant_key", None):
+            event.stop()
+            self._resolve_confirm(True, grant=True)
         elif event.key in ("n", "N"):
             event.stop()
             self._resolve_confirm(False)

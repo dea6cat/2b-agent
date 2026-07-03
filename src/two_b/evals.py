@@ -52,8 +52,12 @@ def _read(root: str, rel: str) -> str:
 
 
 def _has(needle: str, hay: str) -> bool:
-    """Whitespace-tolerant substring check — a model may reflow indentation."""
-    return "".join(needle.split()) in "".join(hay.split())
+    """Substring check tolerant of two harmless model choices: reflowed whitespace,
+    and brace-delimited string interpolation (`${name}` for `$name`). Braces are
+    dropped from both sides so the two interpolation styles compare equal."""
+    def norm(s: str) -> str:
+        return "".join(s.split()).replace("{", "").replace("}", "")
+    return norm(needle) in norm(hay)
 
 
 # --- the FIXED task set (a regression guard; frozen in the repo) -------------
@@ -79,7 +83,7 @@ _GREETER = (
 def _greeter_ok(root: str) -> bool:
     t = _read(root, "sample.dart")
     return (_has("Hi there, $name!", t) and not _has("Hello, $name!", t)
-            and _has("farewell", t) and _has("Bye, $name!", t))
+            and _has("String farewell(String name)", t) and _has("Bye, $name!", t))
 
 
 _COUNTER = (
@@ -147,7 +151,7 @@ EXPECTED: dict[str, tuple[str, str]] = {
 }
 
 ROW_FIELDS = ["task_id", "tier", "model", "condition", "success", "landed",
-              "analyze_clean", "tool_call_valid", "steps", "latency_s"]
+              "analyze_clean", "tool_call_valid", "steps", "latency_s", "notes"]
 
 
 # --- scoring primitives (pure; unit-tested) ----------------------------------
@@ -155,21 +159,24 @@ ROW_FIELDS = ["task_id", "tier", "model", "condition", "success", "landed",
 def shape_ok(name, args) -> bool:
     """Is a tool call well-formed: a known tool with all its required args present?
     This is the 'first-try tool-call validity' axis — shape only, not correctness
-    (a well-formed edit with the wrong old_text is valid here but fails success)."""
-    from .toolspec import TOOL_SPECS
-    spec = next((s for s in TOOL_SPECS if s.name == name), None)
+    (a well-formed edit with the wrong old_text is valid here but fails success).
+    Includes `delegate`, which cloud models get in addition to the frozen five."""
+    from .toolspec import TOOL_SPECS, DELEGATE_SPEC
+    spec = next((s for s in TOOL_SPECS + (DELEGATE_SPEC,) if s.name == name), None)
     if spec is None:
         return False
     args = args or {}
     return all(p.name in args for p in spec.params if p.required)
 
 
-def read_trace(path: str) -> tuple[int, float]:
+def read_trace(path: str) -> tuple[int, float | None]:
     """From the TWOB_TRACE JSONL, return (steps, valid_fraction). steps = number of
-    tool calls; valid_fraction = share that were well-formed on emission. A missing
-    or empty trace (model made no tool calls) reads as (0, 1.0)."""
+    tool calls; valid_fraction = share well-formed on emission. When there are NO
+    tool calls, valid_fraction is None (not 1.0): a run that made no calls — a model
+    that gave up on an edit task — must not read as perfect validity, so it's
+    excluded from the validity mean rather than inflating it."""
     if not os.path.exists(path):
-        return 0, 1.0
+        return 0, None
     starts = []
     with open(path) as f:
         for line in f:
@@ -183,7 +190,7 @@ def read_trace(path: str) -> tuple[int, float]:
             if ev.get("t") == "tool_call_start":
                 starts.append(ev)
     if not starts:
-        return 0, 1.0
+        return 0, None
     good = sum(1 for e in starts if shape_ok(e.get("name"), e.get("shown")))
     return len(starts), round(good / len(starts), 3)
 
@@ -224,18 +231,28 @@ def run_one(task: Task, model: str, condition: str, timeout: int = DEFAULT_TIMEO
         env = {**os.environ, "OLLAMA_API_BASE": _OLLAMA_HOST,
                "TWOB_TRACE": trace, **CONDITIONS[condition]}
         t0 = time.time()
+        proc, note = None, ""
         try:
-            subprocess.run(["2b", "--classic", "--model", model, "--yes", task.prompt],
-                           cwd=d, capture_output=True, text=True, timeout=timeout, env=env)
-        except Exception:
-            pass
+            # stdin=DEVNULL is load-bearing: without it the headless `2b` finishes the
+            # task then blocks in its REPL on the inherited tty until the timeout fires.
+            proc = subprocess.run(["2b", "--classic", "--model", model, "--yes", task.prompt],
+                                  cwd=d, capture_output=True, text=True, timeout=timeout,
+                                  stdin=subprocess.DEVNULL, env=env)
+        except subprocess.TimeoutExpired:
+            note = f"timed out after {timeout}s"
+        except Exception as e:
+            note = f"failed to launch: {e}"
         wall = round(time.time() - t0, 1)
+        # Surface an infra failure (bad model tag, Ollama down, crash) so a 0%-success
+        # cell is diagnosable instead of looking like a genuine model failure.
+        if proc is not None and proc.returncode != 0:
+            note = f"2b exit {proc.returncode}: {(proc.stderr or '').strip()[-160:]}"
         landed = _safe(task.verify, d)
         clean = _dart_analyze_clean(d)
         steps, valid = read_trace(trace)
         return {"task_id": task.id, "tier": task.tier, "model": model, "condition": condition,
                 "success": landed and clean, "landed": landed, "analyze_clean": clean,
-                "tool_call_valid": valid, "steps": steps, "latency_s": wall}
+                "tool_call_valid": valid, "steps": steps, "latency_s": wall, "notes": note}
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -262,9 +279,10 @@ def summarize(rows: list[dict]) -> tuple[dict, list[dict]]:
         cells.setdefault((r["model"], r["condition"]), []).append(r)
     per = {}
     for key, rs in cells.items():
+        valids = [float(r["tool_call_valid"]) for r in rs if r["tool_call_valid"] is not None]
         per[key] = {
             "success": mean(1.0 if r["success"] else 0.0 for r in rs),
-            "tool_call_valid": mean(float(r["tool_call_valid"]) for r in rs),
+            "tool_call_valid": mean(valids) if valids else None,   # None = no calls anywhere in the cell
             "steps": mean(float(r["steps"]) for r in rs),
             "n": len(rs),
         }
@@ -299,8 +317,9 @@ def _print_report(rows: list[dict], csv_path: str) -> None:
     print(f"{'model':22} {'condition':16} {'n':>3} {'success':>8} {'valid':>7} {'steps':>7}")
     for (model, cond) in sorted(per):
         c = per[(model, cond)]
+        valid = "  —  " if c["tool_call_valid"] is None else f"{c['tool_call_valid']:.2f}"
         print(f"{model:22} {cond:16} {c['n']:>3} {c['success']:>8.2f} "
-              f"{c['tool_call_valid']:>7.2f} {c['steps']:>7.1f}")
+              f"{valid:>7} {c['steps']:>7.1f}")
     if checks:
         print("\n§5 — did each ablation move its expected metric vs full?")
         for ck in checks:

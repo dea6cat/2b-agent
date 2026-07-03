@@ -24,6 +24,7 @@ transport is abstracted. Local Ollama still reaches its native /api/chat.
 import io
 import json
 import os
+import threading
 import time
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
@@ -495,15 +496,19 @@ def _resolve_subagent_model(reg: dict, provider: Any, model: str) -> tuple[Any, 
     return provider, model
 
 
+_TRACE_LOCK = threading.Lock()
+
+
 def _traced(on_event: Callable[["AgentEvent"], None], path: str) -> Callable[["AgentEvent"], None]:
     """Tee AgentEvents to a JSONL file (the TWOB_TRACE tap consumed by the eval
     harness) as well as the real sink. Off by default and best-effort — a write
-    failure never disturbs the run, and it adds nothing to the model's world."""
+    failure never disturbs the run, and it adds nothing to the model's world. The
+    lock keeps whole lines intact if two concurrent worker threads share one path."""
     def tee(ev: "AgentEvent") -> None:
         try:
-            with open(path, "a") as fh:
-                fh.write(json.dumps({"t": ev.type.value, "task": ev.task_id, **ev.payload},
-                                    default=str) + "\n")
+            line = json.dumps({"t": ev.type.value, "task": ev.task_id, **ev.payload}, default=str)
+            with _TRACE_LOCK, open(path, "a") as fh:
+                fh.write(line + "\n")
         except Exception:
             pass
         on_event(ev)

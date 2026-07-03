@@ -35,6 +35,13 @@ class ShapeValidity(unittest.TestCase):
     def test_none_args_is_invalid_for_tool_needing_args(self):
         self.assertFalse(evals.shape_ok("read_file", None))
 
+    def test_delegate_is_a_known_tool_for_cloud_models(self):
+        # Cloud models get `delegate` on top of the frozen five; a well-formed
+        # delegate call must count as valid, not unknown.
+        from two_b.toolspec import DELEGATE_SPEC
+        args = {p.name: "x" for p in DELEGATE_SPEC.params if p.required}
+        self.assertTrue(evals.shape_ok(DELEGATE_SPEC.name, args))
+
 
 class TraceParsing(unittest.TestCase):
     def _trace(self, events):
@@ -56,8 +63,9 @@ class TraceParsing(unittest.TestCase):
         self.assertEqual(steps, 3)
         self.assertAlmostEqual(valid, round(1 / 3, 3))
 
-    def test_missing_trace_reads_as_no_calls(self):
-        self.assertEqual(evals.read_trace("/no/such/trace.jsonl"), (0, 1.0))
+    def test_missing_trace_reads_as_no_calls_with_null_validity(self):
+        # No calls -> validity is None (excluded from means), not a perfect 1.0.
+        self.assertEqual(evals.read_trace("/no/such/trace.jsonl"), (0, None))
 
     def test_empty_and_malformed_lines_are_skipped(self):
         path = self._trace([{"t": "turn_start"}])   # a non-tool event
@@ -65,7 +73,7 @@ class TraceParsing(unittest.TestCase):
             f.write("\n")            # blank
             f.write("not json\n")    # malformed
         steps, valid = evals.read_trace(path)
-        self.assertEqual((steps, valid), (0, 1.0))
+        self.assertEqual((steps, valid), (0, None))
 
 
 class Verifiers(unittest.TestCase):
@@ -86,6 +94,24 @@ class Verifiers(unittest.TestCase):
         self.assertTrue(evals._greeter_ok(done))
         # Unedited fixture must fail.
         self.assertFalse(evals._greeter_ok(self._dir({"sample.dart": evals._GREETER})))
+
+    def test_greeter_accepts_brace_interpolation(self):
+        # `${name}` is valid Dart and equally correct — must not be rejected.
+        braces = self._dir({"sample.dart":
+            "class Greeter {\n"
+            "  String greet(String name) => 'Hi there, ${name}!';\n"
+            "  String farewell(String name) => 'Bye, ${name}!';\n"
+            "}\n"})
+        self.assertTrue(evals._greeter_ok(braces))
+
+    def test_greeter_rejects_farewell_left_as_a_comment(self):
+        # A dangling TODO comment must not pass as a real method.
+        stub = self._dir({"sample.dart":
+            "class Greeter {\n"
+            "  String greet(String name) => 'Hi there, $name!';\n"
+            "  // TODO: farewell -> 'Bye, $name!'\n"
+            "}\n"})
+        self.assertFalse(evals._greeter_ok(stub))
 
     def test_counter_pass_is_whitespace_tolerant(self):
         done = self._dir({"counter.dart":
@@ -138,6 +164,21 @@ class Aggregation(unittest.TestCase):
         self.assertEqual(cell["n"], 2)
         self.assertAlmostEqual(cell["success"], 0.5)
         self.assertAlmostEqual(cell["steps"], 3.0)
+
+    def test_none_validity_is_excluded_from_the_mean(self):
+        rows = [
+            {"model": "m", "condition": "full", "success": True, "tool_call_valid": 1.0, "steps": 3},
+            {"model": "m", "condition": "full", "success": False, "tool_call_valid": None, "steps": 0},
+        ]
+        per, _ = evals.summarize(rows)
+        # Mean over the one non-None value, not dragged toward 0 or inflated to 1.
+        self.assertAlmostEqual(per[("m", "full")]["tool_call_valid"], 1.0)
+
+    def test_all_none_validity_cell_reports_none(self):
+        rows = [{"model": "m", "condition": "full", "success": False,
+                 "tool_call_valid": None, "steps": 0}]
+        per, _ = evals.summarize(rows)
+        self.assertIsNone(per[("m", "full")]["tool_call_valid"])
 
 
 class Cli(unittest.TestCase):

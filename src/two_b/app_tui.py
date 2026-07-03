@@ -27,7 +27,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
-from . import completion, config, difffmt, orchestrator, registry, theme, tools
+from . import completion, config, difffmt, notify, orchestrator, registry, theme, tools
 from .commands import command_specs, dispatch_input
 from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
@@ -200,6 +200,7 @@ class TwoBApp(App):
         self._pal_index = 0                       # highlighted match (↑/↓ navigation)
         self._pal_mode = ""                       # "cmd" (slash) or "file" (@) — how to accept
         self._file_list = None                    # cached project relpaths for @-completion
+        self._focused = True                      # terminal focus — used to ping on finish when away
         self._pending_tool = None                 # (name, args) between a tool START and its RESULT
         self._tool_widgets: list = []             # this task's tool-action widgets (for └ on the last)
         self._last_reply = ""                     # most-recent model reply, for /copy
@@ -639,9 +640,11 @@ class TwoBApp(App):
                 self._commit_stream()
                 self._close_tool_group()
                 self.log_write(Text(f"error: {ev.payload.get('error', 'unknown')}", style=f"bold {self.c('err')}"))
+                self._notify_finished(ev.task_id, ok=False)
             elif t == EventType.TASK_DONE:
                 self._commit_stream()
                 self._close_tool_group()
+                self._notify_finished(ev.task_id, ok=True)
 
         # Write/edit confirmation waiting? Show it INLINE in the conversation (diff +
         # y/n), never a popup. Answered by _resolve_confirm on a keypress.
@@ -781,6 +784,22 @@ class TwoBApp(App):
         cache so it re-measures against the new window."""
         self._ctx_cache = (None, ("",))
         threading.Thread(target=self._load_ctx_label, daemon=True).start()
+
+    # ---- finish notification (ping only when you've looked away) ----
+    def on_app_blur(self, event) -> None:
+        self._focused = False
+
+    def on_app_focus(self, event) -> None:
+        self._focused = True
+
+    def _notify_finished(self, task_id: str, ok: bool) -> None:
+        """Desktop-notify that a task finished — but only when the terminal isn't
+        focused (if you're watching, you already see it). Best-effort; see notify.py."""
+        if self._focused:
+            return
+        task = self.session.find(task_id)
+        title = (task.title if task is not None else "") or "task"
+        notify.send(f"2B — {'done' if ok else 'failed'}: {title}")
 
     # ---- header / intro ----
     def _banner_header(self) -> Text:

@@ -72,27 +72,18 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 > **4.1 (context-window meter) is shipped** — the TUI status bar shows live `ctx N%` of the model's window, amber at ≥80%. `orchestrator.context_usage` (pure, tested); budget resolved off the render path (`_load_ctx_label`, refreshed on `/model`·`/default` via `on_model_changed`); the per-render estimate is memoized so it recomputes only when a message is added. Tests: `tests/test_context_meter.py`.
 
-#### 4.2 Richer diff review  (T7)
-- **Spec:** In the edit confirmation, render a syntax-highlighted unified diff (Textual supports Rich `Syntax`/panels); optional split view on wide terminals; truncate with "N more lines" + expand.
-- **Files:** `app_tui.py` (`_prompt_confirmation` / the pending-confirmation render), a `diffview` helper. 2B already computes `task.last_diff`.
-- **Effort:** M.
+> **4.2 (diff review) is shipped — and went further: inline, no modal.** Write/edit confirmations render in the conversation view (per user direction, Claude-Code style): a colorized, line-numbered unified diff (added on green bg, removed on red, context dim) then an inline `apply? y / n / esc` answered by a keypress. The `ConfirmScreen` modal was removed. Diff parsing is pure in `difffmt` (tested). Also fixed alongside: shell-chained `run_git` is rejected before prompting, and tool-error sub-lines show up to 400 chars. Tests: `tests/test_render_diff.py`, `tests/test_run_git_shell.py`.
 
-#### 4.3 Collapsible tool-call detail  (T8)
+> **4.4 (@-file completion) is shipped.** Typing `@partial` offers matching project files in the existing inline suggestions strip; Tab/Enter inserts the path. Pure helpers in `completion` (`at_token`, `rank_files`), tested. The command palette already existed inline. Tests: `tests/test_completion.py`.
+
+> **4.5 (finish notification) is shipped.** A task finishing while the terminal is unfocused posts an OSC 9 desktop notification (written to /dev/tty, so Textual's screen is untouched); off with `TWOB_NO_NOTIFY`. Pure builder in `notify.osc9`, tested. Tests: `tests/test_notify.py`.
+
+#### 4.3 Collapsible tool-call detail  (T8) — *remaining*
 - **Spec:** Each narrated tool line gets a status glyph (⏳/✓/✗) + spinner while running; expandable to show full args/result. Keeps the clean tree by default.
 - **Files:** `app_tui.py`, `tui.py`.
 - **Effort:** M.
 
-#### 4.4 @-file completion + Ctrl+P palette  (T9)
-- **Spec:** Typing `@` opens a fuzzy file-path completion (multi-tier rank: exact/prefix/segment); Ctrl+P opens a fuzzy command palette over 2B's slash commands. Reduces path typos (which cause edit-not-found loops — ties to Phase 1).
-- **Files:** `app_tui.py` (input handling), a completions widget; fuzzy over `repomap`/`list_files`.
-- **Effort:** M.
-
-#### 4.5 Task-finish notification  (T10)
-- **Spec:** When a backgrounded task finishes, emit an OSC 9/777 desktop notification (fallback bell), suppressed when focused. Long local runs need this.
-- **Files:** `app_tui.py`; a small `notify.py` (OSC sequences; detect SSH/terminal).
-- **Effort:** S.
-
-#### 4.6 Session switcher UI  (rides T4)
+#### 4.6 Session switcher UI  (rides T4) — *remaining*
 - **Spec:** `/sessions` opens a filterable list (title, age, model, message count) with resume/rename/delete; a two-step delete confirm.
 - **Files:** `app_tui.py` (modal), `persist.py`.
 - **Effort:** M.

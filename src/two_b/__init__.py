@@ -5,4 +5,4 @@ host keeps the model's world simple — a small, native tool schema over the
 provider's own wire format, with all orchestration complexity kept host-side.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

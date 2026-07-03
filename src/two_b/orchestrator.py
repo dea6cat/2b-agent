@@ -116,6 +116,25 @@ def _finish_stopped(task: Task, on_event: Callable[["AgentEvent"], None]) -> Non
     on_event(AgentEvent(EventType.TASK_DONE, task.id))
 
 
+def teardown_helpers() -> None:
+    """Hard-stop the long-lived helper servers on esc. Local subprocesses die via
+    the cancel flag + process-group kill (see tools._run_cancellable); this tears
+    down the rest: LSP servers (they respawn on the next symbol lookup) and MCP
+    servers (restarted so their tools survive the session). Best-effort and quiet
+    — a helper that's absent or already down is not an error. Runs off the UI
+    thread, since MCP shutdown/restart can block on a slow server."""
+    try:
+        from . import lsp
+        lsp.shutdown_all()
+    except Exception:
+        pass
+    try:
+        mcp_client.manager.shutdown()
+        mcp_client.manager.start()
+    except Exception:
+        pass
+
+
 def pick_default_model() -> str:
     """Default model at startup: prefer local Ollama's qwen3.5:9b if present,
     else the first local model. (Cloud providers aren't auto-defaulted.)"""
@@ -344,13 +363,13 @@ def _run_git(session: Session, task: Task, git_args: str, read_cap: int | None) 
     if not git_args:
         return "error: no git command given"
     if tools.git_is_read_only(git_args):
-        return tools.do_run_git(git_args, max_chars=read_cap)
+        return tools.do_run_git(git_args, max_chars=read_cap, cancel=task.cancel_flag)
     if session.read_only:
         return (f"error: plan mode is on — not running mutating git (git {git_args}). Use read-only "
                 "git (status/diff/log) to inspect, and present a plan in your final answer.")
     if not request_confirmation(session, task, f"Run: git {git_args}?", f"$ git {git_args}"):
         return "git command rejected by user"
-    return tools.do_run_git(git_args, max_chars=read_cap)
+    return tools.do_run_git(git_args, max_chars=read_cap, cancel=task.cancel_flag)
 
 
 def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap: int | None = None) -> str:
@@ -369,7 +388,7 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
             return "error: no command given"
         if not request_confirmation(session, task, "Run this shell command?", f"$ {cmd}"):
             return "command rejected by user"
-        return tools.do_run_command(cmd, max_chars=read_cap)
+        return tools.do_run_command(cmd, max_chars=read_cap, cancel=task.cancel_flag)
     if mcp_client.manager.is_mcp_tool(name):        # curated MCP tool -> route to its server
         if session.read_only:                       # plan mode: MCP tools may have side effects
             return ("error: plan mode is on — external MCP tools are not run (they may change state). "
@@ -512,7 +531,15 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 task.status_line = _STATUS.get(tc.name, "Working")
                 shown = {k: (v if k != "content" else f"<{len(v)} chars>") for k, v in tc.arguments.items()}
                 on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": tc.name, "shown": shown}))
-                result = _dispatch_tool(session, task, tc.name, tc.arguments, read_cap)
+                try:
+                    result = _dispatch_tool(session, task, tc.name, tc.arguments, read_cap)
+                except Exception:
+                    # esc can tear a tool's helper (LSP/MCP) out from under it mid-call;
+                    # when cancelled, finish quietly rather than surfacing that as an error.
+                    if task.cancel_flag.is_set():
+                        _finish_stopped(task, on_event)
+                        return
+                    raise
                 on_event(AgentEvent(EventType.TOOL_CALL_RESULT, task.id, {"name": tc.name, "result": result}))
                 results.append(ToolResult(tool_call_id=tc.id, content=result))
             conv.append(Message.results(results))

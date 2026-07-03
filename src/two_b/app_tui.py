@@ -464,7 +464,10 @@ class TwoBApp(App):
     def action_interrupt(self) -> None:
         t = self.session.active_task
         if t is not None and t.state == TaskState.ACTIVE:
-            t.cancel_flag.set()                 # orchestrator aborts the stream and returns to idle
+            t.cancel_flag.set()                 # orchestrator aborts the stream; subprocess tools killpg within ~100ms
+            # Tear down the long-lived helpers (LSP/MCP) off the UI thread so a slow
+            # server can't freeze the interface while we stop everything.
+            threading.Thread(target=orchestrator.teardown_helpers, daemon=True).start()
             self.log_write(Text("stopping…", style=self.c("faint")))
 
     def action_cycle_mode(self) -> None:

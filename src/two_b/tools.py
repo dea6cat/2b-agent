@@ -220,11 +220,29 @@ def do_list_files(path, max_chars=None):
     return listing
 
 
+def resolve_read_path(path):
+    """The absolute path do_read_file actually reads for `path`: the given location,
+    or — when that doesn't exist — the unique project file matching its basename.
+    None when empty, missing, or ambiguous. Mirrors do_read_file's resolution (keep
+    the two in sync) so read-tracking keys on the exact file the model was shown."""
+    m = _RANGE_RE.match(str(path or ""))
+    base = m.group("base") if m else str(path or "")
+    full = _safe_path(base)
+    if full is None:
+        return None
+    if os.path.isfile(full):
+        return full
+    name = os.path.basename(base)
+    matches = _find_by_basename(name, base) if name else []
+    return _safe_path(matches[0]) if len(matches) == 1 else None
+
+
 def do_read_file(path, max_chars=None):
     """Read a file. Supports an optional line range via a 'path:START-END' suffix.
-    If the path isn't found, looks for the basename anywhere in the project. When a
-    whole-file read is too big for max_chars, suggests a section read instead of
-    clipping. max_chars=None means no size guard (whole file returned)."""
+    If the path isn't found, looks for the basename anywhere in the project (keep this
+    fallback in sync with resolve_read_path). When a whole-file read is too big for
+    max_chars, suggests a section read instead of clipping. max_chars=None means no
+    size guard (whole file returned)."""
     raw = str(path or "")
     lo = hi = None
     base = raw

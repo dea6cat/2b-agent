@@ -56,14 +56,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 > **Phase 1 (loop detection + recoverable edit errors) is shipped** — its spec has been removed from this roadmap. See `orchestrator._LoopGuard` and `tools._nearest_hint` (tests: `tests/test_loop_guard.py`, `tests/test_edit_file.py`).
 
-### Phase 2 — Edit safety
-
-#### 2.1 Stale-file / read-before-write detection  (T3)
-- **Spec:** Track, per task, the mtime at which 2B last *read* each file (via `read_file`). On `edit_file`/`write_file`, if the file's current mtime is newer than the recorded read (someone edited it on disk since), reject with "file X changed on disk since you read it — read_file it again before editing," instead of clobbering. If never read, allow but record. (Crush *requires* a prior read; 2B can be softer — warn only when a change is detected — to avoid annoying small models.)
-- **Files:** `src/two_b/session.py` (`Task`: add `read_mtimes: dict[str,float]`), `src/two_b/tools.py` (`do_read_file` records; `do_edit_file`/`do_write_file` check — but they're pure/stateless, so thread the check through `orchestrator.apply_edit`/`apply_write` where the `task` is available), `src/two_b/orchestrator.py`.
-- **Approach:** record `os.path.getmtime` on read (in `_dispatch_tool` read path). In `apply_edit`/`apply_write`, compare before applying; on mismatch return the error and do not write.
-- **Tests:** unit — read file, bump mtime, attempt edit → rejected; no external change → applies.
-- **Effort:** S–M. **Risk:** low.
+> **Phase 2 (stale-file / read-before-write detection) is shipped** — its spec has been removed from this roadmap. 2B records each file's mtime when it reads it (`orchestrator._record_read`, keyed via `tools.resolve_read_path`) and refuses an edit/write to a file that changed on disk since (`_stale_check`), refreshing after its own writes (`_refresh_mtime`); the guard also covers worker/`delegate` batch writes. Tests: `tests/test_stale_edit.py`, `tests/test_worker_apply.py`.
 
 ### Phase 3 — Session persistence (local-first, stdlib `sqlite3`)
 
@@ -144,7 +137,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 ## Suggested order
 
 1. ~~Phase 1 (loop detection + recoverable edit errors)~~ — **shipped.**
-2. **Phase 2 (2.1)** — small safety win; complements the shipped reliability work.
+2. ~~Phase 2 (stale-file detection)~~ — **shipped.**
 3. **Phase 4.1** — one-afternoon TUI win (context meter) that serves the local-window thesis.
 4. **Phase 3 (3.1 → 3.2 → 3.3)** — the big capability (persistence/resume/undo); stdlib-only.
 5. **Phase 4.2–4.6** — TUI polish, incrementally.

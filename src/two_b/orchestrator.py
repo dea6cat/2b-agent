@@ -358,9 +358,61 @@ def request_confirmation(session: Session, task: Task, prompt: str, diff: str) -
         task.pending = None
 
 
+# --- edit safety: detect files changed on disk since 2B read them -----------
+
+def _record_read(task: Task, path: str) -> None:
+    """Remember a file's mtime when 2B reads it, so a later edit can tell whether it
+    changed on disk in between. Resolves via tools.resolve_read_path so it keys on the
+    SAME file do_read_file returned — including a section read (`path:start-end`) or a
+    basename fallback where the given path didn't exist verbatim."""
+    full = tools.resolve_read_path(path)
+    if full and os.path.isfile(full):
+        try:
+            task.read_mtimes[full] = os.path.getmtime(full)
+        except OSError:
+            pass
+
+
+def _stale_check(task: Task, path: str) -> str:
+    """Error string if `path` was read earlier and has since changed on disk (edited
+    outside 2B), else ''. 2B does NOT force a read-before-write — a file it never read
+    is allowed through; this only stops it clobbering a file it's working from a stale
+    copy of. 2B's own writes refresh the recorded mtime, so they never trip this.
+
+    Best-effort: mtime-only, so a change that keeps the same mtime (same-second write,
+    an editor that restores mtime, a restore from an older backup) or that arrives via
+    an unread symlink/case alias won't be caught. It never blocks a legitimate edit —
+    the failure mode is a missed detection, not a false positive."""
+    full = tools._safe_path(path)
+    if not full or full not in task.read_mtimes:
+        return ""
+    try:
+        current = os.path.getmtime(full)
+    except OSError:
+        return ""
+    if current > task.read_mtimes[full]:
+        return (f"error: {path} changed on disk since you read it — its current contents differ "
+                "from what this edit is based on. read_file it again, then redo the edit.")
+    return ""
+
+
+def _refresh_mtime(task: Task, path: str) -> None:
+    """After 2B writes a file, record its new mtime so the next edit isn't falsely
+    flagged as stale by our own change."""
+    full = tools._safe_path(path)
+    if full and os.path.isfile(full):
+        try:
+            task.read_mtimes[full] = os.path.getmtime(full)
+        except OSError:
+            pass
+
+
 # --- write/edit wrappers: snapshot for /undo, confirm via UI, then apply -----
 
 def apply_write(session: Session, task: Task, path: str, content: str) -> str:
+    stale = _stale_check(task, path)
+    if stale:
+        return stale
     full = tools._safe_path(path)
     pre = None
     if full and os.path.isfile(full):
@@ -376,6 +428,7 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
     if result.startswith("wrote"):
         task.last_edit_snapshot = (path, pre)
         task.last_diff = preview
+        _refresh_mtime(task, path)
         result += diagnostics.summarize(path)
     return result
 
@@ -386,6 +439,9 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
         return "error: empty or invalid path"
     if not os.path.isfile(full):
         return f"error: no such file: {path}"
+    stale = _stale_check(task, path)
+    if stale:
+        return stale
     with open(full, "r", errors="replace") as f:
         pre = f.read()
     status, *rest = tools.plan_edit(pre, old_text, new_text)
@@ -403,6 +459,7 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     if result.startswith("edited"):
         task.last_edit_snapshot = (path, pre)
         task.last_diff = diff
+        _refresh_mtime(task, path)
         result += diagnostics.summarize(path)
     return result
 
@@ -425,6 +482,12 @@ def apply_worker_changes(session: Session, task: Task, changes) -> str:
     to_apply, conflicts = [], []
     for ap, group in by_path.items():
         (conflicts if len(group) > 1 else to_apply).append((ap, group))
+    # Same edit-safety guard as apply_edit/apply_write: don't let a worker clobber a
+    # file the main task read that has since changed on disk.
+    stale_paths = [ap for ap, _ in to_apply if _stale_check(task, ap)]
+    if stale_paths:
+        stale_set = set(stale_paths)
+        to_apply = [(ap, group) for ap, group in to_apply if ap not in stale_set]
 
     import difflib
 
@@ -447,6 +510,9 @@ def apply_worker_changes(session: Session, task: Task, changes) -> str:
     if conflicts:
         lines.append("conflict — not applied (multiple workers changed the same file): "
                      + ", ".join(os.path.relpath(ap) for ap, _ in conflicts))
+    if stale_paths:
+        lines.append("changed on disk since read — not applied (read_file again first): "
+                     + ", ".join(os.path.relpath(ap) for ap in stale_paths))
     if not to_apply:
         return "\n" + "\n".join(lines)
 
@@ -469,6 +535,7 @@ def apply_worker_changes(session: Session, task: Task, changes) -> str:
         if res.startswith("wrote"):
             task.last_edit_snapshot = (ap, pre)
             task.last_diff = combined_preview
+            _refresh_mtime(task, ap)
             res += diagnostics.summarize(ap)
         applied.append(res)
     lines.append(f"applied {len(to_apply)} worker change(s):")
@@ -553,7 +620,9 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
         if name == "list_files":
             return tools.do_list_files(args.get("path", "."), max_chars=read_cap)
         if name == "read_file":
-            return tools.do_read_file(args["path"], max_chars=read_cap)
+            out = tools.do_read_file(args["path"], max_chars=read_cap)
+            _record_read(task, args["path"])
+            return out
         if name == "search_files":
             return tools.do_search_files(args["query"], args.get("path", "."))
     return f"error: unknown tool {name}"

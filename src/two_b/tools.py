@@ -429,6 +429,14 @@ def _resolve_edit(content: str, old_text: str):
 
     content_lines = content.splitlines(keepends=True)
     old_lines = old_text.splitlines()
+    # A blank line at the end of old_text (a stray extra newline a small model
+    # appended, e.g. "…}\n\n") has no counterpart in the file, so the block match
+    # below would never land and the model bounces off "old_text not found" and
+    # retries the same near-miss. Drop trailing blank lines so the tolerant tiers
+    # match the real text; keep at least one line so a whitespace-only old_text is
+    # left for the caller to reject.
+    while len(old_lines) > 1 and not old_lines[-1].strip():
+        old_lines.pop()
     if not old_lines:
         return None
     offsets = _line_offsets(content_lines)

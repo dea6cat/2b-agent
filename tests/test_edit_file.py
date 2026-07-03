@@ -41,6 +41,17 @@ class EditFileMatching(unittest.TestCase):
         self.assertIn("whitespace-tolerant", result)
         self.assertEqual(out, "x = 9\ny = 2\n")
 
+    def test_trailing_blank_line_in_old_text(self):
+        # A small model commonly appends a stray extra newline to old_text ("…}\n\n").
+        # That phantom blank line has no counterpart in the file; before the fix it
+        # bounced off "old_text not found" and the model looped. It must now land.
+        content = "class C {\n  int v = 0;\n}\n"
+        old = "  int v = 0;\n}\n\n"          # note the extra trailing newline
+        new = "  int v = 1;\n}\n"
+        result, out = self._edit(content, old, new)
+        self.assertTrue(result.startswith("edited "), result)
+        self.assertEqual(out, "class C {\n  int v = 1;\n}\n")
+
     def test_crlf_file_lf_old_text(self):
         # do_edit_file reads in universal-newline text mode, so a CRLF file is
         # normalized to LF before matching — the model's LF old_text lands cleanly.

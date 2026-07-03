@@ -78,10 +78,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 > **4.5 (finish notification) is shipped.** A task finishing while the terminal is unfocused posts an OSC 9 desktop notification (written to /dev/tty, so Textual's screen is untouched); off with `TWOB_NO_NOTIFY`. Pure builder in `notify.osc9`, tested. Tests: `tests/test_notify.py`.
 
-#### 4.3 Collapsible tool-call detail  (T8) — *remaining*
-- **Spec:** Each narrated tool line gets a status glyph (⏳/✓/✗) + spinner while running; expandable to show full args/result. Keeps the clean tree by default.
-- **Files:** `app_tui.py`, `tui.py`.
-- **Effort:** M.
+> **4.3 (tool-line detail) is shipped as A + B** (chosen from a visual mockup). **A — live spinner:** the tool line mounts on start with an animated spinner + elapsed and is finalized in place to ✓/✗ (no re-append). **B — one-line detail:** the line carries a compact result summary — edits show `+N −M` (from the diff), reads `N lines`, writes `N bytes`, errors `exit N`; the full error message still gets a sub-line. An interrupted tool settles to a `·` "stopped" line. True fold/unfold collapse was deliberately **not** built — the transcript is append-only, and folding would need a render rewrite the phase doesn't warrant. Pure summary logic in `toolline`, tested. Tests: `tests/test_toolline.py`.
 
 #### 4.6 Session switcher UI  (rides T4) — *remaining*
 - **Spec:** `/sessions` opens a filterable list (title, age, model, message count) with resume/rename/delete; a two-step delete confirm.

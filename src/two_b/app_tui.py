@@ -27,7 +27,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
-from . import completion, config, difffmt, notify, orchestrator, registry, theme, tools
+from . import completion, config, difffmt, notify, orchestrator, registry, theme, toolline, tools
 from .commands import command_specs, dispatch_input
 from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
@@ -201,8 +201,8 @@ class TwoBApp(App):
         self._pal_mode = ""                       # "cmd" (slash) or "file" (@) — how to accept
         self._file_list = None                    # cached project relpaths for @-completion
         self._focused = True                      # terminal focus — used to ping on finish when away
-        self._pending_tool = None                 # (name, args) between a tool START and its RESULT
-        self._tool_widgets: list = []             # this task's tool-action widgets (for └ on the last)
+        self._running_tool = None                 # {w,name,args,phrase,start} for the live spinner line
+        self._tool_widgets: list = []             # this task's tool-action rows [w,glyph,gstyle,phrase,suffix]
         self._last_reply = ""                     # most-recent model reply, for /copy
         self._ctx_label = ""                      # "13k ctx" for the banner (filled async)
         self._ctx_budget = 0                      # token window for the live context meter (filled async)
@@ -315,7 +315,7 @@ class TwoBApp(App):
         self.query_one("#log", VerticalScroll).remove_children()
         self._stream_widget = None
         self._stream_text = ""
-        self._pending_tool = None
+        self._running_tool = None
         self._tool_widgets = []
         self._last_reply = ""
         for line in self._intro_lines():
@@ -558,41 +558,86 @@ class TwoBApp(App):
     # ---- the periodic pump: drain events, render ----
     def _tick(self) -> None:
         self._drain_events()
+        self._animate_running_tool()
         self._render_plan()
         self._render_mode()
         self._render_status()
         self._maybe_start_next()
 
-    def _tool_line(self, connector: str, glyph: str, gstyle: str, phrase: str) -> Text:
+    def _tool_line(self, connector: str, glyph: str, gstyle: str, phrase: str, suffix: str = "") -> Text:
         t = Text()
         t.append(f"  {connector} ", style=self.c("faint"))   # tree gutter
-        t.append(f"{glyph} ", style=gstyle)                  # ✓ / ✗
+        t.append(f"{glyph} ", style=gstyle)                  # spinner / ✓ / ✗
         t.append(phrase, style=self.c("accent"))             # conversational action
+        if suffix:
+            t.append(f"  {suffix}", style=self.c("dim"))      # Option B: ± counts / lines / exit / elapsed
         return t
 
-    def _render_tool_action(self, result: str) -> None:
-        name, args = self._pending_tool or ("", {})
-        self._pending_tool = None
+    def _start_tool_line(self, name: str, args: dict) -> None:
+        """Option A: mount the tool line immediately with a live spinner; it's finalized
+        to ✓/✗ + detail when the result arrives (updated in place, not re-appended)."""
         phrase = _describe_tool(name, args)
+        w = Static(self._tool_line("├", _SPIN[0], self.c("accent"), phrase))
+        log = self.query_one("#log", VerticalScroll)
+        log.mount(w)
+        self._tool_widgets.append([w, _SPIN[0], self.c("accent"), phrase, ""])
+        self._running_tool = {"w": w, "name": name, "args": args, "phrase": phrase,
+                              "start": time.monotonic()}
+        log.scroll_end(animate=False)
+
+    def _animate_running_tool(self) -> None:
+        r = self._running_tool
+        if r is None:
+            return
+        frame = _SPIN[int(time.monotonic() * 12) % len(_SPIN)]
+        elapsed = int(time.monotonic() - r["start"])
+        r["w"].update(self._tool_line("├", frame, self.c("accent"), r["phrase"],
+                                      suffix=(f"{elapsed}s" if elapsed >= 1 else "")))
+
+    def _finish_tool_line(self, result: str) -> None:
+        """Turn the running spinner line into its final ✓/✗ + one-line detail (Option B)."""
+        r, self._running_tool = self._running_tool, None
         ok = not result.strip().startswith("error")
         glyph, gstyle = ("✓", self.c("ok")) if ok else ("✗", self.c("err"))
         log = self.query_one("#log", VerticalScroll)
-        action = Static(self._tool_line("├", glyph, gstyle, phrase))
-        log.mount(action)
-        self._tool_widgets.append((action, glyph, gstyle, phrase))
-        # concise dim result sub-line — errors get more room so recovery guidance
-        # (e.g. the run_git "no shell operators" message) isn't clipped mid-word.
-        first = result.splitlines()[0] if result else ""
-        if first:
-            style = self.c("err") if not ok else self.c("faint")
-            log.mount(Static(Text(f"      {first[:400 if not ok else 160]}", style=style)))
+        if r is None:                                    # result with no start (shouldn't happen) — fall back
+            phrase, w = "done", Static(self._tool_line("├", glyph, gstyle, "done"))
+            log.mount(w)
+            self._tool_widgets.append([w, glyph, gstyle, phrase, ""])
+        else:
+            phrase, w = r["phrase"], r["w"]
+            suffix = self._tool_detail(r["name"], r["args"], result, ok)
+            w.update(self._tool_line("├", glyph, gstyle, phrase, suffix=suffix))
+            self._tool_widgets[-1] = [w, glyph, gstyle, phrase, suffix]
+        # Errors keep a full sub-line — a one-word "exit N" can't carry the recovery
+        # guidance (e.g. the run_git "no shell operators" message). Successes stay one line.
+        if not ok:
+            first = result.splitlines()[0] if result else ""
+            if first:
+                log.mount(Static(Text(f"      {first[:400]}", style=self.c("err"))))
         log.scroll_end(animate=False)
 
+    def _tool_detail(self, name: str, args: dict, result: str, ok: bool) -> str:
+        """Option B: a short suffix for the tool line. edit_file's ± comes from the
+        just-applied diff; everything else from the result (see toolline)."""
+        if ok and name == "edit_file":
+            active = self.session.active_task
+            add, rem = difffmt.diff_counts(active.last_diff) if active and active.last_diff else (0, 0)
+            return f"+{add} −{rem}" if (add or rem) else ""
+        return toolline.result_summary(name, result, ok)
+
     def _close_tool_group(self) -> None:
+        # A tool interrupted before its result (e.g. esc mid-tool with no RESULT event)
+        # would leave the spinner animating forever — settle it and stop the animation.
+        if self._running_tool is not None:
+            r, self._running_tool = self._running_tool, None
+            r["w"].update(self._tool_line("├", "·", self.c("faint"), r["phrase"], suffix="stopped"))
+            if self._tool_widgets:
+                self._tool_widgets[-1] = [r["w"], "·", self.c("faint"), r["phrase"], "stopped"]
         # Turn the last action's connector into └ so the group reads as a tree.
         if self._tool_widgets:
-            w, glyph, gstyle, phrase = self._tool_widgets[-1]
-            w.update(self._tool_line("└", glyph, gstyle, phrase))
+            w, glyph, gstyle, phrase, suffix = self._tool_widgets[-1]
+            w.update(self._tool_line("└", glyph, gstyle, phrase, suffix=suffix))
         self._tool_widgets = []
 
     def _commit_stream(self) -> None:
@@ -625,9 +670,9 @@ class TwoBApp(App):
                 self._commit_stream()
             elif t == EventType.TOOL_CALL_START:
                 self._commit_stream()
-                self._pending_tool = (ev.payload["name"], ev.payload["shown"])
+                self._start_tool_line(ev.payload["name"], ev.payload["shown"])
             elif t == EventType.TOOL_CALL_RESULT:
-                self._render_tool_action(ev.payload["result"])
+                self._finish_tool_line(ev.payload["result"])
             elif t == EventType.ASSISTANT_TEXT:
                 self._commit_stream()
                 self._close_tool_group()

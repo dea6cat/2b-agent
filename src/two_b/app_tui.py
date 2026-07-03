@@ -27,7 +27,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
-from . import config, difffmt, orchestrator, registry, theme
+from . import completion, config, difffmt, orchestrator, registry, theme, tools
 from .commands import command_specs, dispatch_input
 from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
@@ -198,6 +198,8 @@ class TwoBApp(App):
         self._default_placeholder = "Type a task, or / for commands"
         self._pal: list[tuple[str, str]] = []     # current command-palette matches
         self._pal_index = 0                       # highlighted match (↑/↓ navigation)
+        self._pal_mode = ""                       # "cmd" (slash) or "file" (@) — how to accept
+        self._file_list = None                    # cached project relpaths for @-completion
         self._pending_tool = None                 # (name, args) between a tool START and its RESULT
         self._tool_widgets: list = []             # this task's tool-action widgets (for └ on the last)
         self._last_reply = ""                     # most-recent model reply, for /copy
@@ -345,6 +347,7 @@ class TwoBApp(App):
     def _clear_palette(self) -> None:
         self._pal = []
         self._pal_index = 0
+        self._pal_mode = ""
         self.query_one("#palette", Static).update("")
 
     def _accept_palette(self, run: bool) -> None:
@@ -354,6 +357,14 @@ class TwoBApp(App):
         if sel is None:
             return
         inp = self.query_one("#input", Input)
+        if self._pal_mode == "file":               # replace the trailing '@partial' with the path
+            text = inp.value
+            idx = text.rfind("@")
+            if idx != -1:
+                inp.value = text[:idx] + sel + " "
+                inp.cursor_position = len(inp.value)
+            self._clear_palette()
+            return
         # These open a second-stage menu (model / provider), so fill rather than run.
         opens_submenu = sel in ("/model", "/connect", "/login", "/disconnect")
         if run and not opens_submenu:
@@ -373,10 +384,32 @@ class TwoBApp(App):
                 continue
         return out
 
+    def _project_files(self):
+        """Cached list of project relpaths (shortest first) for @-completion. Skips
+        the usual junk dirs; capped so a huge repo can't stall the first completion."""
+        if self._file_list is None:
+            root, out = self.session.cwd, []
+            for dp, dns, fns in os.walk(root):
+                dns[:] = [d for d in dns if not tools._should_skip_dir(d)]
+                for fn in fns:
+                    if fn.startswith("."):
+                        continue
+                    out.append(os.path.relpath(os.path.join(dp, fn), root))
+                    if len(out) >= 4000:
+                        break
+                if len(out) >= 4000:
+                    break
+            out.sort(key=len)
+            self._file_list = out
+        return self._file_list
+
     def _update_palette(self, text: str) -> None:
-        """Recompute the matches for the current input, then render."""
+        """Recompute the matches for the current input, then render. Slash completes
+        commands/models/providers; an @-token completes project file paths."""
         matches: list[tuple[str, str]] = []
+        mode = ""
         if text.startswith("/"):
+            mode = "cmd"
             body = text[1:]
             if " " not in body:                            # completing the command name
                 matches = [(f"/{n}", d) for n, d in command_specs() if n.startswith(body)]
@@ -388,7 +421,12 @@ class TwoBApp(App):
                 elif cmd in ("connect", "login", "disconnect"):   # completing a provider
                     matches = [(f"/{cmd} {p}", "connected" if config.is_connected(p) else "")
                                for p in config.PROVIDER_KEY_ENV if p.startswith(arg.lower())]
-        self._pal = matches
+        else:
+            tok = completion.at_token(text)                # typing '@path' -> file completion
+            if tok is not None:
+                mode = "file"
+                matches = [(f, "") for f in completion.rank_files(self._project_files(), tok)]
+        self._pal, self._pal_mode = matches, mode
         if self._pal_index >= len(matches):
             self._pal_index = 0
         self._render_palette()

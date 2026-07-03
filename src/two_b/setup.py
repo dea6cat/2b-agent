@@ -303,10 +303,19 @@ def clean_install(emit) -> None:
             shutil.rmtree(os.path.expanduser(d), ignore_errors=True)
 
 
-def fix_path(opts: dict, emit) -> None:
+def _path_needs_fix() -> bool:
+    """True if uv's tool-bin dir isn't on the PATH *future terminals* will see. install.sh
+    prepends the bin dir for its own run, so it passes the pre-prepend PATH via
+    `_2B_ORIG_PATH`; we check that when present, else the live PATH."""
     bindir = _bin_dir()
-    if bindir in os.environ.get("PATH", "").split(os.pathsep):
+    path = os.environ.get("_2B_ORIG_PATH") or os.environ.get("PATH", "")
+    return bindir not in path.split(os.pathsep)
+
+
+def fix_path(opts: dict, emit) -> None:
+    if not _path_needs_fix():
         return
+    bindir = _bin_dir()
     want = opts.get("fix_path")
     do = want == "yes" or (want is None and _confirm(
         "Put 2B on your PATH now (runs 'uv tool update-shell')?", True, opts))
@@ -370,9 +379,11 @@ def run(opts: dict | None = None) -> int:
             return 1
         pull(selected, emit)
 
-    # self-test + correctness grade (unless --no-benchmark)
-    if selected and not opts.get("no_benchmark"):
-        bench = [m for m in selected if m in installed_models()]
+    # self-test + correctness grade (unless --no-benchmark). When reusing existing
+    # models (nothing newly selected), grade one representative so reuse isn't ungraded.
+    bench_pool = selected if selected else existing[:1]
+    if bench_pool and not opts.get("no_benchmark"):
+        bench = [m for m in bench_pool if m in installed_models()]
         if bench:
             emit("Self-test — tok/s + a real two-change edit through 2B (up to ~2 min per model)…")
             perf, correctness = {}, {}
@@ -397,7 +408,11 @@ def run(opts: dict | None = None) -> int:
         pass
 
     fix_path(opts, emit)
-    emit("\n2B is ready. Start it with:  2b")
+    emit("\n2B is ready. Start it from any project directory:")
+    emit("    2b                                    # open the session")
+    emit('    2b "add a docstring to lib/main.dart" # run one task, then drop in')
+    emit(f"    2b --model {chosen}")
+    emit("  Inside 2B:  /models · /model <name> · shift+tab (cycle mode) · /theme · /copy · /help")
     return 0
 
 

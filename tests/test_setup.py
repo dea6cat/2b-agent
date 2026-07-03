@@ -69,6 +69,36 @@ class GradeTable(unittest.TestCase):
         self.assertEqual(best, "a")
 
 
+class PathFix(unittest.TestCase):
+    def setUp(self):
+        self._orig_bin = setup._bin_dir
+        setup._bin_dir = lambda: "/opt/uvbin"
+        self._path = os.environ.get("PATH")
+        self._orig = os.environ.get("_2B_ORIG_PATH")
+
+    def tearDown(self):
+        setup._bin_dir = self._orig_bin
+        if self._path is not None:
+            os.environ["PATH"] = self._path
+        os.environ.pop("_2B_ORIG_PATH", None)
+        if self._orig is not None:
+            os.environ["_2B_ORIG_PATH"] = self._orig
+
+    def test_bindir_absent_needs_fix(self):
+        os.environ["PATH"] = "/usr/bin"; os.environ.pop("_2B_ORIG_PATH", None)
+        self.assertTrue(setup._path_needs_fix())
+
+    def test_installer_prepend_still_detects_missing_persistent(self):
+        # live PATH has bindir (installer prepended it) but the ORIG/persistent PATH doesn't
+        os.environ["PATH"] = "/opt/uvbin:/usr/bin"
+        os.environ["_2B_ORIG_PATH"] = "/usr/bin"
+        self.assertTrue(setup._path_needs_fix())   # the I1 case
+
+    def test_persistent_has_bindir_no_fix(self):
+        os.environ["_2B_ORIG_PATH"] = "/opt/uvbin:/usr/bin"
+        self.assertFalse(setup._path_needs_fix())
+
+
 class NonInteractive(unittest.TestCase):
     def test_ask_confirm_use_defaults_under_yes(self):
         opts = {"yes": True}

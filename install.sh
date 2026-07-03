@@ -29,6 +29,9 @@ if ! have uv; then
   elif have wget; then wget -qO- https://astral.sh/uv/install.sh | sh
   else echo "Need curl or wget to install uv. Install one and re-run." >&2; exit 1; fi
 fi
+# Remember the user's real (persistent) PATH so `2b setup`'s PATH check reflects future
+# terminals, not the shims we prepend just for this run.
+_2B_ORIG_PATH="$PATH"; export _2B_ORIG_PATH
 # uv drops its shims here for this session even before shell PATH is updated.
 PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"; export PATH
 

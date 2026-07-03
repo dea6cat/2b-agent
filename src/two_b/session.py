@@ -49,6 +49,7 @@ class PendingConfirmation:
     diff: str
     approved: bool = False
     answered: threading.Event = field(default_factory=threading.Event)
+    grant_key: str | None = None   # e.g. "edit_file" — "allow for session" remembers this
 
 
 def _short_title(text: str, words: int = 8) -> str:
@@ -113,6 +114,7 @@ class Session:
     mode: str = MODE_NORMAL
     tasks: list[Task] = field(default_factory=list)
     active_task_id: str | None = None
+    granted: set = field(default_factory=set)    # tool keys "allowed for this session" (skip confirm)
     # Events emitted by any task thread, drained by the UI thread so all
     # rendering happens on one thread regardless of which task produced it.
     events: "queue.Queue" = field(default_factory=queue.Queue)
@@ -121,6 +123,13 @@ class Session:
         # --yes / auto_yes at startup is just "begin in accept-edits mode".
         if self.auto_yes and self.mode == MODE_NORMAL:
             self.mode = MODE_ACCEPT
+        # Pre-granted tools from config (`allowed_tools`) are never confirmed — the
+        # persistent form of "allow for this session". Best-effort, lazy import.
+        try:
+            from . import config
+            self.granted.update(config.get_prefs().get("allowed_tools", []) or [])
+        except Exception:
+            pass
 
     @property
     def approve_writes(self) -> bool:

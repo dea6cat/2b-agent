@@ -429,6 +429,14 @@ def _resolve_edit(content: str, old_text: str):
 
     content_lines = content.splitlines(keepends=True)
     old_lines = old_text.splitlines()
+    # A blank line at the end of old_text (a stray extra newline a small model
+    # appended, e.g. "…}\n\n") has no counterpart in the file, so the block match
+    # below would never land and the model bounces off "old_text not found" and
+    # retries the same near-miss. Drop trailing blank lines so the tolerant tiers
+    # match the real text; keep at least one line so a whitespace-only old_text is
+    # left for the caller to reject.
+    while len(old_lines) > 1 and not old_lines[-1].strip():
+        old_lines.pop()
     if not old_lines:
         return None
     offsets = _line_offsets(content_lines)
@@ -466,7 +474,17 @@ def plan_edit(content: str, old_text: str, new_text: str):
     if resolved[0] == "ambiguous":
         return ("error", f"error: old_text matches {resolved[1]} times — make it more specific so it matches exactly once")
     start, end, render, note = resolved
-    return ("ok", content[:start] + render(new_text) + content[end:], note)
+    rendered = render(new_text)
+    # Drift guard: old_text replaced whole line(s) (it ended in a newline) but new_text
+    # dropped the trailing newline, and real content follows the match — so that next
+    # line would merge onto new_text (e.g. "B\n"->"B2" turning "A\nB\nC" into "A\nB2C").
+    # A small model almost always meant to replace the line, not join the next one, so
+    # keep the boundary. Skipped when the next char is already a newline (no merge) or
+    # nothing follows (would add a spurious trailing blank).
+    if (old_text.endswith(("\n", "\r")) and rendered and not rendered.endswith(("\n", "\r"))
+            and end < len(content) and content[end] not in ("\n", "\r")):
+        rendered += "\n"
+    return ("ok", content[:start] + rendered + content[end:], note)
 
 
 def do_edit_file(path, old_text, new_text, auto_yes):

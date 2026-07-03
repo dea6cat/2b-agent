@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -15,6 +16,7 @@ def _app(mode):
     t = Task.__new__(Task)
     t.last_edit_snapshot = None
     t.last_diff = None
+    t.read_mtimes = {}
     t.cancel_flag = threading.Event()   # unset — apply proceeds normally
     return s, t
 
@@ -82,6 +84,22 @@ class ApplyWorkerChanges(unittest.TestCase):
             orchestrator.request_confirmation = original_request_confirmation
             os.unlink(f.name)
 
+
+    def test_stale_file_not_applied(self):
+        # A worker write must not clobber a file the task read that then changed on disk.
+        f = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False)
+        f.write("v = 1\n")
+        f.close()
+        try:
+            s, t = _app(MODE_ACCEPT)
+            orchestrator._record_read(t, f.name)          # 2B read it
+            os.utime(f.name, (time.time() + 5,) * 2)      # external edit bumps mtime
+            out = orchestrator.apply_worker_changes(s, t, [(f.name, "v = 1\n", "v = 2\n", 0)])
+            with open(f.name) as fh:
+                self.assertEqual(fh.read(), "v = 1\n")     # not clobbered
+            self.assertIn("changed on disk", out.lower())
+        finally:
+            os.unlink(f.name)
 
     def test_cancelled_short_circuits(self):
         f = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False)

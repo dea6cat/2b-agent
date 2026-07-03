@@ -220,11 +220,29 @@ def do_list_files(path, max_chars=None):
     return listing
 
 
+def resolve_read_path(path):
+    """The absolute path do_read_file actually reads for `path`: the given location,
+    or — when that doesn't exist — the unique project file matching its basename.
+    None when empty, missing, or ambiguous. Mirrors do_read_file's resolution (keep
+    the two in sync) so read-tracking keys on the exact file the model was shown."""
+    m = _RANGE_RE.match(str(path or ""))
+    base = m.group("base") if m else str(path or "")
+    full = _safe_path(base)
+    if full is None:
+        return None
+    if os.path.isfile(full):
+        return full
+    name = os.path.basename(base)
+    matches = _find_by_basename(name, base) if name else []
+    return _safe_path(matches[0]) if len(matches) == 1 else None
+
+
 def do_read_file(path, max_chars=None):
     """Read a file. Supports an optional line range via a 'path:START-END' suffix.
-    If the path isn't found, looks for the basename anywhere in the project. When a
-    whole-file read is too big for max_chars, suggests a section read instead of
-    clipping. max_chars=None means no size guard (whole file returned)."""
+    If the path isn't found, looks for the basename anywhere in the project (keep this
+    fallback in sync with resolve_read_path). When a whole-file read is too big for
+    max_chars, suggests a section read instead of clipping. max_chars=None means no
+    size guard (whole file returned)."""
     raw = str(path or "")
     lo = hi = None
     base = raw
@@ -602,6 +620,22 @@ def _run_cancellable(cmd, *, shell, timeout, cancel):
                 pass
 
 
+_GIT_SHELL_OPS = {"&&", "||", "|", ";", "&", ">", ">>", "<", ">&", "&>", "|&"}
+
+
+def _git_shell_syntax(parts) -> bool:
+    """True if the tokens contain a shell operator or redirection — the model tried to
+    chain/pipe/redirect (e.g. 'add x && diff y'). run_git runs git directly (no shell),
+    so these are passed to git literally and it just errors 128; catching them lets us
+    return a clear, recoverable message instead. shlex keeps a quoted operator inside a
+    single token, so a bare operator token is unambiguous — a commit message like
+    'a && b' is one token and never trips this."""
+    for p in parts:
+        if p in _GIT_SHELL_OPS or re.match(r"^\d*[<>]", p):
+            return True
+    return False
+
+
 def do_run_git(args, max_chars=None, cancel=None):
     """Run `git <args>` in the project — git only, never a shell (no chaining or
     injection). Confirmation/plan-mode gating happens in the orchestrator; this
@@ -613,6 +647,11 @@ def do_run_git(args, max_chars=None, cancel=None):
         return f"error: could not parse git args: {e}"
     if not parts:
         return "error: no git command given"
+    if _git_shell_syntax(parts):
+        return ("error: run_git runs a single git command — no shell operators "
+                "(&& || | ; > <). They aren't executed (this is git-only), so git rejects "
+                "them. Make one run_git call per command, e.g. run_git \"add -A\" then "
+                "run_git \"diff --cached\".")
     try:
         rc, out, status = _run_cancellable(["git", *parts], shell=False,
                                            timeout=GIT_TIMEOUT, cancel=cancel)

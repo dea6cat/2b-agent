@@ -590,6 +590,10 @@ def _run_git(session: Session, task: Task, git_args: str, read_cap: int | None) 
     git_args = (git_args or "").strip()
     if not git_args:
         return "error: no git command given"
+    # Reject shell operators up front (do_run_git returns the recoverable error), so a
+    # shell-chained mutating command isn't confirm-prompted only to fail on apply.
+    if tools.has_shell_syntax(git_args):
+        return tools.do_run_git(git_args, max_chars=read_cap)
     if tools.git_is_read_only(git_args):
         return tools.do_run_git(git_args, max_chars=read_cap, cancel=task.cancel_flag)
     if session.read_only:

@@ -35,6 +35,14 @@ class GitShellSyntax(unittest.TestCase):
         self.assertIn("no shell operators", out)
         self.assertIn("run_git", out)
 
+    def test_has_shell_syntax_gates_confirmation(self):
+        # Used by the orchestrator to reject shell-chained git BEFORE prompting.
+        self.assertTrue(tools.has_shell_syntax("add -A && commit -m x"))
+        self.assertTrue(tools.has_shell_syntax("diff HEAD 2>/dev/null | head"))
+        self.assertFalse(tools.has_shell_syntax("commit -m 'a && b'"))   # quoted -> fine
+        self.assertFalse(tools.has_shell_syntax("status"))
+        self.assertFalse(tools.has_shell_syntax(""))
+
 
 if __name__ == "__main__":
     unittest.main()

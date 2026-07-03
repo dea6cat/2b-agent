@@ -541,11 +541,12 @@ class TwoBApp(App):
         action = Static(self._tool_line("├", glyph, gstyle, phrase))
         log.mount(action)
         self._tool_widgets.append((action, glyph, gstyle, phrase))
-        # concise dim result sub-line
+        # concise dim result sub-line — errors get more room so recovery guidance
+        # (e.g. the run_git "no shell operators" message) isn't clipped mid-word.
         first = result.splitlines()[0] if result else ""
         if first:
             style = self.c("err") if not ok else self.c("faint")
-            log.mount(Static(Text(f"      {first[:160]}", style=style)))
+            log.mount(Static(Text(f"      {first[:400 if not ok else 160]}", style=style)))
         log.scroll_end(animate=False)
 
     def _close_tool_group(self) -> None:

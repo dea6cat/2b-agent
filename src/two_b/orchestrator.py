@@ -282,6 +282,16 @@ def context_budget(provider, model: str) -> int:
     return CONTEXT_BUDGETS.get(name, 8000)
 
 
+def context_usage(used: int, budget: int) -> tuple[int, bool]:
+    """Percent of the context window used, and whether it's in the warning zone (>=80%).
+    Small local windows fill fast, so surfacing this is the point — see the TUI meter.
+    Returns (0, False) when the budget is unknown."""
+    if budget <= 0:
+        return 0, False
+    pct = min(100, round(used * 100 / budget))
+    return pct, pct >= 80
+
+
 def estimate_tokens(conv: Conversation) -> int:
     """Rough token estimate for a conversation (~4 chars/token). Cheap and
     provider-agnostic — good enough to decide when to compact."""

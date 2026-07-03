@@ -46,6 +46,10 @@ class App:
     def request_foreground(self, task_id: str) -> None:
         self._fg_target = task_id
 
+    def on_model_changed(self) -> None:
+        """Hook for /model and /default; the line-mode REPL has no context meter to refresh."""
+        pass
+
     def enqueue_task(self, description: str) -> Task:
         task = self.session.add_task(description)
         if self._resume_conv is not None:        # first task adopts the resumed thread + its id

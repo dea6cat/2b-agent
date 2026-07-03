@@ -70,10 +70,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 2B's TUI is Textual (Python) with streaming, a plan checklist, narrated tool actions, themes, and a status line. Crush's TUI is Bubble Tea v2. Port the *ideas*, not the code.
 
-#### 4.1 Context-window meter + ≥80% warning  (T6) — **highest TUI ROI**
-- **Spec:** Show live `context: 63% (5.0k/8k)` in the status line/sidebar, turning amber ≥80%. 2B already estimates tokens for auto-compaction (`CONTEXT_BUDGETS`, `context_budget`) — surface it. Critical because small local windows are 2B's core constraint.
-- **Files:** `app_tui.py` (status render), `tui.py` (`render_session`), reuse `orchestrator.context_budget` + the running token estimate.
-- **Effort:** S.
+> **4.1 (context-window meter) is shipped** — the TUI status bar shows live `ctx N%` of the model's window, amber at ≥80%. `orchestrator.context_usage` (pure, tested); budget resolved off the render path (`_load_ctx_label`, refreshed on `/model`·`/default` via `on_model_changed`); the per-render estimate is memoized so it recomputes only when a message is added. Tests: `tests/test_context_meter.py`.
 
 #### 4.2 Richer diff review  (T7)
 - **Spec:** In the edit confirmation, render a syntax-highlighted unified diff (Textual supports Rich `Syntax`/panels); optional split view on wide terminals; truncate with "N more lines" + expand.

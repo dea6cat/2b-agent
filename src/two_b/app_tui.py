@@ -208,6 +208,8 @@ class TwoBApp(App):
         self._tool_widgets: list = []             # this task's tool-action widgets (for └ on the last)
         self._last_reply = ""                     # most-recent model reply, for /copy
         self._ctx_label = ""                      # "13k ctx" for the banner (filled async)
+        self._ctx_budget = 0                      # token window for the live context meter (filled async)
+        self._ctx_cache = (None, ("", ))          # ((conv id, msg count) -> rendered meter segment)
 
     # ---- theming ----
     def get_css_variables(self) -> dict[str, str]:
@@ -262,9 +264,13 @@ class TwoBApp(App):
             if not resolved:
                 return
             provider, model = resolved
-            if getattr(provider, "name", "") != "ollama" or getattr(provider, "api_key", None) is not None:
-                return   # only meaningful for local models 2B pins num_ctx on
-            win = provider.context_window(model)
+            # Budget for the live context meter — works for local (pinned num_ctx) and
+            # cloud (per-provider budget). Resolved once here, off the render path.
+            self._ctx_budget = orchestrator.context_budget(provider, model)
+            is_local = getattr(provider, "name", "") == "ollama" and getattr(provider, "api_key", None) is None
+            if not is_local:
+                return   # banner "Nk ctx" label is only meaningful for the num_ctx 2B pins locally
+            win = self._ctx_budget
         except Exception:
             return
         if win:
@@ -675,7 +681,29 @@ class TwoBApp(App):
         others = [t for t in self.session.tasks if t.id != self.session.active_task_id
                   and t.state in (TaskState.QUEUED, TaskState.BACKGROUNDED)]
         extra = f"  ·  {len(others)} queued/bg" if others else ""
-        st.update(f"{left}    │    {model}{extra}    ·  esc stop · ctrl+b bg · ctrl+d quit")
+        st.update(f"{left}    │    {model}{extra}{self._ctx_meter(task)}    ·  esc stop · ctrl+b bg · ctrl+d quit")
+
+    def _ctx_meter(self, task) -> str:
+        """Live context-window fill (small local windows fill fast — this is the point).
+        Amber past 80%. Empty when there's no conversation or the budget isn't known yet.
+        estimate_tokens is O(conversation) and this renders ~12x/s, so the result is
+        memoized and only recomputed when a message is added (keyed on conv id + count)."""
+        if task is None or task.conversation is None or self._ctx_budget <= 0:
+            return ""
+        conv = task.conversation
+        key = (id(conv), len(conv.messages), self._ctx_budget)
+        if self._ctx_cache[0] != key:
+            pct, warn = orchestrator.context_usage(orchestrator.estimate_tokens(conv), self._ctx_budget)
+            seg = f"  ·  [yellow]ctx {pct}%[/yellow]" if warn else f"  ·  ctx {pct}%"
+            self._ctx_cache = (key, (seg,))
+        return self._ctx_cache[1][0]
+
+    def on_model_changed(self) -> None:
+        """Called by /model and /default after a switch: recompute the context budget
+        (and banner label) for the new model, off the render path, and drop the meter
+        cache so it re-measures against the new window."""
+        self._ctx_cache = (None, ("",))
+        threading.Thread(target=self._load_ctx_label, daemon=True).start()
 
     # ---- header / intro ----
     def _banner_header(self) -> Text:

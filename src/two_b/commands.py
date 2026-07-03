@@ -92,7 +92,16 @@ def _model(rest, app):
     active = app.session.active_task
     if active is not None:
         active.model_override = f"{provider.name}:{model}"
+    _model_changed(app)
     app.ui.print(f"Model set to [bold]{provider.name}:{model}[/bold] (context preserved).")
+
+
+def _model_changed(app) -> None:
+    """Let the UI refresh anything model-specific (e.g. the context-window meter/label)
+    after a model switch. No-op on apps that don't implement the hook."""
+    hook = getattr(app, "on_model_changed", None)
+    if callable(hook):
+        hook()
 
 
 def _model_label(app, qualified: str) -> str:
@@ -135,6 +144,7 @@ def _default(rest, app):
         active.model_override = qualified
     # …and remember it as the startup default for future sessions.
     config.set_pref("default_model", qualified)
+    _model_changed(app)
     kind = "local" if registry.is_local(provider) else "cloud"
     app.ui.print(f"Default set to [bold]{qualified}[/bold] ({kind}), context preserved.")
 

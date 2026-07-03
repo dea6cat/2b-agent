@@ -387,18 +387,23 @@ def _mode(rest, app):
 
 @command("sessions")
 def _sessions(rest, app):
-    """List saved sessions for this project (resume from a shell with: 2b --resume <id>)."""
-    import datetime
-
+    """List saved sessions for this project — id, age, model, size (resume from a shell)."""
     from . import persist
     rows = persist.list_sessions(cwd=app.session.cwd)
     if not rows:
-        app.ui.print("No saved sessions for this directory.")
+        app.ui.print("No saved sessions for this directory yet.")
         return
+    app.ui.print("[bold]Saved sessions here[/bold] (newest first):")
     for r in rows:
-        when = (datetime.datetime.fromtimestamp(r["updated_at"]).strftime("%m-%d %H:%M")
-                if r.get("updated_at") else "")
-        app.ui.print(f"{r['id']}  {when}  {r['title'] or '(untitled)'}")
+        age = persist.relative_age(r["updated_at"]) if r.get("updated_at") else ""
+        model = (r.get("model") or "").split(":")[-1]     # short model name
+        size = f"{r['messages']} msgs" if r.get("messages") else ""
+        meta = "  ·  ".join(x for x in (age, model, size) if x)
+        app.ui.print(f"  [cyan]{r['id']}[/cyan]  {r['title'] or '(untitled)'}")
+        if meta:
+            app.ui.print(f"          [dim]{meta}[/dim]")
+    app.ui.print("[dim]Resume from a shell: [/dim][cyan]2b --resume <id>[/cyan]"
+                 "[dim]  ·  latest here: [/dim][cyan]2b --continue[/cyan]")
 
 
 def _revert_edit(path, pre, app) -> bool:

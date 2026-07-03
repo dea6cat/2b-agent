@@ -287,16 +287,19 @@ def main() -> None:
     console = Console()
 
     if args.list_sessions:
-        import datetime
         from . import persist
         rows = persist.list_sessions(cwd=os.getcwd())
         if not rows:
             console.print("[dim]No saved sessions for this directory.[/dim]")
         for r in rows:
-            when = (datetime.datetime.fromtimestamp(r["updated_at"]).strftime("%Y-%m-%d %H:%M")
-                    if r.get("updated_at") else "")
-            console.print(f"[cyan]{r['id']}[/cyan]  {when}  {r['title'] or '(untitled)'}  "
-                          f"[dim]{r['model'] or ''}[/dim]")
+            age = persist.relative_age(r["updated_at"]) if r.get("updated_at") else ""
+            model = (r.get("model") or "").split(":")[-1]
+            size = f"{r['messages']} msgs" if r.get("messages") else ""
+            meta = "  ·  ".join(x for x in (age, model, size) if x)
+            console.print(f"[cyan]{r['id']}[/cyan]  {r['title'] or '(untitled)'}"
+                          + (f"   [dim]{meta}[/dim]" if meta else ""))
+        if rows:
+            console.print("[dim]Resume: [/dim][cyan]2b --resume <id>[/cyan][dim]  ·  latest: [/dim][cyan]2b --continue[/cyan]")
         raise SystemExit(0)
 
     if args.doctor:

@@ -80,10 +80,9 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 > **4.3 (tool-line detail) is shipped as A + B** (chosen from a visual mockup). **A — live spinner:** the tool line mounts on start with an animated spinner + elapsed and is finalized in place to ✓/✗ (no re-append). **B — one-line detail:** the line carries a compact result summary — edits show `+N −M` (from the diff), reads `N lines`, writes `N bytes`, errors `exit N`; the full error message still gets a sub-line. An interrupted tool settles to a `·` "stopped" line. True fold/unfold collapse was deliberately **not** built — the transcript is append-only, and folding would need a render rewrite the phase doesn't warrant. Pure summary logic in `toolline`, tested. Tests: `tests/test_toolline.py`.
 
-#### 4.6 Session switcher UI  (rides T4) — *remaining*
-- **Spec:** `/sessions` opens a filterable list (title, age, model, message count) with resume/rename/delete; a two-step delete confirm.
-- **Files:** `app_tui.py` (modal), `persist.py`.
-- **Effort:** M.
+> **4.6 (session switcher) is shipped — inline, not a modal** (per the no-popup preference). `/sessions` (and `2b --list-sessions`) list saved sessions newest-first with id · relative age · model · message count, plus a resume hint (`2b --resume <id>` / `2b --continue`). `persist.list_sessions` now returns the message count and `persist.relative_age` formats the age (tested). In-TUI live resume isn't offered — 2B's per-task-conversation model makes resume a launch-time action (`--continue`/`--resume`), which is what the hint points to.
+
+**Phase 4 is shipped in full** (4.1–4.6). The TUI now has: a live context-window meter, inline line-numbered diff confirmation, live tool spinners + one-line detail, @-file completion, unfocused finish notifications, and an enriched session list.
 
 ### Phase 5 — Control refinements (optional / power-user)
 
@@ -112,7 +111,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 2. ~~Phase 2 (stale-file detection)~~ — **shipped.**
 3. **Phase 4.1** — one-afternoon TUI win (context meter) that serves the local-window thesis.
 4. ~~Phase 3 (persistence + resume/list + multi-level undo)~~ — **shipped**; stdlib-only.
-5. **Phase 4.2–4.6** — TUI polish, incrementally.
+5. ~~Phase 4 (context meter, inline diff, tool spinners+detail, @-completion, notifications, session list)~~ — **shipped.**
 6. **Phase 5 / 6** — optional, as needed.
 
 Each phase item is independently shippable on its own branch and testable without a live model (the reliability + safety + persistence items are all unit-testable host-side).

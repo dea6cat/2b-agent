@@ -79,3 +79,23 @@ class Conversation:
 
     def append(self, message: Message) -> None:
         self.messages.append(message)
+
+
+def trimmed(conv: "Conversation", keep_recent: int = 6, max_chars: int = 2000) -> "Conversation":
+    """A non-destructive copy of `conv` with OLD, LARGE tool-result bodies replaced by a
+    stub — cuts request tokens without touching stored history. The last `keep_recent`
+    messages are never trimmed."""
+    msgs = conv.messages
+    cut = max(0, len(msgs) - keep_recent)
+    out = []
+    for i, m in enumerate(msgs):
+        if i < cut and m.tool_results:
+            out.append(Message(role=m.role, tool_results=[
+                ToolResult(tool_call_id=r.tool_call_id,
+                           content=(f"[elided: earlier {len(r.content)}-char result]"
+                                    if len(r.content) > max_chars else r.content),
+                           is_error=r.is_error)
+                for r in m.tool_results]))
+        else:
+            out.append(m)
+    return Conversation(system_prompt=conv.system_prompt, messages=out)

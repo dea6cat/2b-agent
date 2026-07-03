@@ -23,7 +23,7 @@ from .tui import render_session
 
 
 class App:
-    def __init__(self, model: str, auto_yes: bool):
+    def __init__(self, model: str, auto_yes: bool, resume_conv=None, resume_id=None):
         # Pin the Console to the real stdout at startup so a worker thread's
         # redirect_stdout (used to capture verbatim-tool print output) can never
         # divert the UI's terminal writes.
@@ -36,6 +36,8 @@ class App:
         self._quit = False
         self._background_requested = False
         self._fg_target: str | None = None
+        self._resume_conv = resume_conv   # attached to the first task created (--continue/--resume)
+        self._resume_id = resume_id       # …which also adopts this id so its save updates that row
 
     # --- callbacks used by commands.py (duck-typed App interface) ---
     def request_quit(self) -> None:
@@ -45,7 +47,14 @@ class App:
         self._fg_target = task_id
 
     def enqueue_task(self, description: str) -> Task:
-        return self.session.add_task(description)
+        task = self.session.add_task(description)
+        if self._resume_conv is not None:        # first task adopts the resumed thread + its id
+            task.conversation = self._resume_conv
+            if self._resume_id:
+                task.id = self._resume_id
+            self._resume_conv = None
+            self._resume_id = None
+        return task
 
     # --- key handling ---
     def _on_key(self, ch: str) -> None:
@@ -259,6 +268,11 @@ def main() -> None:
                         help="Upgrade 2B to the latest release (uv tool upgrade) and exit")
     parser.add_argument("--setup", action="store_true",
                         help="Run first-time setup (Ollama, model download, PATH) and exit")
+    parser.add_argument("--continue", dest="cont", action="store_true",
+                        help="Resume the most recent session in this directory")
+    parser.add_argument("--resume", metavar="ID", help="Resume a saved session by id (see --list-sessions)")
+    parser.add_argument("--list-sessions", action="store_true",
+                        help="List saved sessions for this directory and exit")
     parser.add_argument("task", nargs="?", help="An initial task to run before dropping into the session")
     args = parser.parse_args()
 
@@ -267,6 +281,19 @@ def main() -> None:
     config.load_into_env()
 
     console = Console()
+
+    if args.list_sessions:
+        import datetime
+        from . import persist
+        rows = persist.list_sessions(cwd=os.getcwd())
+        if not rows:
+            console.print("[dim]No saved sessions for this directory.[/dim]")
+        for r in rows:
+            when = (datetime.datetime.fromtimestamp(r["updated_at"]).strftime("%Y-%m-%d %H:%M")
+                    if r.get("updated_at") else "")
+            console.print(f"[cyan]{r['id']}[/cyan]  {when}  {r['title'] or '(untitled)'}  "
+                          f"[dim]{r['model'] or ''}[/dim]")
+        raise SystemExit(0)
 
     if args.doctor:
         from . import doctor
@@ -351,14 +378,32 @@ def main() -> None:
     from . import mcp_client
     mcp_client.manager.start()
 
+    # Resume a saved conversation (--continue = most recent here; --resume ID = specific).
+    # The loaded thread is attached to the first task created, so the next message
+    # continues it.
+    resume_conv = None
+    resume_id = None
+    if args.cont or args.resume:
+        from . import persist
+        sid = args.resume or persist.most_recent_id(os.getcwd())
+        resume_conv = persist.load(sid, cwd=os.getcwd()) if sid else None
+        if resume_conv is None:
+            console.print("[yellow]Nothing to resume in this directory.[/yellow]" if args.cont
+                          else f"[yellow]No saved session '{args.resume}' in this directory.[/yellow]")
+        else:
+            resume_id = sid   # first task adopts this id so its save updates the same row
+            console.print(f"[dim]Resuming {sid} — {len(resume_conv.messages)} messages. "
+                          "Your next message continues it.[/dim]")
+
     # Full-screen Textual TUI by default on an interactive terminal; the proven
     # line-mode REPL for --classic and for scripted/piped (non-TTY) use.
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
     if interactive and not args.classic:
         from .app_tui import run_tui
-        run_tui(model, args.yes, args.task, args.theme)
+        run_tui(model, args.yes, args.task, args.theme, resume_conv=resume_conv, resume_id=resume_id)
     else:
-        App(model=model, auto_yes=args.yes).run(initial_task=args.task)
+        App(model=model, auto_yes=args.yes, resume_conv=resume_conv,
+            resume_id=resume_id).run(initial_task=args.task)
 
 
 if __name__ == "__main__":

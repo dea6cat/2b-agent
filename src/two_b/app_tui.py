@@ -187,7 +187,7 @@ class TwoBApp(App):
     ]
 
     def __init__(self, model: str, auto_yes: bool, initial_task: str | None,
-                 theme_name: str = theme.DEFAULT_THEME):
+                 theme_name: str = theme.DEFAULT_THEME, resume_conv=None, resume_id=None):
         self.theme_name = theme_name if theme_name in theme.THEMES else theme.DEFAULT_THEME
         super().__init__()
         self.session = Session(default_model=model, auto_yes=auto_yes, cwd=os.getcwd())
@@ -195,6 +195,8 @@ class TwoBApp(App):
         self._quit = False
         self._fg_target: str | None = None
         self._initial_task = initial_task
+        self._resume_conv = resume_conv          # attached to the first task created (--continue/--resume)
+        self._resume_id = resume_id              # …which also adopts this id so its save updates that row
         # NOTE: do NOT override self.console — Textual owns it for rendering.
         self.ui = _LogConsole(self)               # provider-neutral output for commands.py
         self._stream_text = ""
@@ -278,7 +280,14 @@ class TwoBApp(App):
         self._fg_target = task_id  # honored in _maybe_start_next on the next tick
 
     def enqueue_task(self, description: str):
-        return self.session.add_task(description)
+        task = self.session.add_task(description)
+        if self._resume_conv is not None:        # first task adopts the resumed thread + its id
+            task.conversation = self._resume_conv
+            if self._resume_id:
+                task.id = self._resume_id
+            self._resume_conv = None
+            self._resume_id = None
+        return task
 
     def begin_connect(self, provider: str) -> None:
         """Collect a provider key in a masked modal, then save + re-detect."""
@@ -440,7 +449,7 @@ class TwoBApp(App):
             self.enqueue_task(description)             # queue; will run when current finishes
             self.log_write(Text(f"  queued: {description[:60]}", style="dim"))
             return
-        task = self.session.add_task(description)
+        task = self.enqueue_task(description)
         self._run(task)
 
     def _run(self, task) -> None:
@@ -693,5 +702,6 @@ class TwoBApp(App):
 
 
 def run_tui(model: str, auto_yes: bool, initial_task: str | None,
-            theme_name: str = theme.DEFAULT_THEME) -> None:
-    TwoBApp(model, auto_yes, initial_task, theme_name).run()
+            theme_name: str = theme.DEFAULT_THEME, resume_conv=None, resume_id=None) -> None:
+    TwoBApp(model, auto_yes, initial_task, theme_name,
+            resume_conv=resume_conv, resume_id=resume_id).run()

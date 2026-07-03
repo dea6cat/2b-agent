@@ -81,6 +81,38 @@ class Conversation:
         self.messages.append(message)
 
 
+def to_jsonable(conv: "Conversation") -> dict:
+    """A plain-dict form of a Conversation for session persistence (see persist.py).
+    Round-trips through from_jsonable. The message model is flat, so this is lossless."""
+    def msg(m: Message) -> dict:
+        return {
+            "role": m.role.value,
+            "text": m.text,
+            "thinking": m.thinking,
+            "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in m.tool_calls],
+            "tool_results": [{"tool_call_id": r.tool_call_id, "content": r.content, "is_error": r.is_error}
+                             for r in m.tool_results],
+        }
+    return {"system_prompt": conv.system_prompt, "messages": [msg(m) for m in conv.messages]}
+
+
+def from_jsonable(d: dict) -> "Conversation":
+    """Rebuild a Conversation saved by to_jsonable. Tolerant of missing keys."""
+    def msg(x: dict) -> Message:
+        return Message(
+            role=Role(x.get("role", "user")),
+            text=x.get("text"),
+            thinking=x.get("thinking"),
+            tool_calls=[ToolCall(id=c["id"], name=c["name"], arguments=c.get("arguments") or {})
+                        for c in (x.get("tool_calls") or [])],
+            tool_results=[ToolResult(tool_call_id=r["tool_call_id"], content=r["content"],
+                                     is_error=r.get("is_error", False))
+                          for r in (x.get("tool_results") or [])],
+        )
+    return Conversation(system_prompt=d.get("system_prompt", ""),
+                        messages=[msg(x) for x in (d.get("messages") or [])])
+
+
 def trimmed(conv: "Conversation", keep_recent: int = 6, max_chars: int = 2000) -> "Conversation":
     """A non-destructive copy of `conv` with OLD, LARGE tool-result bodies replaced by a
     stub — cuts request tokens without touching stored history. The last `keep_recent`

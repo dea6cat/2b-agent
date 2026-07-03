@@ -375,6 +375,22 @@ def _mode(rest, app):
     app.ui.print(f"Mode: [bold]{MODE_LABELS[s.mode]}[/bold]")
 
 
+@command("sessions")
+def _sessions(rest, app):
+    """List saved sessions for this project (resume from a shell with: 2b --resume <id>)."""
+    import datetime
+
+    from . import persist
+    rows = persist.list_sessions(cwd=app.session.cwd)
+    if not rows:
+        app.ui.print("No saved sessions for this directory.")
+        return
+    for r in rows:
+        when = (datetime.datetime.fromtimestamp(r["updated_at"]).strftime("%m-%d %H:%M")
+                if r.get("updated_at") else "")
+        app.ui.print(f"{r['id']}  {when}  {r['title'] or '(untitled)'}")
+
+
 @command("undo")
 def _undo(rest, app):
     """Revert the last file write/edit (single level)."""

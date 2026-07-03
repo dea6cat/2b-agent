@@ -892,3 +892,13 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     finally:
         if task.status_line:
             task.status_line = ""
+        # Persist the conversation so this thread can be listed / resumed later.
+        # Best-effort and off the model's path (see persist.py); keyed by task id +
+        # cwd. Skips trivial conversations. Uses the label model, not the resolved one
+        # (which may be unbound if resolution failed early).
+        try:
+            from . import persist
+            persist.save(task.id, session.cwd, task.title,
+                         task.model_override or session.default_model, task.conversation)
+        except Exception:
+            pass

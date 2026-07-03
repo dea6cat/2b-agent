@@ -60,24 +60,12 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 ### Phase 3 — Session persistence (local-first, stdlib `sqlite3`)
 
-2B's biggest missing capability vs Crush: sessions/tasks are **in-memory only** — nothing survives a restart. Python ships `sqlite3`, so this adds **zero dependencies**.
+> **3.1 (persistence) + 3.2 (resume/list) are shipped** — specs removed. `persist.py` saves each task's conversation to `~/.config/2b/history.db` (stdlib sqlite3, zero deps; `TWOB_NO_HISTORY` to disable) at task end, keyed by `(task id, cwd)`. `conversation.to_jsonable/from_jsonable` round-trip the thread. `2b --continue` / `--resume <id>` / `--list-sessions` and `/sessions`; the resumed thread (and its id) attaches to the first task so the next message continues it and updates the same row. Tests: `tests/test_persist.py`.
 
-#### 3.1 Persistence layer  (T4)
-- **Spec:** A `persist.py` storing, per project, sessions and their messages so a session can be listed and resumed. Store DB at `~/.config/2b/history/<project-hash>.db` (or `<project>/.2b/history.db`). Tables: `sessions(id, title, created_at, updated_at, model, cwd)`, `messages(id, session_id, role, parts_json, created_at)`. Persist the canonical `Conversation` (roles + text + tool calls/results as JSON parts — mirror Crush's single `parts` JSON column). Write incrementally as turns complete (debounce not needed at 2B's scale — flush per turn).
-- **Files:** new `src/two_b/persist.py`; hook into `orchestrator.run_task` (append messages as `conv` grows) and `session.py` (Session gets a persistent id + db handle).
-- **Approach:** stdlib `sqlite3`, WAL mode, a tiny DAO (no ORM). Serialize `Message` via a `to_dict`/`from_dict` on `conversation.py`. Keep it lazy — persistence is opt-out-able (`TWOB_NO_HISTORY`).
-- **Tests:** round-trip a Conversation through save/load; list/resume.
-- **Effort:** M.
-
-#### 3.2 Resume / list UX  (T4)
-- **Spec:** `2b --continue` (resume most recent session in this project), `2b --resume <id>`, and `/sessions` (list + pick) in the TUI. On resume, rebuild the `Conversation` from stored parts; if the session was auto-compacted, replay from the summary checkpoint (store `summary_message_id` like Crush).
-- **Files:** `cli.py` (flags), `commands.py` (`/sessions`), `app_tui.py` (session picker — see T… TUI phase), `persist.py` (queries).
-- **Effort:** M (UI piece rides Phase 4).
-
-#### 3.3 Edit history → multi-level `/undo`  (T5)
-- **Spec:** On each successful edit/write, snapshot pre-content into a `file_versions(session_id, path, version, content, created_at)` table (Crush stores full content, not diffs — simple + robust). `/undo` reverts the last N edits; `/undo <path>` reverts a specific file. Also snapshot when the on-disk content differs from the last recorded version (captures external edits — ties to 2.1).
+#### 3.3 Edit history → multi-level `/undo`  (T5) — *remaining*
+- **Spec:** On each successful edit/write, snapshot pre-content into a `file_versions(session_id, path, version, content, created_at)` table (full content, not diffs — simple + robust). `/undo` reverts the last N edits; `/undo <path>` reverts a specific file. Also snapshot when the on-disk content differs from the last recorded version (captures external edits — ties to Phase 2). Today 2B has only single-level in-memory `/undo` (`last_edit_snapshot`).
 - **Files:** `persist.py`, `orchestrator.apply_edit/apply_write` (snapshot hook), `commands.py` (`/undo`).
-- **Effort:** M (rides 3.1).
+- **Effort:** M (rides the shipped persistence layer). Separable from the session-persistence core above — kept as its own item.
 
 ### Phase 4 — TUI enhancements (the "improve 2B's TUI" ask)
 
@@ -139,7 +127,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 1. ~~Phase 1 (loop detection + recoverable edit errors)~~ — **shipped.**
 2. ~~Phase 2 (stale-file detection)~~ — **shipped.**
 3. **Phase 4.1** — one-afternoon TUI win (context meter) that serves the local-window thesis.
-4. **Phase 3 (3.1 → 3.2 → 3.3)** — the big capability (persistence/resume/undo); stdlib-only.
+4. ~~Phase 3 (3.1 persistence + 3.2 resume/list)~~ — **shipped**; stdlib-only. 3.3 (multi-level undo history) remains.
 5. **Phase 4.2–4.6** — TUI polish, incrementally.
 6. **Phase 5 / 6** — optional, as needed.
 

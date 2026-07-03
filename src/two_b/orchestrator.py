@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import threading
 import time
 from contextlib import redirect_stdout
@@ -163,6 +164,36 @@ _LOOP_NUDGE = (
     "matching, read_file the file again and copy the exact text (including indentation) "
     "from what you see; otherwise try a genuinely different approach."
 )
+
+# A small model sometimes narrates a tool call it never makes ("I'll use edit_file to
+# …") and ends its turn — the task "completes" with nothing done. We detect a final
+# answer that names a frozen tool in first-person future-intent phrasing but carried no
+# tool call, and nudge the model to actually make the call. Requiring a LITERAL tool
+# name keeps this from firing on ordinary prose ("I'll add a note").
+_TOOL_NAMES = ("edit_file", "write_file", "read_file", "search_files", "list_files",
+               "run_git", "run_command")
+_INTENT_RE = re.compile(r"\b(i['’]?ll|i will|i['’]?m going to|i['’]?m about to|let me|"
+                        r"going to|i need to|i can (?:now )?)\b", re.IGNORECASE)
+
+_PROMISE_NUDGE = (
+    "You described a tool call but didn't actually make one. Don't just describe the "
+    "change — make the tool call now to perform it (e.g. call edit_file with the exact "
+    "old_text/new_text). If the work is genuinely already done, say so plainly without "
+    "naming a tool."
+)
+
+
+def _promised_tool_but_didnt(text: str) -> bool:
+    """True if a final answer (no tool calls this turn) names a frozen tool in
+    first-person, future-intent phrasing — i.e. the model said it would act but didn't.
+    Past tense ('I edited …', 'used edit_file') doesn't match, so a genuine done-report
+    isn't flagged."""
+    if not text:
+        return False
+    low = text.lower()
+    if not any(t in low for t in _TOOL_NAMES):
+        return False
+    return bool(_INTENT_RE.search(text))
 
 
 def teardown_helpers() -> None:
@@ -700,6 +731,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
 
     first_turn = not any(m.role.value == "assistant" for m in conv.messages)
     loop_guard = _LoopGuard()
+    promise_nudges = 0   # times we've nudged a "said it'd call a tool but didn't" turn
     try:
         for _ in range(MAX_TURNS):
             if task.cancel_flag.is_set():
@@ -765,6 +797,14 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             first_turn = False
 
             if not msg.tool_calls:
+                # Caught the model narrating a tool call it never made — give it another
+                # turn to actually do it (bounded, so a model that just keeps talking
+                # still finalizes rather than looping).
+                if promise_nudges < 2 and _promised_tool_but_didnt(content):
+                    promise_nudges += 1
+                    conv.append(msg)
+                    conv.append(Message.user(_PROMISE_NUDGE))
+                    continue
                 planparse.finalize_steps(task.plan_steps)
                 task.status_line = ""
                 task.state = TaskState.DONE

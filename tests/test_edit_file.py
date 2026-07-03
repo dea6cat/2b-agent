@@ -52,6 +52,13 @@ class EditFileMatching(unittest.TestCase):
         self.assertTrue(result.startswith("edited "), result)
         self.assertEqual(out, "class C {\n  int v = 1;\n}\n")
 
+    def test_line_boundary_preserved_when_new_text_drops_newline(self):
+        # old_text replaces a whole line (ends in \n) but new_text omits the trailing
+        # newline. Without the guard the following line merges up ("b=2\nc=3" -> "b=9c=3").
+        result, out = self._edit("a = 1\nb = 2\nc = 3\n", "b = 2\n", "b = 9")
+        self.assertTrue(result.startswith("edited "), result)
+        self.assertEqual(out, "a = 1\nb = 9\nc = 3\n")
+
     def test_crlf_file_lf_old_text(self):
         # do_edit_file reads in universal-newline text mode, so a CRLF file is
         # normalized to LF before matching — the model's LF old_text lands cleanly.

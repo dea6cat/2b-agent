@@ -474,7 +474,17 @@ def plan_edit(content: str, old_text: str, new_text: str):
     if resolved[0] == "ambiguous":
         return ("error", f"error: old_text matches {resolved[1]} times — make it more specific so it matches exactly once")
     start, end, render, note = resolved
-    return ("ok", content[:start] + render(new_text) + content[end:], note)
+    rendered = render(new_text)
+    # Drift guard: old_text replaced whole line(s) (it ended in a newline) but new_text
+    # dropped the trailing newline, and real content follows the match — so that next
+    # line would merge onto new_text (e.g. "B\n"->"B2" turning "A\nB\nC" into "A\nB2C").
+    # A small model almost always meant to replace the line, not join the next one, so
+    # keep the boundary. Skipped when the next char is already a newline (no merge) or
+    # nothing follows (would add a spurious trailing blank).
+    if (old_text.endswith(("\n", "\r")) and rendered and not rendered.endswith(("\n", "\r"))
+            and end < len(content) and content[end] not in ("\n", "\r")):
+        rendered += "\n"
+    return ("ok", content[:start] + rendered + content[end:], note)
 
 
 def do_edit_file(path, old_text, new_text, auto_yes):

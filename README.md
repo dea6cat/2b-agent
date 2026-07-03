@@ -144,14 +144,18 @@ models, offers to just use them (pulling nothing), and marks anything in the men
 got. Your existing setup is left untouched.
 
 Prefer to do it by hand? Install the published package from
-[PyPI](https://pypi.org/project/2b-agent/):
+[PyPI](https://pypi.org/project/2b-agent/), then run the same onboarding the installer uses:
 
 ```bash
-pip install 2b-agent                              # latest release from PyPI
-ollama pull qwen3.5:9b        # my default — a good balance on an 18 GB machine
+pip install 2b-agent      # or: uv tool install 2b-agent
+2b setup                  # grades your machine, installs Ollama, pulls a model, self-tests, fixes PATH
 ```
 
-The installer is scriptable too: `--yes` (accept defaults, no prompts), `--clean` / `--no-clean`,
+`2b setup` is the single source of truth for onboarding — the `curl … | sh` installer just installs
+uv + the `2b` command and then runs it, so you get the exact same setup either way. (On first launch
+with no model configured, `2b` offers to run it for you.)
+
+The installer — and `2b setup` — are scriptable: `--yes` (accept defaults, no prompts), `--clean` / `--no-clean`,
 `--models "qwen3.5:9b qwen3:8b"`, `--no-models`, `--no-benchmark` (skip the correctness check),
 `--fix-path` / `--no-fix-path` (add uv's tool dir to your PATH for you via `uv tool update-shell`,
 or leave it — otherwise it asks, and never edits a profile without consent). Pass them through the

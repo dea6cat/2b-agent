@@ -501,24 +501,32 @@ def git_is_read_only(args: str) -> bool:
     return bool(parts) and parts[0] in READ_ONLY_GIT
 
 
-def _killpg(proc):
+def _killpg(proc) -> bool:
     """Kill a process and its whole group: SIGTERM, a short grace, then SIGKILL.
     Grouping (see `start_new_session=True` below) means a shell's children —
-    npm, pytest, a compiler — die with it instead of being orphaned."""
+    npm, pytest, a compiler — die with it instead of being orphaned. Returns True
+    when the process is confirmed dead, False when it may still be running — e.g. a
+    group we lack permission to signal (a `sudo`'d child), or one wedged in
+    uninterruptible I/O that even SIGKILL can't preempt — so the caller can report
+    honestly instead of claiming it stopped."""
     try:
         pgid = os.getpgid(proc.pid)
     except (ProcessLookupError, OSError):
-        return
+        return True   # already gone
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
-        except (ProcessLookupError, OSError):
-            return
+        except ProcessLookupError:
+            return True   # exited between checks
+        except OSError:
+            # e.g. PermissionError signalling a root-owned group — we can't kill it.
+            return proc.poll() is not None
         try:
             proc.wait(timeout=0.5)
-            return
+            return True
         except subprocess.TimeoutExpired:
             continue
+    return proc.poll() is not None   # SIGKILL didn't take (rare: D-state I/O wait)
 
 
 def _run_cancellable(cmd, *, shell, timeout, cancel):
@@ -527,6 +535,8 @@ def _run_cancellable(cmd, *, shell, timeout, cancel):
     of waiting out `timeout`. Returns (returncode, combined_output, status) where
     status is 'ok' | 'timeout' | 'cancelled'; returncode is None unless status='ok'.
     Raises FileNotFoundError if the program isn't found (caller maps the message)."""
+    if cancel is not None and cancel.is_set():   # already stopped — don't fork/exec
+        return (None, "", "cancelled")
     proc = subprocess.Popen(
         cmd, shell=shell, cwd=os.getcwd(),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -536,11 +546,9 @@ def _run_cancellable(cmd, *, shell, timeout, cancel):
     try:
         while True:
             if cancel is not None and cancel.is_set():
-                _killpg(proc)
-                return (None, "", "cancelled")
+                return (None, "", "cancelled" if _killpg(proc) else "kill_failed")
             if timeout is not None and (time.monotonic() - start) > timeout:
-                _killpg(proc)
-                return (None, "", "timeout")
+                return (None, "", "timeout" if _killpg(proc) else "kill_failed")
             try:
                 out, _ = proc.communicate(timeout=0.1)
                 return (proc.returncode, out or "", "ok")
@@ -574,6 +582,8 @@ def do_run_git(args, max_chars=None, cancel=None):
         return "error: git is not installed"
     except Exception as e:
         return f"error: {e}"
+    if status == "kill_failed":
+        return f"error: tried to stop git {parts[0]} but it may still be running (could not signal its process group)"
     if status == "cancelled":
         return f"stopped: git {parts[0]} interrupted"
     if status == "timeout":
@@ -598,6 +608,8 @@ def do_run_command(command, max_chars=None, cancel=None):
                                            timeout=CMD_TIMEOUT, cancel=cancel)
     except Exception as e:
         return f"error: {e}"
+    if status == "kill_failed":
+        return "error: tried to stop the command but it may still be running (could not signal its process group)"
     if status == "cancelled":
         return "stopped: command interrupted"
     if status == "timeout":

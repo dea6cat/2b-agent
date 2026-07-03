@@ -57,6 +57,24 @@ class Cancellable(unittest.TestCase):
         self.assertEqual(status, "timeout")
         self.assertLess(time.monotonic() - start, 2.0)
 
+    def test_timeout_kills_children_in_the_group(self):
+        child = self._marker()
+        tools._run_cancellable(f"(sleep 2; touch {child}) & sleep 5", shell=True, timeout=0.3, cancel=None)
+        time.sleep(2.4)
+        self.assertFalse(os.path.exists(child), "a child survived the timeout kill")
+
+    def test_kill_failure_is_reported_honestly(self):
+        # Simulate a group we can't signal (e.g. a sudo'd child): really kill the
+        # process so the test leaks nothing, but report the kill as failed.
+        real = tools._killpg
+        self.addCleanup(setattr, tools, "_killpg", real)
+        tools._killpg = lambda proc: (real(proc), False)[1]
+        cancel = threading.Event()
+        threading.Timer(0.1, cancel.set).start()
+        out = tools.do_run_command("sleep 3", cancel=cancel)
+        self.assertIn("may still be running", out)
+        self.assertFalse(out.startswith("stopped:"), "must not claim it stopped when the kill failed")
+
     def test_already_set_cancel_returns_immediately(self):
         cancel = threading.Event()
         cancel.set()

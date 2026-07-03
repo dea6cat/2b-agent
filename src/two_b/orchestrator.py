@@ -533,10 +533,14 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": tc.name, "shown": shown}))
                 try:
                     result = _dispatch_tool(session, task, tc.name, tc.arguments, read_cap)
-                except Exception:
+                except Exception as e:
                     # esc can tear a tool's helper (LSP/MCP) out from under it mid-call;
                     # when cancelled, finish quietly rather than surfacing that as an error.
+                    # Log the exception first so an *unrelated* failure that merely
+                    # coincided with the stop isn't lost without a trace.
                     if task.cancel_flag.is_set():
+                        on_event(AgentEvent(EventType.LOG, task.id,
+                                            {"text": f"(stopped while {tc.name} was running: {e})"}))
                         _finish_stopped(task, on_event)
                         return
                     raise

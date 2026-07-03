@@ -224,6 +224,12 @@ class App:
 
 
 def main() -> None:
+    # `2b setup [flags]` — first-time onboarding. Intercepted before the main parser so
+    # setup's own flags (--clean/--models/--no-benchmark/--fix-path) don't need declaring here.
+    if sys.argv[1:2] == ["setup"]:
+        from . import setup
+        raise SystemExit(setup.main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(
         prog="2b",
         description="A local-first coding agent that keeps small models focused.",
@@ -243,6 +249,8 @@ def main() -> None:
                         help="Uninstall 2B and delete its config (~/.config/2b), then exit")
     parser.add_argument("--update", action="store_true",
                         help="Upgrade 2B to the latest release (uv tool upgrade) and exit")
+    parser.add_argument("--setup", action="store_true",
+                        help="Run first-time setup (Ollama, model download, PATH) and exit")
     parser.add_argument("task", nargs="?", help="An initial task to run before dropping into the session")
     args = parser.parse_args()
 
@@ -269,6 +277,10 @@ def main() -> None:
     if args.update:
         from . import update
         raise SystemExit(update.run_upgrade(console.print))
+
+    if args.setup:
+        from . import setup
+        raise SystemExit(setup.run({}))
 
     if args.list_models:
         from . import registry
@@ -306,7 +318,17 @@ def main() -> None:
             model = saved if (saved and registry.resolve(registry.build_registry(), saved) is not None) else None
             model = model or orchestrator.pick_default_model()
     except SystemExit:
-        raise
+        # No model available. Offer first-run onboarding instead of just erroring out.
+        from . import setup
+        if not args.model and sys.stdin.isatty() and setup._confirm(
+                "No local model is set up yet. Run first-time setup now?", True, {}):
+            setup.run({})
+            try:
+                model = orchestrator.pick_default_model()
+            except SystemExit:
+                raise
+        else:
+            raise
     if not args.model:
         src = "saved default" if config.get_prefs().get("default_model") == model else "autodetected"
         console.print(f"[dim]No --model given, {src}: {model}[/dim]")

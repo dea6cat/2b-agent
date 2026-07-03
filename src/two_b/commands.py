@@ -92,7 +92,16 @@ def _model(rest, app):
     active = app.session.active_task
     if active is not None:
         active.model_override = f"{provider.name}:{model}"
+    _model_changed(app)
     app.ui.print(f"Model set to [bold]{provider.name}:{model}[/bold] (context preserved).")
+
+
+def _model_changed(app) -> None:
+    """Let the UI refresh anything model-specific (e.g. the context-window meter/label)
+    after a model switch. No-op on apps that don't implement the hook."""
+    hook = getattr(app, "on_model_changed", None)
+    if callable(hook):
+        hook()
 
 
 def _model_label(app, qualified: str) -> str:
@@ -135,6 +144,7 @@ def _default(rest, app):
         active.model_override = qualified
     # …and remember it as the startup default for future sessions.
     config.set_pref("default_model", qualified)
+    _model_changed(app)
     kind = "local" if registry.is_local(provider) else "cloud"
     app.ui.print(f"Default set to [bold]{qualified}[/bold] ({kind}), context preserved.")
 
@@ -377,18 +387,23 @@ def _mode(rest, app):
 
 @command("sessions")
 def _sessions(rest, app):
-    """List saved sessions for this project (resume from a shell with: 2b --resume <id>)."""
-    import datetime
-
+    """List saved sessions for this project — id, age, model, size (resume from a shell)."""
     from . import persist
     rows = persist.list_sessions(cwd=app.session.cwd)
     if not rows:
-        app.ui.print("No saved sessions for this directory.")
+        app.ui.print("No saved sessions for this directory yet.")
         return
+    app.ui.print("[bold]Saved sessions here[/bold] (newest first):")
     for r in rows:
-        when = (datetime.datetime.fromtimestamp(r["updated_at"]).strftime("%m-%d %H:%M")
-                if r.get("updated_at") else "")
-        app.ui.print(f"{r['id']}  {when}  {r['title'] or '(untitled)'}")
+        age = persist.relative_age(r["updated_at"]) if r.get("updated_at") else ""
+        model = (r.get("model") or "").split(":")[-1]     # short model name
+        size = f"{r['messages']} msgs" if r.get("messages") else ""
+        meta = "  ·  ".join(x for x in (age, model, size) if x)
+        app.ui.print(f"  [cyan]{r['id']}[/cyan]  {r['title'] or '(untitled)'}")
+        if meta:
+            app.ui.print(f"          [dim]{meta}[/dim]")
+    app.ui.print("[dim]Resume from a shell: [/dim][cyan]2b --resume <id>[/cyan]"
+                 "[dim]  ·  latest here: [/dim][cyan]2b --continue[/cyan]")
 
 
 def _revert_edit(path, pre, app) -> bool:

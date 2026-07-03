@@ -70,35 +70,19 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 2B's TUI is Textual (Python) with streaming, a plan checklist, narrated tool actions, themes, and a status line. Crush's TUI is Bubble Tea v2. Port the *ideas*, not the code.
 
-#### 4.1 Context-window meter + ≥80% warning  (T6) — **highest TUI ROI**
-- **Spec:** Show live `context: 63% (5.0k/8k)` in the status line/sidebar, turning amber ≥80%. 2B already estimates tokens for auto-compaction (`CONTEXT_BUDGETS`, `context_budget`) — surface it. Critical because small local windows are 2B's core constraint.
-- **Files:** `app_tui.py` (status render), `tui.py` (`render_session`), reuse `orchestrator.context_budget` + the running token estimate.
-- **Effort:** S.
+> **4.1 (context-window meter) is shipped** — the TUI status bar shows live `ctx N%` of the model's window, amber at ≥80%. `orchestrator.context_usage` (pure, tested); budget resolved off the render path (`_load_ctx_label`, refreshed on `/model`·`/default` via `on_model_changed`); the per-render estimate is memoized so it recomputes only when a message is added. Tests: `tests/test_context_meter.py`.
 
-#### 4.2 Richer diff review  (T7)
-- **Spec:** In the edit confirmation, render a syntax-highlighted unified diff (Textual supports Rich `Syntax`/panels); optional split view on wide terminals; truncate with "N more lines" + expand.
-- **Files:** `app_tui.py` (`_prompt_confirmation` / the pending-confirmation render), a `diffview` helper. 2B already computes `task.last_diff`.
-- **Effort:** M.
+> **4.2 (diff review) is shipped — and went further: inline, no modal.** Write/edit confirmations render in the conversation view (per user direction, Claude-Code style): a colorized, line-numbered unified diff (added on green bg, removed on red, context dim) then an inline `apply? y / n / esc` answered by a keypress. The `ConfirmScreen` modal was removed. Diff parsing is pure in `difffmt` (tested). Also fixed alongside: shell-chained `run_git` is rejected before prompting, and tool-error sub-lines show up to 400 chars. Tests: `tests/test_render_diff.py`, `tests/test_run_git_shell.py`.
 
-#### 4.3 Collapsible tool-call detail  (T8)
-- **Spec:** Each narrated tool line gets a status glyph (⏳/✓/✗) + spinner while running; expandable to show full args/result. Keeps the clean tree by default.
-- **Files:** `app_tui.py`, `tui.py`.
-- **Effort:** M.
+> **4.4 (@-file completion) is shipped.** Typing `@partial` offers matching project files in the existing inline suggestions strip; Tab/Enter inserts the path. Pure helpers in `completion` (`at_token`, `rank_files`), tested. The command palette already existed inline. Tests: `tests/test_completion.py`.
 
-#### 4.4 @-file completion + Ctrl+P palette  (T9)
-- **Spec:** Typing `@` opens a fuzzy file-path completion (multi-tier rank: exact/prefix/segment); Ctrl+P opens a fuzzy command palette over 2B's slash commands. Reduces path typos (which cause edit-not-found loops — ties to Phase 1).
-- **Files:** `app_tui.py` (input handling), a completions widget; fuzzy over `repomap`/`list_files`.
-- **Effort:** M.
+> **4.5 (finish notification) is shipped.** A task finishing while the terminal is unfocused posts an OSC 9 desktop notification (written to /dev/tty, so Textual's screen is untouched); off with `TWOB_NO_NOTIFY`. Pure builder in `notify.osc9`, tested. Tests: `tests/test_notify.py`.
 
-#### 4.5 Task-finish notification  (T10)
-- **Spec:** When a backgrounded task finishes, emit an OSC 9/777 desktop notification (fallback bell), suppressed when focused. Long local runs need this.
-- **Files:** `app_tui.py`; a small `notify.py` (OSC sequences; detect SSH/terminal).
-- **Effort:** S.
+> **4.3 (tool-line detail) is shipped as A + B** (chosen from a visual mockup). **A — live spinner:** the tool line mounts on start with an animated spinner + elapsed and is finalized in place to ✓/✗ (no re-append). **B — one-line detail:** the line carries a compact result summary — edits show `+N −M` (from the diff), reads `N lines`, writes `N bytes`, errors `exit N`; the full error message still gets a sub-line. An interrupted tool settles to a `·` "stopped" line. True fold/unfold collapse was deliberately **not** built — the transcript is append-only, and folding would need a render rewrite the phase doesn't warrant. Pure summary logic in `toolline`, tested. Tests: `tests/test_toolline.py`.
 
-#### 4.6 Session switcher UI  (rides T4)
-- **Spec:** `/sessions` opens a filterable list (title, age, model, message count) with resume/rename/delete; a two-step delete confirm.
-- **Files:** `app_tui.py` (modal), `persist.py`.
-- **Effort:** M.
+> **4.6 (session switcher) is shipped — inline, not a modal** (per the no-popup preference). `/sessions` (and `2b --list-sessions`) list saved sessions newest-first with id · relative age · model · message count, plus a resume hint (`2b --resume <id>` / `2b --continue`). `persist.list_sessions` now returns the message count and `persist.relative_age` formats the age (tested). In-TUI live resume isn't offered — 2B's per-task-conversation model makes resume a launch-time action (`--continue`/`--resume`), which is what the hint points to.
+
+**Phase 4 is shipped in full** (4.1–4.6). The TUI now has: a live context-window meter, inline line-numbered diff confirmation, live tool spinners + one-line detail, @-file completion, unfocused finish notifications, and an enriched session list.
 
 ### Phase 5 — Control refinements (optional / power-user)
 
@@ -127,7 +111,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 2. ~~Phase 2 (stale-file detection)~~ — **shipped.**
 3. **Phase 4.1** — one-afternoon TUI win (context meter) that serves the local-window thesis.
 4. ~~Phase 3 (persistence + resume/list + multi-level undo)~~ — **shipped**; stdlib-only.
-5. **Phase 4.2–4.6** — TUI polish, incrementally.
+5. ~~Phase 4 (context meter, inline diff, tool spinners+detail, @-completion, notifications, session list)~~ — **shipped.**
 6. **Phase 5 / 6** — optional, as needed.
 
 Each phase item is independently shippable on its own branch and testable without a live model (the reliability + safety + persistence items are all unit-testable host-side).

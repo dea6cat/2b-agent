@@ -103,22 +103,43 @@ def save(session_id: str, cwd: str, title: str, model: str, conversation) -> Non
         _debug(f"save({session_id}) failed: {e}")
 
 
+def relative_age(ts: float, now: float | None = None) -> str:
+    """A short human age ('just now', '5m ago', '2h ago', '3d ago') for a unix time."""
+    now = time.time() if now is None else now
+    d = max(0, int(now - (ts or 0)))
+    if d < 60:
+        return "just now"
+    if d < 3600:
+        return f"{d // 60}m ago"
+    if d < 86400:
+        return f"{d // 3600}h ago"
+    return f"{d // 86400}d ago"
+
+
 def list_sessions(cwd: str | None = None, limit: int = 20) -> list[dict]:
-    """Most-recent-first session summaries, optionally scoped to a project dir."""
+    """Most-recent-first session summaries (id, title, model, updated_at, messages),
+    optionally scoped to a project dir. `messages` is the turn count in the thread."""
     if not enabled():
         return []
     try:
         with _db() as c:
             if cwd:
                 rows = c.execute(
-                    "SELECT id, title, model, updated_at FROM sessions "
+                    "SELECT id, title, model, updated_at, messages_json FROM sessions "
                     "WHERE cwd=? ORDER BY updated_at DESC LIMIT ?",
                     (os.path.abspath(cwd), limit)).fetchall()
             else:
                 rows = c.execute(
-                    "SELECT id, title, model, updated_at FROM sessions "
+                    "SELECT id, title, model, updated_at, messages_json FROM sessions "
                     "ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
-        return [{"id": r[0], "title": r[1], "model": r[2], "updated_at": r[3]} for r in rows]
+        out = []
+        for r in rows:
+            try:
+                n = len(json.loads(r[4]).get("messages", []))
+            except Exception:
+                n = 0
+            out.append({"id": r[0], "title": r[1], "model": r[2], "updated_at": r[3], "messages": n})
+        return out
     except Exception as e:
         _debug(f"list_sessions failed: {e}")
         return []

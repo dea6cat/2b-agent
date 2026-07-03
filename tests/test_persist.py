@@ -108,6 +108,19 @@ class Persistence(unittest.TestCase):
         self.assertIsNone(persist.load("s1", cwd="/proj/b"))        # wrong project -> refused
         self.assertIsNotNone(persist.load("s1"))                    # unscoped still works
 
+    def test_list_includes_message_count(self):
+        persist.save("s1", "/proj/a", "t", "m", _sample_conv())   # _sample_conv has 4 messages
+        self.assertEqual(persist.list_sessions(cwd="/proj/a")[0]["messages"], 4)
+
+    def test_relative_age(self):
+        now = 1_000_000.0
+        self.assertEqual(persist.relative_age(now, now), "just now")
+        self.assertEqual(persist.relative_age(now - 30, now), "just now")
+        self.assertEqual(persist.relative_age(now - 300, now), "5m ago")
+        self.assertEqual(persist.relative_age(now - 7200, now), "2h ago")
+        self.assertEqual(persist.relative_age(now - 3 * 86400, now), "3d ago")
+        self.assertEqual(persist.relative_age(now + 999, now), "just now")   # clock skew clamps
+
     def test_resume_same_id_updates_row_not_forks(self):
         # Simulates the resume path: save, then re-save under the SAME id (as the
         # resumed first task does) — one row, not two.

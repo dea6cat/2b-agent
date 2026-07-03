@@ -27,7 +27,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
-from . import config, orchestrator, registry, theme
+from . import completion, config, difffmt, notify, orchestrator, registry, theme, toolline, tools
 from .commands import command_specs, dispatch_input
 from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
@@ -40,38 +40,31 @@ _MODE_STYLE = {
 }
 
 
-class ConfirmScreen(ModalScreen[bool]):
-    """Modal shown when a task needs a write/edit confirmed. Returns True/False."""
-    CSS = """
-    ConfirmScreen { align: center middle; }
-    #box { width: 80%; max-width: 110; height: auto; border: round #8A7A45;
-           background: #C7C1AE; color: #454235; padding: 1 2; }
-    #q { color: #454235; padding-top: 1; }
-    #btns { height: auto; padding-top: 1; align-horizontal: right; }
-    Button { margin-left: 2; }
-    """
+_DIFF_ADD_BG = "on #12331a"   # dark green — added lines
+_DIFF_DEL_BG = "on #3a1519"   # dark red   — removed lines
 
-    def __init__(self, prompt: str, diff: str):
-        super().__init__()
-        self._prompt = prompt
-        self._diff = diff
 
-    def compose(self) -> ComposeResult:
-        with Vertical(id="box"):
-            yield Static(self._diff or "(no preview)")
-            yield Static(f"{self._prompt}  (y / n)", id="q")
-            with Horizontal(id="btns"):
-                yield Button("Apply", variant="success", id="apply")
-                yield Button("Cancel", variant="error", id="cancel")
+def render_diff(diff: str) -> Text:
+    """Render a unified diff inline, Claude-Code style: a `+N -M` summary, then each
+    line numbered with a green/red background for added/removed and dim for context.
+    A non-diff preview (e.g. a whole-file overwrite note) renders plainly."""
+    diff = diff or "(no preview)"
+    t = Text()
+    if not difffmt.is_unified_diff(diff):
+        for line in diff.splitlines():
+            t.append(line + "\n", style="dim")
+        return t
+    add, rem = difffmt.diff_counts(diff)
+    t.append(f"  +{add} -{rem}\n", style="dim")
+    for old_no, new_no, kind, text in difffmt.diff_rows(diff):
+        if kind == "add":
+            t.append(f"{new_no:>5} + {text}\n", style=_DIFF_ADD_BG)
+        elif kind == "del":
+            t.append(f"{old_no:>5} - {text}\n", style=_DIFF_DEL_BG)
+        else:
+            t.append(f"{new_no:>5}   {text}\n", style="dim")
+    return t
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "apply")
-
-    def on_key(self, event) -> None:
-        if event.key == "y":
-            self.dismiss(True)
-        elif event.key in ("n", "escape"):
-            self.dismiss(False)
 
 class ConnectScreen(ModalScreen[str | None]):
     """Masked prompt for a provider API key, so it never lands in the log.
@@ -201,13 +194,19 @@ class TwoBApp(App):
         self.ui = _LogConsole(self)               # provider-neutral output for commands.py
         self._stream_text = ""
         self._stream_widget = None                # the in-flow Static currently being streamed into
-        self._confirm_open = False                # a ConfirmScreen modal is currently shown
+        self._pending_confirm = None              # PendingConfirmation shown inline (answered y/n in view)
+        self._default_placeholder = "Type a task, or / for commands"
         self._pal: list[tuple[str, str]] = []     # current command-palette matches
         self._pal_index = 0                       # highlighted match (↑/↓ navigation)
-        self._pending_tool = None                 # (name, args) between a tool START and its RESULT
-        self._tool_widgets: list = []             # this task's tool-action widgets (for └ on the last)
+        self._pal_mode = ""                       # "cmd" (slash) or "file" (@) — how to accept
+        self._file_list = None                    # cached project relpaths for @-completion
+        self._focused = True                      # terminal focus — used to ping on finish when away
+        self._running_tool = None                 # {w,name,args,phrase,start} for the live spinner line
+        self._tool_widgets: list = []             # this task's tool-action rows [w,glyph,gstyle,phrase,suffix]
         self._last_reply = ""                     # most-recent model reply, for /copy
         self._ctx_label = ""                      # "13k ctx" for the banner (filled async)
+        self._ctx_budget = 0                      # token window for the live context meter (filled async)
+        self._ctx_cache = (None, ("", ))          # ((conv id, msg count) -> rendered meter segment)
 
     # ---- theming ----
     def get_css_variables(self) -> dict[str, str]:
@@ -262,9 +261,13 @@ class TwoBApp(App):
             if not resolved:
                 return
             provider, model = resolved
-            if getattr(provider, "name", "") != "ollama" or getattr(provider, "api_key", None) is not None:
-                return   # only meaningful for local models 2B pins num_ctx on
-            win = provider.context_window(model)
+            # Budget for the live context meter — works for local (pinned num_ctx) and
+            # cloud (per-provider budget). Resolved once here, off the render path.
+            self._ctx_budget = orchestrator.context_budget(provider, model)
+            is_local = getattr(provider, "name", "") == "ollama" and getattr(provider, "api_key", None) is None
+            if not is_local:
+                return   # banner "Nk ctx" label is only meaningful for the num_ctx 2B pins locally
+            win = self._ctx_budget
         except Exception:
             return
         if win:
@@ -312,7 +315,7 @@ class TwoBApp(App):
         self.query_one("#log", VerticalScroll).remove_children()
         self._stream_widget = None
         self._stream_text = ""
-        self._pending_tool = None
+        self._running_tool = None
         self._tool_widgets = []
         self._last_reply = ""
         for line in self._intro_lines():
@@ -345,6 +348,7 @@ class TwoBApp(App):
     def _clear_palette(self) -> None:
         self._pal = []
         self._pal_index = 0
+        self._pal_mode = ""
         self.query_one("#palette", Static).update("")
 
     def _accept_palette(self, run: bool) -> None:
@@ -354,6 +358,14 @@ class TwoBApp(App):
         if sel is None:
             return
         inp = self.query_one("#input", Input)
+        if self._pal_mode == "file":               # replace the trailing '@partial' with the path
+            text = inp.value
+            idx = text.rfind("@")
+            if idx != -1:
+                inp.value = text[:idx] + sel + " "
+                inp.cursor_position = len(inp.value)
+            self._clear_palette()
+            return
         # These open a second-stage menu (model / provider), so fill rather than run.
         opens_submenu = sel in ("/model", "/connect", "/login", "/disconnect")
         if run and not opens_submenu:
@@ -373,10 +385,32 @@ class TwoBApp(App):
                 continue
         return out
 
+    def _project_files(self):
+        """Cached list of project relpaths (shortest first) for @-completion. Skips
+        the usual junk dirs; capped so a huge repo can't stall the first completion."""
+        if self._file_list is None:
+            root, out = self.session.cwd, []
+            for dp, dns, fns in os.walk(root):
+                dns[:] = [d for d in dns if not tools._should_skip_dir(d)]
+                for fn in fns:
+                    if fn.startswith("."):
+                        continue
+                    out.append(os.path.relpath(os.path.join(dp, fn), root))
+                    if len(out) >= 4000:
+                        break
+                if len(out) >= 4000:
+                    break
+            out.sort(key=len)
+            self._file_list = out
+        return self._file_list
+
     def _update_palette(self, text: str) -> None:
-        """Recompute the matches for the current input, then render."""
+        """Recompute the matches for the current input, then render. Slash completes
+        commands/models/providers; an @-token completes project file paths."""
         matches: list[tuple[str, str]] = []
+        mode = ""
         if text.startswith("/"):
+            mode = "cmd"
             body = text[1:]
             if " " not in body:                            # completing the command name
                 matches = [(f"/{n}", d) for n, d in command_specs() if n.startswith(body)]
@@ -388,7 +422,12 @@ class TwoBApp(App):
                 elif cmd in ("connect", "login", "disconnect"):   # completing a provider
                     matches = [(f"/{cmd} {p}", "connected" if config.is_connected(p) else "")
                                for p in config.PROVIDER_KEY_ENV if p.startswith(arg.lower())]
-        self._pal = matches
+        else:
+            tok = completion.at_token(text)                # typing '@path' -> file completion
+            if tok is not None:
+                mode = "file"
+                matches = [(f, "") for f in completion.rank_files(self._project_files(), tok)]
+        self._pal, self._pal_mode = matches, mode
         if self._pal_index >= len(matches):
             self._pal_index = 0
         self._render_palette()
@@ -519,40 +558,86 @@ class TwoBApp(App):
     # ---- the periodic pump: drain events, render ----
     def _tick(self) -> None:
         self._drain_events()
+        self._animate_running_tool()
         self._render_plan()
         self._render_mode()
         self._render_status()
         self._maybe_start_next()
 
-    def _tool_line(self, connector: str, glyph: str, gstyle: str, phrase: str) -> Text:
+    def _tool_line(self, connector: str, glyph: str, gstyle: str, phrase: str, suffix: str = "") -> Text:
         t = Text()
         t.append(f"  {connector} ", style=self.c("faint"))   # tree gutter
-        t.append(f"{glyph} ", style=gstyle)                  # ✓ / ✗
+        t.append(f"{glyph} ", style=gstyle)                  # spinner / ✓ / ✗
         t.append(phrase, style=self.c("accent"))             # conversational action
+        if suffix:
+            t.append(f"  {suffix}", style=self.c("dim"))      # Option B: ± counts / lines / exit / elapsed
         return t
 
-    def _render_tool_action(self, result: str) -> None:
-        name, args = self._pending_tool or ("", {})
-        self._pending_tool = None
+    def _start_tool_line(self, name: str, args: dict) -> None:
+        """Option A: mount the tool line immediately with a live spinner; it's finalized
+        to ✓/✗ + detail when the result arrives (updated in place, not re-appended)."""
         phrase = _describe_tool(name, args)
+        w = Static(self._tool_line("├", _SPIN[0], self.c("accent"), phrase))
+        log = self.query_one("#log", VerticalScroll)
+        log.mount(w)
+        self._tool_widgets.append([w, _SPIN[0], self.c("accent"), phrase, ""])
+        self._running_tool = {"w": w, "name": name, "args": args, "phrase": phrase,
+                              "start": time.monotonic()}
+        log.scroll_end(animate=False)
+
+    def _animate_running_tool(self) -> None:
+        r = self._running_tool
+        if r is None:
+            return
+        frame = _SPIN[int(time.monotonic() * 12) % len(_SPIN)]
+        elapsed = int(time.monotonic() - r["start"])
+        r["w"].update(self._tool_line("├", frame, self.c("accent"), r["phrase"],
+                                      suffix=(f"{elapsed}s" if elapsed >= 1 else "")))
+
+    def _finish_tool_line(self, result: str) -> None:
+        """Turn the running spinner line into its final ✓/✗ + one-line detail (Option B)."""
+        r, self._running_tool = self._running_tool, None
         ok = not result.strip().startswith("error")
         glyph, gstyle = ("✓", self.c("ok")) if ok else ("✗", self.c("err"))
         log = self.query_one("#log", VerticalScroll)
-        action = Static(self._tool_line("├", glyph, gstyle, phrase))
-        log.mount(action)
-        self._tool_widgets.append((action, glyph, gstyle, phrase))
-        # concise dim result sub-line
-        first = result.splitlines()[0] if result else ""
-        if first:
-            style = self.c("err") if not ok else self.c("faint")
-            log.mount(Static(Text(f"      {first[:160]}", style=style)))
+        if r is None:                                    # result with no start (shouldn't happen) — fall back
+            phrase, w = "done", Static(self._tool_line("├", glyph, gstyle, "done"))
+            log.mount(w)
+            self._tool_widgets.append([w, glyph, gstyle, phrase, ""])
+        else:
+            phrase, w = r["phrase"], r["w"]
+            suffix = self._tool_detail(r["name"], r["args"], result, ok)
+            w.update(self._tool_line("├", glyph, gstyle, phrase, suffix=suffix))
+            self._tool_widgets[-1] = [w, glyph, gstyle, phrase, suffix]
+        # Errors keep a full sub-line — a one-word "exit N" can't carry the recovery
+        # guidance (e.g. the run_git "no shell operators" message). Successes stay one line.
+        if not ok:
+            first = result.splitlines()[0] if result else ""
+            if first:
+                log.mount(Static(Text(f"      {first[:400]}", style=self.c("err"))))
         log.scroll_end(animate=False)
 
+    def _tool_detail(self, name: str, args: dict, result: str, ok: bool) -> str:
+        """Option B: a short suffix for the tool line. edit_file's ± comes from the
+        just-applied diff; everything else from the result (see toolline)."""
+        if ok and name == "edit_file":
+            active = self.session.active_task
+            add, rem = difffmt.diff_counts(active.last_diff) if active and active.last_diff else (0, 0)
+            return f"+{add} −{rem}" if (add or rem) else ""
+        return toolline.result_summary(name, result, ok)
+
     def _close_tool_group(self) -> None:
+        # A tool interrupted before its result (e.g. esc mid-tool with no RESULT event)
+        # would leave the spinner animating forever — settle it and stop the animation.
+        if self._running_tool is not None:
+            r, self._running_tool = self._running_tool, None
+            r["w"].update(self._tool_line("├", "·", self.c("faint"), r["phrase"], suffix="stopped"))
+            if self._tool_widgets:
+                self._tool_widgets[-1] = [r["w"], "·", self.c("faint"), r["phrase"], "stopped"]
         # Turn the last action's connector into └ so the group reads as a tree.
         if self._tool_widgets:
-            w, glyph, gstyle, phrase = self._tool_widgets[-1]
-            w.update(self._tool_line("└", glyph, gstyle, phrase))
+            w, glyph, gstyle, phrase, suffix = self._tool_widgets[-1]
+            w.update(self._tool_line("└", glyph, gstyle, phrase, suffix=suffix))
         self._tool_widgets = []
 
     def _commit_stream(self) -> None:
@@ -585,9 +670,9 @@ class TwoBApp(App):
                 self._commit_stream()
             elif t == EventType.TOOL_CALL_START:
                 self._commit_stream()
-                self._pending_tool = (ev.payload["name"], ev.payload["shown"])
+                self._start_tool_line(ev.payload["name"], ev.payload["shown"])
             elif t == EventType.TOOL_CALL_RESULT:
-                self._render_tool_action(ev.payload["result"])
+                self._finish_tool_line(ev.payload["result"])
             elif t == EventType.ASSISTANT_TEXT:
                 self._commit_stream()
                 self._close_tool_group()
@@ -600,22 +685,68 @@ class TwoBApp(App):
                 self._commit_stream()
                 self._close_tool_group()
                 self.log_write(Text(f"error: {ev.payload.get('error', 'unknown')}", style=f"bold {self.c('err')}"))
+                self._notify_finished(ev.task_id, ok=False)
             elif t == EventType.TASK_DONE:
                 self._commit_stream()
                 self._close_tool_group()
+                self._notify_finished(ev.task_id, ok=True)
 
-        # write confirmation waiting? show it as a modal.
+        # Write/edit confirmation waiting? Show it INLINE in the conversation (diff +
+        # y/n), never a popup. Answered by _resolve_confirm on a keypress.
         active = self.session.active_task
-        if not self._confirm_open and active is not None and active.pending is not None:
-            self._confirm_open = True
-            pc = active.pending
+        pc = active.pending if active is not None else None
+        if pc is not None and self._pending_confirm is not pc:
+            self._pending_confirm = pc
+            self._show_inline_confirm(pc)
+        elif pc is None and self._pending_confirm is not None:
+            # the worker cleared it out from under us (e.g. esc cancelled the task) —
+            # reset the inline state so the input works again.
+            self._pending_confirm = None
+            self._restore_input()
 
-            def _resolved(approved, _pc=pc):
-                _pc.approved = bool(approved)
-                _pc.answered.set()
-                self._confirm_open = False
+    def _show_inline_confirm(self, pc) -> None:
+        """Render the proposed change inline in the view and arm y/n. No modal."""
+        self._commit_stream()
+        self.log_write(render_diff(pc.diff))
+        q = Text(f"{pc.prompt}  ", style=f"bold {self.c('ink')}")
+        q.append("y", style="green")
+        q.append(" apply · ", style=self.c("dim"))
+        q.append("n", style="red")
+        q.append(" skip · ", style=self.c("dim"))
+        q.append("esc", style=self.c("dim"))
+        q.append(" stop", style=self.c("dim"))
+        self.log_write(q)
+        inp = self.query_one("#input", Input)
+        inp.placeholder = "y apply · n skip · esc stop"
+        inp.disabled = True
 
-            self.push_screen(ConfirmScreen(pc.prompt, pc.diff), _resolved)
+    def _resolve_confirm(self, approved: bool) -> None:
+        pc = self._pending_confirm
+        self._pending_confirm = None
+        if pc is not None:
+            pc.approved = bool(approved)
+            pc.answered.set()
+        self.log_write(Text("  ✔ applied" if approved else "  ✗ skipped", style=self.c("dim")))
+        self._restore_input()
+
+    def _restore_input(self) -> None:
+        inp = self.query_one("#input", Input)
+        inp.disabled = False
+        inp.placeholder = self._default_placeholder
+        inp.focus()
+
+    def on_key(self, event) -> None:
+        # While an inline confirmation is armed, y/enter apply and n skips; the keys
+        # are consumed so they don't leak into the input. esc is left to the normal
+        # interrupt binding (which cancels the whole task via the worker's cancel check).
+        if self._pending_confirm is None:
+            return
+        if event.key in ("y", "Y", "enter"):
+            event.stop()
+            self._resolve_confirm(True)
+        elif event.key in ("n", "N"):
+            event.stop()
+            self._resolve_confirm(False)
 
     def _maybe_start_next(self) -> None:
         # explicit /fg foregrounding request takes priority
@@ -675,7 +806,45 @@ class TwoBApp(App):
         others = [t for t in self.session.tasks if t.id != self.session.active_task_id
                   and t.state in (TaskState.QUEUED, TaskState.BACKGROUNDED)]
         extra = f"  ·  {len(others)} queued/bg" if others else ""
-        st.update(f"{left}    │    {model}{extra}    ·  esc stop · ctrl+b bg · ctrl+d quit")
+        st.update(f"{left}    │    {model}{extra}{self._ctx_meter(task)}    ·  esc stop · ctrl+b bg · ctrl+d quit")
+
+    def _ctx_meter(self, task) -> str:
+        """Live context-window fill (small local windows fill fast — this is the point).
+        Amber past 80%. Empty when there's no conversation or the budget isn't known yet.
+        estimate_tokens is O(conversation) and this renders ~12x/s, so the result is
+        memoized and only recomputed when a message is added (keyed on conv id + count)."""
+        if task is None or task.conversation is None or self._ctx_budget <= 0:
+            return ""
+        conv = task.conversation
+        key = (id(conv), len(conv.messages), self._ctx_budget)
+        if self._ctx_cache[0] != key:
+            pct, warn = orchestrator.context_usage(orchestrator.estimate_tokens(conv), self._ctx_budget)
+            seg = f"  ·  [yellow]ctx {pct}%[/yellow]" if warn else f"  ·  ctx {pct}%"
+            self._ctx_cache = (key, (seg,))
+        return self._ctx_cache[1][0]
+
+    def on_model_changed(self) -> None:
+        """Called by /model and /default after a switch: recompute the context budget
+        (and banner label) for the new model, off the render path, and drop the meter
+        cache so it re-measures against the new window."""
+        self._ctx_cache = (None, ("",))
+        threading.Thread(target=self._load_ctx_label, daemon=True).start()
+
+    # ---- finish notification (ping only when you've looked away) ----
+    def on_app_blur(self, event) -> None:
+        self._focused = False
+
+    def on_app_focus(self, event) -> None:
+        self._focused = True
+
+    def _notify_finished(self, task_id: str, ok: bool) -> None:
+        """Desktop-notify that a task finished — but only when the terminal isn't
+        focused (if you're watching, you already see it). Best-effort; see notify.py."""
+        if self._focused:
+            return
+        task = self.session.find(task_id)
+        title = (task.title if task is not None else "") or "task"
+        notify.send(f"2B — {'done' if ok else 'failed'}: {title}")
 
     # ---- header / intro ----
     def _banner_header(self) -> Text:

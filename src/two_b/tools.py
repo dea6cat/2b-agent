@@ -623,6 +623,16 @@ def _run_cancellable(cmd, *, shell, timeout, cancel):
 _GIT_SHELL_OPS = {"&&", "||", "|", ";", "&", ">", ">>", "<", ">&", "&>", "|&"}
 
 
+def has_shell_syntax(args: str) -> bool:
+    """True if `git <args>` contains a shell operator (so the orchestrator can reject it
+    before prompting, rather than confirm-then-fail)."""
+    try:
+        parts = shlex.split(args or "")
+    except ValueError:
+        return False
+    return bool(parts) and _git_shell_syntax(parts)
+
+
 def _git_shell_syntax(parts) -> bool:
     """True if the tokens contain a shell operator or redirection — the model tried to
     chain/pipe/redirect (e.g. 'add x && diff y'). run_git runs git directly (no shell),

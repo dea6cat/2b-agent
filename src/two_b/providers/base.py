@@ -21,6 +21,10 @@ from ..toolspec import ToolSpec
 class ProviderResponse:
     message: Message
     raw: dict  # untouched provider payload, for debugging only
+    # Why generation stopped, when the provider reports it (Ollama: "stop"/"length"/
+    # "load"…). None when unknown. Lets the loop tell a truncated turn apart from a
+    # genuine empty answer instead of re-prompting the same wall.
+    done_reason: str | None = None
 
 
 class ProviderError(RuntimeError):

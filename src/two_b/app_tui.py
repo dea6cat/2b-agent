@@ -292,6 +292,8 @@ class TwoBApp(App):
             task.conversation = self._resume_conv
             if self._resume_id:
                 task.id = self._resume_id
+            from . import changelog       # restore the durable undo stack for this thread
+            task.edit_history = changelog.load(task.id, self.session.cwd)
             self._resume_conv = None
             self._resume_id = None
         return task

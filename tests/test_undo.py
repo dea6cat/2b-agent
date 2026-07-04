@@ -20,6 +20,14 @@ def _app_with(task):
 
 
 class MultiLevelUndo(unittest.TestCase):
+    def setUp(self):
+        # /undo now mirrors to the durable undo log; point it at a temp dir so tests
+        # don't touch the real ~/.config/2b/undo.
+        self._undo_dir = tempfile.mkdtemp()
+        os.environ["TWOB_UNDO_DIR"] = self._undo_dir
+        self.addCleanup(lambda: __import__("shutil").rmtree(self._undo_dir, ignore_errors=True))
+        self.addCleanup(os.environ.pop, "TWOB_UNDO_DIR", None)
+
     def _tmp(self, content):
         f = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
         f.write(content)

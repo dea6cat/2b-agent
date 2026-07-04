@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import catalog, conversation, diagnostics, mcp_client, planparse, registry, tools, verify
+from . import catalog, changelog, conversation, diagnostics, mcp_client, planparse, registry, tools, verify
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers.base import ProviderError, stream_with_retry
 from .session import PendingConfirmation, Session, Task, TaskState
@@ -545,6 +545,16 @@ def _stale_check(task: Task, path: str) -> str:
     return ""
 
 
+def _record_edit(session: Session, task: Task, path: str, pre: str | None) -> None:
+    """Push a pre-edit snapshot onto the task's undo stack and mirror it to the durable
+    undo log, so /undo survives a restart / resume. The disk write is best-effort and
+    keyed by the task id — skipped only if there's no id to key on (never for a real task)."""
+    task.push_edit(path, pre)
+    tid = getattr(task, "id", "")
+    if tid:
+        changelog.save(tid, getattr(session, "cwd", ".") or ".", task.edit_history)
+
+
 def _refresh_mtime(task: Task, path: str) -> None:
     """After 2B writes a file, record its new mtime so the next edit isn't falsely
     flagged as stale by our own change."""
@@ -674,7 +684,7 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
     with redirect_stdout(buf):
         result = tools.do_write_file(path, content, auto_yes=True)
     if result.startswith("wrote"):
-        task.push_edit(path, pre)
+        _record_edit(session, task, path, pre)
         task.last_diff = preview
         _refresh_mtime(task, path)
         result += diagnostics.summarize(path) + verify.summarize_edit(content)
@@ -706,7 +716,7 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     with redirect_stdout(buf):
         result = tools.do_edit_file(path, old_text, new_text, auto_yes=True)
     if result.startswith("edited"):
-        task.push_edit(path, pre)
+        _record_edit(session, task, path, pre)
         task.last_diff = diff
         _refresh_mtime(task, path)
         result += diagnostics.summarize(path) + verify.summarize_edit(new_text)
@@ -782,7 +792,7 @@ def apply_worker_changes(session: Session, task: Task, changes) -> str:
             applied.append(f"error writing {os.path.relpath(ap)}: {e}")
             continue
         if res.startswith("wrote"):
-            task.push_edit(ap, pre)
+            _record_edit(session, task, ap, pre)
             task.last_diff = combined_preview
             _refresh_mtime(task, ap)
             res += diagnostics.summarize(ap) + verify.summarize_edit(final)

@@ -454,21 +454,37 @@ def _undo(rest, app):
         app.ui.print("Nothing to undo.")
         return
     arg = (rest or "").strip()
+    popped = []
     if arg and not arg.isdigit():
         # Undo the most recent edit to a specific file.
         for i in range(len(task.edit_history) - 1, -1, -1):
             if task.edit_history[i][0] == arg:
-                path, pre = task.edit_history.pop(i)
-                _revert_edit(path, pre, app)
-                task.last_diff = None
-                return
-        app.ui.print(f"No recorded edit to {arg}.")
-        return
-    n = min(int(arg), len(task.edit_history)) if arg else 1
-    for _ in range(n):
-        path, pre = task.edit_history.pop()
-        _revert_edit(path, pre, app)
+                popped.append(task.edit_history.pop(i))
+                break
+        if not popped:
+            app.ui.print(f"No recorded edit to {arg}.")
+            return
+    else:
+        n = min(int(arg), len(task.edit_history)) if arg else 1
+        popped = [task.edit_history.pop() for _ in range(n)]
     task.last_diff = None
+    # Persist the shrunken stack BEFORE touching files: if the process dies mid-undo, the
+    # durable log has already dropped these entries, so a resume won't re-revert them
+    # (which for a since-recreated file could mean a wrong delete). Worst case is a lost
+    # undo, never a wrong action.
+    _persist_undo(task, app)
+    for path, pre in popped:
+        _revert_edit(path, pre, app)
+
+
+def _persist_undo(task, app) -> None:
+    """Keep the durable undo log in sync after a revert, so a resumed session doesn't
+    re-offer an edit that's already been undone. Best-effort."""
+    try:
+        from . import changelog
+        changelog.save(task.id, app.session.cwd, task.edit_history)
+    except Exception:
+        pass
 
 
 @command("diff")

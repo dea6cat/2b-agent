@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at    REAL,
   updated_at    REAL,
   messages_json TEXT NOT NULL,
+  prefix_hash   TEXT,             -- salted hash of the assembled prefix, for P10 drift replay
   PRIMARY KEY (id, cwd)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd, updated_at DESC);
@@ -90,6 +91,12 @@ def _db():
         if path not in _initialized:
             c.execute("PRAGMA journal_mode=WAL")
             c.executescript(_SCHEMA)
+            # Migrate an older sessions table that predates the prefix_hash column (P10).
+            # ADD COLUMN errors if it already exists, so this is best-effort.
+            try:
+                c.execute("ALTER TABLE sessions ADD COLUMN prefix_hash TEXT")
+            except sqlite3.OperationalError:
+                pass
             _initialized.add(path)
         yield c
         c.commit()
@@ -110,15 +117,17 @@ def save(session_id: str, cwd: str, title: str, model: str, conversation) -> Non
         payload = json.dumps(_conv.to_jsonable(conversation))
         now = time.time()
         abscwd = os.path.abspath(cwd or ".")
+        from . import driftreplay
+        phash = driftreplay.prefix_hash(conversation.system_prompt)   # P10: record the prefix seen
         with _db() as c:
             row = c.execute("SELECT created_at FROM sessions WHERE id=? AND cwd=?",
                             (session_id, abscwd)).fetchone()
             created = row[0] if row else now
             c.execute(
                 "INSERT OR REPLACE INTO sessions"
-                "(id, cwd, title, model, created_at, updated_at, messages_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (session_id, abscwd, title, model, created, now, payload),
+                "(id, cwd, title, model, created_at, updated_at, messages_json, prefix_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, abscwd, title, model, created, now, payload, phash),
             )
     except Exception as e:
         _debug(f"save({session_id}) failed: {e}")
@@ -191,6 +200,27 @@ def most_recent_id(cwd: str) -> str | None:
     """The id of the latest session in this project dir, for `--continue`."""
     rows = list_sessions(cwd=cwd, limit=1)
     return rows[0]["id"] if rows else None
+
+
+def get_meta(session_id: str, cwd: str | None = None) -> dict | None:
+    """Session metadata for drift replay (P10): id, cwd, title, model, and the recorded
+    prefix_hash. None if unknown/unreadable. Scoped to cwd when given."""
+    if not enabled():
+        return None
+    try:
+        with _db() as c:
+            if cwd:
+                row = c.execute("SELECT id, cwd, title, model, prefix_hash FROM sessions "
+                                "WHERE id=? AND cwd=?", (session_id, os.path.abspath(cwd))).fetchone()
+            else:
+                row = c.execute("SELECT id, cwd, title, model, prefix_hash FROM sessions "
+                                "WHERE id=?", (session_id,)).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "cwd": row[1], "title": row[2], "model": row[3], "prefix_hash": row[4]}
+    except Exception as e:
+        _debug(f"get_meta({session_id}) failed: {e}")
+        return None
 
 
 # --- compaction archive (P17) -----------------------------------------------

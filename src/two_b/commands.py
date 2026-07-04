@@ -3,13 +3,96 @@ UI thread and never reaches the model. Handlers operate on the App controller
 (duck-typed: .session, .console, and task-control methods) to avoid a circular
 import with cli.py.
 """
+import json
 import os
+import re
+import shlex
 
-from . import config, mcp_client, orchestrator, registry, repomap, tools
+from . import config, difffmt, mcp_client, orchestrator, registry, repomap, tools
 from .conversation import Conversation, Message
 from .session import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, MODE_LABELS, TaskState
 
 COMMANDS = {}
+
+# Tools that /tool can invoke directly (bypassing the model). The frozen five plus the two
+# exec tools; MCP and delegate are excluded (they're not part of the frozen schema).
+DIRECT_TOOLS = ("list_files", "read_file", "search_files", "edit_file", "write_file",
+                "run_git", "run_command")
+_MUTATING_TOOLS = ("edit_file", "write_file")
+_DELETE_CMDS = {"rm", "rmdir", "unlink", "shred", "dd", "truncate"}
+
+
+def _is_delete_command(cmd: str) -> bool:
+    """Whether a shell/git command's intent is deletion — anchored on the FIRST token of each
+    &&/||/;/| segment (the actual command being run), so 'echo rm …' isn't misread as a delete.
+    Best-effort display hint only; cmdguard is the real gate."""
+    for seg in re.split(r"[;&|]+", cmd):
+        toks = seg.split()
+        if not toks:
+            continue
+        head = toks[0]
+        if head in _DELETE_CMDS:
+            return True
+        if head == "find" and "-delete" in toks:
+            return True
+        if head in ("git", "branch"):                        # 'git rm', 'git clean -fd', 'branch -D', 'git branch -D'
+            if "rm" in toks or "clean" in toks:
+                return True
+            if "branch" in toks and ("-D" in toks or "--delete" in toks):
+                return True
+    return False
+
+
+def parse_tool_invocation(rest: str):
+    """Parse '/tool <name> key=val …' or '/tool <name> {json}' into (name, args_dict).
+    Returns (None, error_message) on any problem. Pure and testable — no side effects."""
+    rest = (rest or "").strip()
+    if not rest:
+        return None, "Usage: /tool <name> key=val …   or   /tool <name> {\"key\": \"val\"}"
+    parts = rest.split(maxsplit=1)
+    name = parts[0]
+    argstr = parts[1].strip() if len(parts) > 1 else ""
+    if name not in DIRECT_TOOLS:
+        return None, f"'{name}' is not a directly-invocable tool. One of: {', '.join(DIRECT_TOOLS)}."
+    if not argstr:
+        return name, {}
+    if argstr.startswith("{"):
+        try:
+            args = json.loads(argstr)
+        except ValueError as e:
+            return None, f"invalid JSON args: {e}"
+        if not isinstance(args, dict):
+            return None, "JSON args must be an object, e.g. {\"path\": \"a.dart\"}."
+        return name, args
+    try:
+        tokens = shlex.split(argstr)
+    except ValueError as e:
+        return None, f"could not parse args ({e}). Quote values with spaces, or pass JSON."
+    args: dict = {}
+    for tok in tokens:
+        if "=" not in tok:
+            return None, f"expected key=value, got '{tok}'. Use key=val pairs or a {{json}} object."
+        k, v = tok.split("=", 1)
+        args[k] = v
+    return name, args
+
+
+def confirmation_risk(grant_key: str | None, diff: str) -> tuple[str, str]:
+    """A (risk_class, one-line-impact) label for an inline confirmation (P19). Pure. risk_class
+    is one of write / execute / delete / change; impact is a short human summary."""
+    diff = diff or ""
+    if grant_key in _MUTATING_TOOLS:
+        if difffmt.is_unified_diff(diff):
+            adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+            dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+            return "write", f"+{adds}/-{dels} lines"
+        first = diff.strip().splitlines()[0] if diff.strip() else "file contents"
+        return "write", first[:80]
+    if grant_key in ("run_command", "run_git"):
+        cmd = diff.lstrip("$ ").strip().splitlines()[0] if diff.strip() else ""
+        risk = "delete" if _is_delete_command(cmd) else "execute"
+        return risk, cmd[:80]
+    return "change", ""
 
 
 def command(*names):
@@ -365,6 +448,34 @@ def _steer(rest, app):
         return
     active.push_steer(text)
     app.ui.print(f"⤷ steering: {text[:70]}")
+
+
+@command("tool")
+def _tool(rest, app):
+    """Invoke a frozen tool directly, bypassing the model: /tool read_file path=a.dart (or {json})."""
+    name, parsed = parse_tool_invocation(rest)
+    if name is None:
+        app.ui.print(parsed)
+        return
+    run = getattr(app, "run_tool_command", None)
+    if run is None:                       # line-mode REPL doesn't offer direct invocation
+        app.ui.print("/tool is available in the full-screen TUI.")
+        return
+    run(name, parsed)
+
+
+@command("history")
+def _history(rest, app):
+    """Search the scrollback: /history search <query> — then n / N jump to next / prev match."""
+    parts = rest.split(maxsplit=1)
+    if not parts or parts[0] != "search" or len(parts) < 2 or not parts[1].strip():
+        app.ui.print("Usage: /history search <query>   — then press n / N to jump between matches")
+        return
+    search = getattr(app, "history_search", None)
+    if search is None:
+        app.ui.print("/history search is available in the full-screen TUI.")
+        return
+    search(parts[1].strip())
 
 
 @command("yes")

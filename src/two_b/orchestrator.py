@@ -361,14 +361,16 @@ PROJECT_INSTRUCTIONS_MAX = 4000   # cap on a project CLAUDE.md/AGENTS.md folded 
 MCP_LOCAL_CAP = 6                 # max MCP tools shown to a local model (protect its context/focus)
 
 
-def _read_project_file(names: tuple[str, ...], cap: int, skip: str | None = None) -> tuple[str, str | None]:
-    """First existing, non-empty file in `names` (project root), capped. Returns
+def _read_project_file(names: tuple[str, ...], cap: int, skip: str | None = None,
+                       root: str | None = None) -> tuple[str, str | None]:
+    """First existing, non-empty file in `names` (under `root`, default cwd), capped. Returns
     (text, filename_used) or ("", None). `skip` excludes a filename already consumed
     elsewhere, so a file that's a fallback for two slots isn't injected twice."""
+    base = root or os.getcwd()
     for name in names:
         if name == skip:
             continue
-        path = os.path.join(os.getcwd(), name)
+        path = os.path.join(base, name)
         if not os.path.isfile(path):
             continue
         try:
@@ -381,20 +383,35 @@ def _read_project_file(names: tuple[str, ...], cap: int, skip: str | None = None
     return "", None
 
 
-def _project_context() -> tuple[str, str | None]:
+def _project_context(root: str | None = None) -> tuple[str, str | None]:
     """The /init project map (2B.md), capped, to orient the model up front — so it
     knows the layout instead of hunting for files. AGENTS.md is a fallback. Returns
     (text, filename_used)."""
-    return _read_project_file(("2B.md", "AGENTS.md"), PROJECT_DOC_MAX)
+    return _read_project_file(("2B.md", "AGENTS.md"), PROJECT_DOC_MAX, root=root)
 
 
-def _project_instructions(skip: str | None = None) -> str:
+def _project_instructions(skip: str | None = None, root: str | None = None) -> str:
     """Project-root coding instructions (P8): a CLAUDE.md, fallback AGENTS.md, read once
     and injected verbatim (capped) so the model follows the project's conventions. `skip`
     drops a file already used as the project map, so AGENTS.md isn't folded in twice.
     No keywords, no watching, no state — just read-once-at-start."""
-    text, _name = _read_project_file(("CLAUDE.md", "AGENTS.md"), PROJECT_INSTRUCTIONS_MAX, skip=skip)
+    text, _name = _read_project_file(("CLAUDE.md", "AGENTS.md"), PROJECT_INSTRUCTIONS_MAX, skip=skip, root=root)
     return text
+
+
+def assemble_system_prompt(cwd: str | None = None) -> str:
+    """The task's stable prefix: the base system prompt, plus the /init project map and the
+    project instructions (P8) for `cwd` (default the current dir). Assembled once per task and
+    kept byte-stable across its turns (P5). Extracted so P10's drift-replay can rebuild the
+    exact prefix with current code for a recorded session's directory and detect whether it changed."""
+    doc, doc_name = _project_context(root=cwd)
+    instr = _project_instructions(skip=doc_name, root=cwd)   # don't fold AGENTS.md in as both map and instructions
+    parts = [SYSTEM_PROMPT]
+    if doc:
+        parts.append(f"# Project map (from /init)\n{doc}")
+    if instr:
+        parts.append(f"### project instructions\n{instr}")
+    return "\n\n".join(parts)
 
 
 def _active_specs(is_local: bool):
@@ -924,7 +941,10 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
     # region). 2B's own prior writes refresh read_mtimes, so they don't trip this. (A
     # section read counts as having read the file — a deliberate simplification of this
     # narrow gate; normal mode still shows the full-overwrite confirmation regardless.)
-    if full and os.path.isfile(full) and full not in task.read_mtimes:
+    # An ephemeral /tool task is a human typing write_file directly — an explicit, deliberate
+    # act, not a model blind-clobber — so the read-first gate (aimed at the model) doesn't apply.
+    if (full and os.path.isfile(full) and full not in task.read_mtimes
+            and not getattr(task, "ephemeral", False)):
         return (f"error: write_file would fully overwrite {path}, but you haven't read it this session. "
                 "Overwriting an unread file risks discarding content you can't see — read_file it first, "
                 f"then write_file; or use edit_file to change only the part you mean. {_NO_SHELL_WORKAROUND}")
@@ -1253,14 +1273,9 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     sub_provider, sub_model = _resolve_subagent_model(reg, provider, model)
 
     if task.conversation is None:
-        doc, doc_name = _project_context()
-        instr = _project_instructions(skip=doc_name)   # don't fold AGENTS.md in as both map and instructions
-        parts = [SYSTEM_PROMPT]
-        if doc:
-            parts.append(f"# Project map (from /init)\n{doc}")
-        if instr:
-            parts.append(f"### project instructions\n{instr}")
-        task.conversation = Conversation(system_prompt="\n\n".join(parts))
+        # Explicit cwd so the recorded prefix (P10 drift replay) is rebuilt against the same
+        # directory even if the process cwd ever diverges from the session's.
+        task.conversation = Conversation(system_prompt=assemble_system_prompt(cwd=session.cwd))
     conv = task.conversation
     desc = task.description
     if session.read_only:

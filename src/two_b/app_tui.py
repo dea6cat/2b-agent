@@ -27,7 +27,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
-from . import completion, config, difffmt, notify, orchestrator, registry, theme, toolline, tools
+from . import commands, completion, config, difffmt, notify, orchestrator, registry, theme, toolline, tools
 from .commands import command_specs, dispatch_input
 from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
@@ -111,6 +111,20 @@ class ConnectScreen(ModalScreen[str | None]):
 _SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
+def _widget_text(w) -> str:
+    """Plain text of a mounted log widget, for scrollback search. Prefers the source text
+    stashed at mount time (a Markdown reply renders to a RichVisual with no .plain, so its
+    prose would otherwise be unsearchable); falls back to render().plain for plain lines."""
+    st = getattr(w, "_search_text", None)
+    if st is not None:
+        return st
+    try:
+        r = w.render()
+    except Exception:
+        return ""
+    return getattr(r, "plain", None) or str(r)
+
+
 def _describe_tool(name: str, args: dict) -> str:
     """Turn a tool call into a conversational action phrase."""
     p = args.get("path")
@@ -180,6 +194,7 @@ class TwoBApp(App):
         Binding("ctrl+b", "background", "background task", show=False),
         Binding("ctrl+y", "copy", "copy last reply", show=False),
         Binding("escape", "interrupt", "interrupt", show=False),
+        Binding("ctrl+c", "sigint", "interrupt / quit", show=False, priority=True),
         Binding("ctrl+d", "quit", "quit", show=False),
     ]
 
@@ -211,6 +226,8 @@ class TwoBApp(App):
         self._ctx_label = ""                      # "13k ctx" for the banner (filled async)
         self._ctx_budget = 0                      # token window for the live context meter (filled async)
         self._ctx_cache = (None, ("", ))          # ((conv id, msg count) -> rendered meter segment)
+        self._sigint_armed_at: float | None = None  # P11: first ctrl+c arms a ~1.5s "again to quit" window
+        self._history = None                      # P19: active scrollback search {widgets, idx, query}
 
     # ---- theming ----
     def get_css_variables(self) -> dict[str, str]:
@@ -310,9 +327,16 @@ class TwoBApp(App):
                                 style=self.c("accent")))
         self.push_screen(ConnectScreen(provider), _done)
 
-    def log_write(self, renderable, classes: str = "") -> None:
+    def log_write(self, renderable, classes: str = "", search_text: str | None = None) -> None:
         log = self.query_one("#log", VerticalScroll)
-        log.mount(Static(renderable, classes=classes or None))
+        w = Static(renderable, classes=classes or None)
+        # Stash the plain source so /history search can match this line even when the
+        # renderable (e.g. Markdown) has no .plain of its own.
+        if search_text is not None:
+            w._search_text = search_text
+        elif hasattr(renderable, "plain"):
+            w._search_text = renderable.plain
+        log.mount(w)
         log.scroll_end(animate=False)
 
     def clear_screen(self) -> None:
@@ -513,12 +537,28 @@ class TwoBApp(App):
     # ---- actions ----
     def action_background(self) -> None:
         t = self.session.active_task
+        if t is not None and getattr(t, "ephemeral", False):
+            # A /tool invocation isn't a resumable model run — backgrounding it would strand
+            # the worker and wedge the session (nothing to /fg back to). Leave it in place.
+            self.log_write(Text("A /tool invocation can't be backgrounded — it finishes on its own.",
+                                style=self.c("dim")))
+            return
         if t is not None and t.state == TaskState.ACTIVE:
             t.state = TaskState.BACKGROUNDED
             self.session.active_task_id = None
             self.log_write(Text(f"backgrounded [{t.id}] {t.title} — /fg {t.id} to resume", style="dim"))
 
-    def action_interrupt(self) -> None:
+    def action_interrupt(self, announce: bool = True) -> bool:
+        """Esc handler. Returns True only if it actually aborted a running task (so the
+        caller — e.g. double-Ctrl-C — can report honestly). If a scrollback search is open,
+        esc exits that instead and returns False. `announce=False` suppresses the "stopping…"
+        line so a caller can print its own combined message."""
+        if self._history is not None:
+            self._exit_history_search()
+            return False
+        # P11: snap scrollback to the bottom first, so the "stopping…" line is in view
+        # (a long tool run may have left the user scrolled up).
+        self.query_one("#log", VerticalScroll).scroll_end(animate=False)
         t = self.session.active_task
         if t is not None and t.state == TaskState.ACTIVE:
             t.clear_steer()                     # hard stop drops any pending mid-turn steer
@@ -526,7 +566,97 @@ class TwoBApp(App):
             # Tear down the long-lived helpers (LSP/MCP) off the UI thread so a slow
             # server can't freeze the interface while we stop everything.
             threading.Thread(target=orchestrator.teardown_helpers, daemon=True).start()
-            self.log_write(Text("stopping…", style=self.c("faint")))
+            if announce:
+                self.log_write(Text("stopping…", style=self.c("faint")))
+            return True
+        return False
+
+    def action_sigint(self) -> None:
+        """P11 double-Ctrl-C: first press aborts the running task (if any) and arms a ~1.5s
+        window; a second press within it quits. A single press never quits, so Ctrl-C can't
+        drop the session by accident."""
+        now = time.monotonic()
+        if self._sigint_armed_at is not None and (now - self._sigint_armed_at) <= 1.5:
+            self.request_quit()
+            return
+        self._sigint_armed_at = now
+        aborted = self.action_interrupt(announce=False)   # True only if a running task was stopped
+        tail = "stopping… press Ctrl-C again within 1.5s to quit" if aborted \
+            else "press Ctrl-C again within 1.5s to quit"
+        self.log_write(Text(tail, style=self.c("faint")))
+
+    # ---- /tool: invoke a frozen tool directly, bypassing the model (P19) ----
+    def run_tool_command(self, name: str, args: dict) -> None:
+        active = self.session.active_task
+        if active is not None and active.state == TaskState.ACTIVE:
+            self.log_write(Text("A task is running — background it (Ctrl-B) or wait, then /tool.",
+                                style=self.c("dim")))
+            return
+        shown = " ".join(f"{k}={v if k != 'content' else f'<{len(str(v))} chars>'}" for k, v in args.items())
+        self.log_write(Text(f"  ⚙ /tool {name} {shown}".rstrip(), style=self.c("accent")))
+        task = self.enqueue_task(f"/tool {name}")
+        task.ephemeral = True                 # a direct invocation, not a resumable model run
+        self.session.active_task_id = task.id
+        task.state = TaskState.ACTIVE
+
+        def worker(_task=task, _name=name, _args=args):
+            result = ""
+            try:
+                resolved = registry.resolve(self.registry, _task.model_override or self.session.default_model)
+                read_cap = None
+                if resolved is not None:
+                    provider, model = resolved
+                    read_cap = int(orchestrator.context_budget(provider, model) * 4 * 0.55)
+                result = orchestrator._dispatch_tool(self.session, _task, _name, _args, read_cap=read_cap)
+            except Exception as e:
+                result = f"error: {e}"
+            self.call_from_thread(self._tool_command_done, _task, _name, result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _tool_command_done(self, task, name: str, result: str) -> None:
+        ok = not (result or "").strip().startswith("error")
+        glyph, gstyle = ("✓", self.c("ok")) if ok else ("✗", self.c("err"))
+        body = (result or "").strip()
+        if len(body) > 4000:
+            body = body[:4000] + f"\n… [truncated, {len(result)} chars total]"
+        self.log_write(Text(f"  {glyph} {name}", style=gstyle))
+        if body:
+            self.log_write(Text(body, style=self.c("ink")), search_text=body)
+        # Finish unconditionally (not gated on ACTIVE): if the user backgrounded it mid-flight
+        # it would otherwise be stranded, wedging the session.
+        task.state = TaskState.DONE
+        if self.session.active_task_id == task.id:
+            self.session.active_task_id = None
+        self.query_one("#log", VerticalScroll).scroll_end(animate=False)
+
+    # ---- /history search: find + jump over scrollback (P19) ----
+    def history_search(self, query: str) -> None:
+        log = self.query_one("#log", VerticalScroll)
+        q = query.lower()
+        matches = [w for w in log.query(Static) if q in _widget_text(w).lower()]
+        if not matches:
+            self.log_write(Text(f"No scrollback matches for “{query}”.", style=self.c("dim")))
+            return
+        self._history = {"widgets": matches, "idx": 0, "query": query}
+        self._jump_history(0)
+        inp = self.query_one("#input", Input)
+        inp.disabled = True
+        inp.placeholder = f"{len(matches)} match(es) for “{query}” — n next · N prev · esc exit"
+
+    def _jump_history(self, delta: int) -> None:
+        h = self._history
+        if not h:
+            return
+        n = len(h["widgets"])
+        h["idx"] = (h["idx"] + delta) % n
+        w = h["widgets"][h["idx"]]
+        self.query_one("#log", VerticalScroll).scroll_to_widget(w, animate=False, top=True)
+        self.log_write(Text(f"  match {h['idx'] + 1}/{n} for “{h['query']}”", style=self.c("faint")))
+
+    def _exit_history_search(self) -> None:
+        self._history = None
+        self._restore_input()
 
     def action_cycle_mode(self) -> None:
         self.session.cycle_mode()
@@ -656,6 +786,7 @@ class TwoBApp(App):
         # headings, bold, code, and tables format properly.
         if self._stream_widget is not None and self._stream_text.strip():
             self._last_reply = self._stream_text
+            self._stream_widget._search_text = self._stream_text   # keep the reply searchable post-Markdown
             try:
                 self._stream_widget.update(Markdown(self._stream_text))
             except Exception:
@@ -687,7 +818,7 @@ class TwoBApp(App):
                 self._commit_stream()
                 self._close_tool_group()
                 self._last_reply = ev.payload["text"]
-                self.log_write(Markdown(ev.payload["text"]), classes="reply")
+                self.log_write(Markdown(ev.payload["text"]), classes="reply", search_text=ev.payload["text"])
             elif t == EventType.LOG:
                 self._commit_stream()
                 self.log_write(Text(f"✻ {ev.payload.get('text', '')}", style=self.c("dim")))
@@ -708,6 +839,10 @@ class TwoBApp(App):
         active = self.session.active_task
         pc = active.pending if active is not None else None
         if pc is not None and self._pending_confirm is not pc:
+            # A confirmation must own the keyboard: leave any scrollback-search nav mode first,
+            # or its on_key branch would swallow y/n/a and the worker would block forever.
+            if self._history is not None:
+                self._exit_history_search()
             self._pending_confirm = pc
             self._show_inline_confirm(pc)
         elif pc is None and self._pending_confirm is not None:
@@ -716,10 +851,27 @@ class TwoBApp(App):
             self._pending_confirm = None
             self._restore_input()
 
+    def _risk_color(self, risk: str) -> str:
+        # delete is the alarming one (err/red); execute a fixed amber that reads on both
+        # themes; write the normal accent; anything else dim.
+        if risk == "delete":
+            return self.c("err")
+        if risk == "execute":
+            return "#C6924A"
+        return self.c("accent") if risk == "write" else self.c("dim")
+
     def _show_inline_confirm(self, pc) -> None:
         """Render the proposed change inline in the view and arm y/n. No modal."""
         self._commit_stream()
         self.log_write(render_diff(pc.diff))
+        # Risk-class label (P19): name what this action does — write / execute / delete —
+        # and a one-line impact, so a confirmation isn't just a bare y/n.
+        risk, impact = commands.confirmation_risk(getattr(pc, "grant_key", None), pc.diff)
+        tag = Text()
+        tag.append(f"  [{risk}]", style=f"bold {self._risk_color(risk)}")
+        if impact:
+            tag.append(f" {impact}", style=self.c("dim"))
+        self.log_write(tag)
         label = _GRANT_LABEL.get(getattr(pc, "grant_key", None))
         q = Text(f"{pc.prompt}  ", style=f"bold {self.c('ink')}")
         q.append("y", style="green")
@@ -759,6 +911,16 @@ class TwoBApp(App):
         inp.focus()
 
     def on_key(self, event) -> None:
+        # While a scrollback search is active the input is disabled and n/N jump between
+        # matches; esc exits (handled by action_interrupt). Consume the nav keys.
+        if self._history is not None:
+            if event.key == "n":
+                event.stop()
+                self._jump_history(1)
+            elif event.key in ("N", "p"):
+                event.stop()
+                self._jump_history(-1)
+            return
         # While an inline confirmation is armed, y/enter apply and n skips; the keys
         # are consumed so they don't leak into the input. esc is left to the normal
         # interrupt binding (which cancels the whole task via the worker's cancel check).

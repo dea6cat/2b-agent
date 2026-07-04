@@ -253,6 +253,12 @@ def main() -> None:
         from . import evals
         raise SystemExit(evals.main(sys.argv[2:]))
 
+    # `2b trace replay <session>` — prompt-drift replay (P10). No LLM; rebuilds the recorded
+    # prefix with current code and reports drift. Intercepted before the parser like eval/setup.
+    if sys.argv[1:2] == ["trace"]:
+        from . import driftreplay
+        raise SystemExit(driftreplay.trace_main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(
         prog="2b",
         description="A local-first coding agent that keeps small models focused.",

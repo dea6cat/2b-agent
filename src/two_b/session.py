@@ -80,6 +80,7 @@ class Task:
     pending: "PendingConfirmation | None" = None     # set when blocked on a backgrounded write
     error: str | None = None
     last_compact_tokens: int = 0                     # size floor after the last compaction (anti-thrash)
+    ephemeral: bool = False                           # a /tool carrier task (direct invocation), not a model run
     chars_per_token: float = 4.0                     # EMA calibrated from the provider's real prompt-token count
     steer_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _steer: list[str] = field(default_factory=list)  # mid-turn user redirects awaiting the next tool boundary

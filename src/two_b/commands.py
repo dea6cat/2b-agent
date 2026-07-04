@@ -578,7 +578,7 @@ def _context(rest, app):
         return
     resolved = registry.resolve(app.registry, task.model_override or app.session.default_model)
     budget = orchestrator.context_budget(resolved[0], resolved[1]) if resolved else 8000
-    used = orchestrator.estimate_tokens(task.conversation)
+    used = orchestrator.estimate_tokens(task.conversation, getattr(task, "chars_per_token", 4.0))
     pct = int(used / budget * 100) if budget else 0
     at = int(orchestrator.COMPACT_AT * 100)
     app.ui.print(f"Context: ~[bold]{used}[/bold] / {budget} tokens ([bold]{pct}%[/bold]). "

@@ -25,6 +25,10 @@ class ProviderResponse:
     # "load"…). None when unknown. Lets the loop tell a truncated turn apart from a
     # genuine empty answer instead of re-prompting the same wall.
     done_reason: str | None = None
+    # Prompt (input) tokens the provider actually counted for this request, when it
+    # reports them (Ollama: prompt_eval_count). None when unknown. Used to calibrate the
+    # char→token estimate the context meter and compaction trigger run on.
+    prompt_tokens: int | None = None
 
 
 class ProviderError(RuntimeError):

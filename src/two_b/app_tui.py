@@ -842,9 +842,10 @@ class TwoBApp(App):
         if task is None or task.conversation is None or self._ctx_budget <= 0:
             return ""
         conv = task.conversation
-        key = (id(conv), len(conv.messages), self._ctx_budget)
+        cpt = getattr(task, "chars_per_token", 4.0)
+        key = (id(conv), len(conv.messages), self._ctx_budget, round(cpt, 2))
         if self._ctx_cache[0] != key:
-            pct, warn = orchestrator.context_usage(orchestrator.estimate_tokens(conv), self._ctx_budget)
+            pct, warn = orchestrator.context_usage(orchestrator.estimate_tokens(conv, cpt), self._ctx_budget)
             seg = f"  ·  [yellow]ctx {pct}%[/yellow]" if warn else f"  ·  ctx {pct}%"
             self._ctx_cache = (key, (seg,))
         return self._ctx_cache[1][0]

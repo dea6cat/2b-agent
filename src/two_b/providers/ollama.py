@@ -18,6 +18,12 @@ from .base import Provider, ProviderResponse, get_json, post_json, post_stream
 LOCAL_DEFAULT = "http://localhost:11434"
 CLOUD_HOST = "https://ollama.com"
 
+# Keep the model — and, crucially, its prompt-prefix KV cache — resident between turns.
+# Ollama's default is 5m; a coding turn's thinking can exceed that, and an unload drops
+# the cached stable prefix (system prompt + tool schema), forcing a full re-encode next
+# turn. 30m spans a normal session so back-to-back turns reuse the warm prefix.
+KEEP_ALIVE = "30m"
+
 CTX_FALLBACK = 16384     # used when RAM/arch can't be read to size the window
 CLOUD_CTX = 120_000      # cloud runs large windows; don't pin num_ctx there
 CTX_FLOOR = 2048         # never pin below this
@@ -188,6 +194,7 @@ class OllamaProvider:
             "tools": to_openai(tools),
             "stream": False,
             "options": self._options(model),
+            "keep_alive": KEEP_ALIVE,
         }
         raw = post_json(f"{self.host}/api/chat", payload, headers=self._headers(),
                         provider=self.name)
@@ -203,6 +210,7 @@ class OllamaProvider:
             message=Message.assistant(text=text or None, thinking=thinking or None, tool_calls=calls),
             raw=raw,
             done_reason=raw.get("done_reason"),
+            prompt_tokens=raw.get("prompt_eval_count"),
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
@@ -213,9 +221,10 @@ class OllamaProvider:
             "tools": to_openai(tools),
             "stream": True,
             "options": self._options(model),
+            "keep_alive": KEEP_ALIVE,
         }
         content, thinking, calls = [], [], []
-        done_reason = None
+        done_reason = prompt_tokens = None
         for line in post_stream(f"{self.host}/api/chat", payload, headers=self._headers(),
                                 provider=self.name):
             line = line.strip()
@@ -234,6 +243,7 @@ class OllamaProvider:
                 calls.append(ToolCall.new(name=fn["name"], arguments=args))
             if obj.get("done"):
                 done_reason = obj.get("done_reason")
+                prompt_tokens = obj.get("prompt_eval_count")
                 break
         text = "".join(content).strip()
         think = "".join(thinking).strip()
@@ -241,6 +251,7 @@ class OllamaProvider:
             message=Message.assistant(text=text or None, thinking=think or None, tool_calls=calls),
             raw={},
             done_reason=done_reason,
+            prompt_tokens=prompt_tokens,
         )
 
 

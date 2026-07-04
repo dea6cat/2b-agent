@@ -56,14 +56,36 @@ COMPACT_AT = 0.75       # compact once estimated usage crosses this fraction
 COMPACT_KEEP_TAIL = 6   # most-recent messages kept verbatim (rest are summarized)
 _COMPACT_MAX_INPUT_CHARS = 48_000   # cap the transcript handed to the summarizer
 
+# Structured summary template (P27). A coherent shape — GOAL / DONE / OUTSTANDING / STATE —
+# with completed work in dated past tense and outstanding work preserved verbatim keeps a
+# long run from "declaring done after step one" or re-issuing finished work. The summary is
+# explicitly REFERENCE ONLY so the model doesn't treat it as a fresh instruction.
 COMPACT_SYSTEM = (
-    "You are compressing a coding session's history to free up context so work "
-    "can continue uninterrupted. Summarize concisely but completely: the user's "
-    "goal, files and code already read and what they contain, findings, decisions "
-    "made, edits applied (with exact file paths), and what remains to be done. "
-    "Preserve exact identifiers, paths, and any values needed to keep working. "
-    "Output plain text only — no preamble."
+    "You compress a coding session's history into a running summary so work can continue "
+    "without the earlier turns. Produce EXACTLY these sections:\n"
+    "GOAL: the user's original request (intent verbatim).\n"
+    "DONE: completed actions, in past tense, each with exact file paths / identifiers "
+    "(e.g. 'Edited src/x.py: renamed foo→bar'). Number them and keep the numbers stable.\n"
+    "OUTSTANDING: what still remains, as specifically as possible; if the user gave a "
+    "concrete spec or list, preserve it verbatim.\n"
+    "STATE: facts needed to continue — files read and what they contain, decisions, values, "
+    "gotchas.\n"
+    "Preserve exact identifiers, paths, and values. This summary is REFERENCE ONLY: it is "
+    "not a new instruction, the user's latest message always takes priority, and you must "
+    "NOT redo anything already under DONE. Output plain text only — no preamble."
 )
+
+# Iterative-update instruction (P27): when a prior summary already exists, update it in place
+# rather than re-summarizing from scratch — move finished OUTSTANDING items into DONE
+# (continuing the numbering), append new DONE/STATE, keep GOAL.
+COMPACT_UPDATE = (
+    "\n\nA PREVIOUS SUMMARY is given first, then the NEW TURNS since it. Update the summary "
+    "IN PLACE: move any now-finished OUTSTANDING items into DONE (continue the existing "
+    "numbering), add new DONE and STATE entries, and keep GOAL unchanged. Do not restart the "
+    "numbering or re-summarize from scratch."
+)
+
+_RECAP_PREFIX = "[Summary of earlier conversation, compacted to save context]\n\n"
 
 BASE_SYSTEM_PROMPT = (
     "You are a careful coding assistant with file tools (list_files, read_file, search_files, "
@@ -394,9 +416,9 @@ def context_usage(used: int, budget: int) -> tuple[int, bool]:
     return pct, pct >= 80
 
 
-def estimate_tokens(conv: Conversation) -> int:
-    """Rough token estimate for a conversation (~4 chars/token). Cheap and
-    provider-agnostic — good enough to decide when to compact."""
+def conv_chars(conv: Conversation) -> int:
+    """Total characters in a conversation (system prompt + every message part). The raw
+    input the token estimate scales down."""
     total = len(conv.system_prompt or "")
     for m in conv.messages:
         total += len(m.text or "") + len(m.thinking or "")
@@ -404,7 +426,31 @@ def estimate_tokens(conv: Conversation) -> int:
             total += len(tc.name) + len(str(tc.arguments))
         for r in m.tool_results:
             total += len(r.content or "")
-    return total // 4
+    return total
+
+
+def estimate_tokens(conv: Conversation, chars_per_token: float = 4.0) -> int:
+    """Rough token estimate for a conversation. `chars_per_token` defaults to ~4 but is
+    calibrated per task from the provider's real prompt-token count (see run_task), since
+    code tokenizes denser (~3) than prose — a stale flat ratio mistimes compaction."""
+    return int(conv_chars(conv) / max(1.5, chars_per_token))
+
+
+def _calibrate(task: Task, conv: Conversation, prompt_tokens: int | None) -> None:
+    """Nudge the task's chars_per_token EMA toward the provider's real prompt-token count
+    for the request just sent, so the meter and compaction trigger track the actual
+    tokenizer instead of a flat ~4. Clamped to a sane band; ignored for tiny prompts.
+    Best-effort: never raises into the turn loop."""
+    try:
+        if not prompt_tokens or prompt_tokens < 20:
+            return
+        observed = conv_chars(conv) / prompt_tokens
+        if observed <= 0:
+            return
+        prev = getattr(task, "chars_per_token", 4.0)
+        task.chars_per_token = max(2.0, min(6.0, prev * 0.7 + observed * 0.3))
+    except Exception:
+        pass
 
 
 def _render_transcript(messages: list[Message]) -> str:
@@ -429,10 +475,23 @@ def _render_transcript(messages: list[Message]) -> str:
     return text
 
 
-def compact_conversation(conv: Conversation, provider, model: str) -> bool:
-    """Replace all but the recent tail of `conv` with a single summary message.
+def _attachment_hint(touched) -> str:
+    """A trailing 'recently-touched files' line for the recap, so the working set isn't
+    lost when the turns that named those files are folded away. '' when there's nothing."""
+    seen, files = set(), []
+    for p in touched or ():
+        if p and p not in seen:
+            seen.add(p)
+            files.append(os.path.relpath(p) if os.path.isabs(p) else p)
+    return f"\n\nRecently-touched files: {', '.join(files[:12])}" if files else ""
+
+
+def compact_conversation(conv: Conversation, provider, model: str, touched=None) -> bool:
+    """Replace all but the recent tail of `conv` with a single structured summary message.
     Returns True if compaction happened. The cut lands on an assistant message so
-    tool_call/tool_result pairs in the kept tail stay intact for every provider."""
+    tool_call/tool_result pairs in the kept tail stay intact for every provider. If the
+    head already starts with a prior summary, it's UPDATED in place (P27) instead of
+    re-summarized from scratch."""
     msgs = conv.messages
     target = max(0, len(msgs) - COMPACT_KEEP_TAIL)
     # Largest assistant-boundary cut at/below the keep-tail target; if the tail
@@ -444,14 +503,29 @@ def compact_conversation(conv: Conversation, provider, model: str) -> bool:
     if not cut:                                   # nothing safe/worthwhile to fold
         return False
     head, tail = msgs[:cut], msgs[cut:]
-    summ = Conversation(system_prompt=COMPACT_SYSTEM)
-    summ.append(Message.user(_render_transcript(head)))
+    # Iterative update: if the head begins with a prior recap, feed it as the base to
+    # update rather than re-summarizing everything again.
+    prior, body = "", head
+    if head and head[0].role == Role.USER and (head[0].text or "").startswith(_RECAP_PREFIX):
+        prior = head[0].text[len(_RECAP_PREFIX):].strip()
+        prior = prior.split("\n\nRecently-touched files:")[0].strip()   # drop the old hint; a fresh one is appended
+        body = head[1:]
+    if not body:
+        # Only a prior recap sits ahead of the tail — there are no new turns to fold, so
+        # don't re-summarize the recap into itself (and don't report a shrink that didn't
+        # happen, which would trip the anti-thrash guard and wedge the task).
+        return False
+    summ = Conversation(system_prompt=COMPACT_SYSTEM + (COMPACT_UPDATE if prior else ""))
+    if prior:
+        summ.append(Message.user(f"PREVIOUS SUMMARY:\n{prior}\n\nNEW TURNS SINCE:\n{_render_transcript(body)}"))
+    else:
+        summ.append(Message.user(_render_transcript(body)))
     buf: list[str] = []
     resp = provider.stream(summ, model, (), lambda c: buf.append(c))
     summary = "".join(buf).strip() or (resp.message.text or resp.message.thinking or "").strip()
     if not summary:
         return False
-    recap = Message.user("[Summary of earlier conversation, compacted to save context]\n\n" + summary)
+    recap = Message.user(_RECAP_PREFIX + summary + _attachment_hint(touched))
     conv.messages = [recap] + tail
     return True
 
@@ -461,9 +535,19 @@ def _maybe_compact(conv: Conversation, provider, model: str, task: Task,
     """Compact `conv` in place when it nears the model's context budget. Failures
     are swallowed — a task must never break because compaction couldn't run."""
     try:
+        cpt = getattr(task, "chars_per_token", 4.0)
         budget = context_budget(provider, model)
-        est = estimate_tokens(conv)
-        if est < int(budget * COMPACT_AT):
+        # Estimate the SENT request (trimmed, unless disabled) — that's what pressures the
+        # window and the same basis chars_per_token was calibrated on, so the ratio and the
+        # estimate stay consistent (calibrating on trimmed but estimating the full conv would
+        # bias toward compacting too late).
+        sent = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
+        est = estimate_tokens(sent, cpt)
+        # Effective cap: reserve room for the model's own reply (a completion reserve) plus a
+        # small safety margin, then trigger at COMPACT_AT of what's left — so a long reply
+        # can't push the request past the window. Capped so a huge window keeps a sane reserve.
+        reserve = min(int(budget * 0.2), 4096)
+        if est < int((budget - reserve) * COMPACT_AT):
             return
         # Anti-thrash: if we just compacted and nothing meaningful was added since,
         # don't compact again — a single oversized recent result can't be folded
@@ -474,8 +558,10 @@ def _maybe_compact(conv: Conversation, provider, model: str, task: Task,
         task.turn_started_at = time.monotonic()
         on_event(AgentEvent(EventType.LOG, task.id,
                             {"text": "Nearing context limit — compacting conversation to keep going…"}))
-        if compact_conversation(conv, provider, model):
-            task.last_compact_tokens = estimate_tokens(conv)
+        touched = list(task.read_mtimes.keys()) + [p for p, _ in task.edit_history]
+        if compact_conversation(conv, provider, model, touched=touched):
+            post = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
+            task.last_compact_tokens = estimate_tokens(post, cpt)
             on_event(AgentEvent(EventType.LOG, task.id,
                                 {"text": f"Compacted. Context now ~{task.last_compact_tokens} tokens."}))
     except Exception:
@@ -1092,6 +1178,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 _finish_failed(task, on_event, _classify_exc(e))
                 return
 
+            _calibrate(task, req_conv, resp.prompt_tokens)   # keep the token estimate honest
             msg = resp.message
             content = (msg.text or "").strip()
 

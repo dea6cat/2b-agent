@@ -486,12 +486,33 @@ def _attachment_hint(touched) -> str:
     return f"\n\nRecently-touched files: {', '.join(files[:12])}" if files else ""
 
 
-def compact_conversation(conv: Conversation, provider, model: str, touched=None) -> bool:
+# Breadcrumb appended to the recap when earlier turns were archived (P17): it primes the
+# model to restate a specific file/symbol/error it needs, which the dangling-reference
+# detector then catches to recall the archived turn — no model-facing tool involved.
+_ARCHIVE_BREADCRUMB = (
+    "\n\n[Earlier turns are archived. If you need a detail not captured above — a specific "
+    "file, symbol, error, or value from before — name it and it will be recalled.]"
+)
+
+
+def _strip_leading_orphan_results(tail: list[Message]) -> list[Message]:
+    """Tool-exchange integrity for the kept tail: a result turn whose originating tool_call
+    was folded into the summarized head is an orphan (a result with no matching call), which
+    some providers reject outright. The cut lands on an assistant message so this is normally
+    a no-op, but it's enforced defensively — drop any leading orphan result turns."""
+    i = 0
+    while i < len(tail) and tail[i].role == Role.USER and tail[i].tool_results and not (tail[i].text or "").strip():
+        i += 1
+    return tail[i:]
+
+
+def compact_conversation(conv: Conversation, provider, model: str, touched=None, breadcrumb: str = ""):
     """Replace all but the recent tail of `conv` with a single structured summary message.
-    Returns True if compaction happened. The cut lands on an assistant message so
-    tool_call/tool_result pairs in the kept tail stay intact for every provider. If the
-    head already starts with a prior summary, it's UPDATED in place (P27) instead of
-    re-summarized from scratch."""
+    Returns the list of dropped (folded-away) messages on success — truthy — or False if
+    nothing was compacted. The cut lands on an assistant message so tool_call/tool_result
+    pairs in the kept tail stay intact for every provider; a leading orphan result is stripped
+    as a belt-and-suspenders integrity guard. If the head already starts with a prior summary,
+    it's UPDATED in place (P27) instead of re-summarized from scratch."""
     msgs = conv.messages
     target = max(0, len(msgs) - COMPACT_KEEP_TAIL)
     # Largest assistant-boundary cut at/below the keep-tail target; if the tail
@@ -502,13 +523,14 @@ def compact_conversation(conv: Conversation, provider, model: str, touched=None)
         cut = next((i for i in range(1, len(msgs)) if msgs[i].role == Role.ASSISTANT), None)
     if not cut:                                   # nothing safe/worthwhile to fold
         return False
-    head, tail = msgs[:cut], msgs[cut:]
+    head = msgs[:cut]
     # Iterative update: if the head begins with a prior recap, feed it as the base to
     # update rather than re-summarizing everything again.
     prior, body = "", head
     if head and head[0].role == Role.USER and (head[0].text or "").startswith(_RECAP_PREFIX):
         prior = head[0].text[len(_RECAP_PREFIX):].strip()
         prior = prior.split("\n\nRecently-touched files:")[0].strip()   # drop the old hint; a fresh one is appended
+        prior = prior.split(_ARCHIVE_BREADCRUMB.strip())[0].strip()     # and the old breadcrumb
         body = head[1:]
     if not body:
         # Only a prior recap sits ahead of the tail — there are no new turns to fold, so
@@ -525,13 +547,15 @@ def compact_conversation(conv: Conversation, provider, model: str, touched=None)
     summary = "".join(buf).strip() or (resp.message.text or resp.message.thinking or "").strip()
     if not summary:
         return False
-    recap = Message.user(_RECAP_PREFIX + summary + _attachment_hint(touched))
+    tail = _strip_leading_orphan_results(msgs[cut:])
+    dropped = msgs[: len(msgs) - len(tail)]       # everything not in the kept tail
+    recap = Message.user(_RECAP_PREFIX + summary + _attachment_hint(touched) + breadcrumb)
     conv.messages = [recap] + tail
-    return True
+    return dropped
 
 
 def _maybe_compact(conv: Conversation, provider, model: str, task: Task,
-                   on_event: Callable[["AgentEvent"], None]) -> None:
+                   on_event: Callable[["AgentEvent"], None], cwd: str | None = None) -> None:
     """Compact `conv` in place when it nears the model's context budget. Failures
     are swallowed — a task must never break because compaction couldn't run."""
     try:
@@ -559,13 +583,114 @@ def _maybe_compact(conv: Conversation, provider, model: str, task: Task,
         on_event(AgentEvent(EventType.LOG, task.id,
                             {"text": "Nearing context limit — compacting conversation to keep going…"}))
         touched = list(task.read_mtimes.keys()) + [p for p, _ in task.edit_history]
-        if compact_conversation(conv, provider, model, touched=touched):
+        # Archive the folded-away turns (P17) so a later dangling reference can recall them;
+        # the breadcrumb in the recap only makes sense when there's an archive behind it.
+        from . import persist
+        archiving = persist.enabled()
+        dropped = compact_conversation(conv, provider, model, touched=touched,
+                                       breadcrumb=_ARCHIVE_BREADCRUMB if archiving else "")
+        if dropped:
+            if archiving:
+                # Skip the leading prior recap — it's a summary, not a real turn to recall.
+                keep = [m for m in dropped
+                        if not (m.role == Role.USER and (m.text or "").startswith(_RECAP_PREFIX))]
+                persist.archive_messages(task.id, cwd or ".", keep)
             post = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
             task.last_compact_tokens = estimate_tokens(post, cpt)
             on_event(AgentEvent(EventType.LOG, task.id,
                                 {"text": f"Compacted. Context now ~{task.last_compact_tokens} tokens."}))
     except Exception:
         pass
+
+
+# --- archive recall (P17): re-inject a dropped turn when the user dangles a reference ---
+# When the latest user message points back at earlier work ("that file you edited", "the
+# error from before"), the turns it refers to may have been folded away by compaction. The
+# host detects the dangling reference, pulls the salient identifiers, searches the archive,
+# and injects the best matches as reference context — no model-facing tool, just recall.
+
+_RECALL_PREFIX = "[Recalled from earlier archived turns, matching your reference — REFERENCE ONLY]\n\n"
+
+# Phrases that point back at earlier turns rather than forward at new work.
+_DANGLING_RE = re.compile(
+    r"\b("
+    r"earlier|before|previously|already|again|remember|recall|"
+    r"that\s+(file|function|method|class|error|bug|change|edit|one|code|test|value|command)|"
+    r"those|the\s+(one|same|previous|earlier|other|last)|"
+    r"(you|we)\s+(said|mentioned|told|showed|edited|wrote|created|added|changed|removed|found|read|looked|saw|discussed|talked|were|had|did)|"
+    r"(as|like)\s+(i|you|we|before|mentioned|said)|"
+    r"last\s+time|same\s+as\s+before|go\s+back|back\s+to"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Words too generic to be useful recall keys (and the reference-phrase vocabulary itself).
+_RECALL_STOPWORDS = frozenset("""
+that this these those than then them they their there here what when where which while with your
+you youre yours have has had did does done was were will would could should about from into onto
+over under again back also just like made make only same some such very mentioned said told showed
+edited wrote created added changed removed found read looked saw talked discussed remember recall
+earlier before previously last time file files function method class error errors bug change edit
+one thing things stuff code line lines above below command value test tests please could would want
+""".split())
+
+# An identifier / path / filename: a letter or underscore, then word chars, dots, or slashes.
+_RECALL_TERM_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./]{2,}")
+
+
+def _recall_terms(text: str) -> list[str]:
+    """Salient identifiers/paths from the user's message to search the archive on — length
+    >=4, de-duplicated, generic words dropped. Up to 8, original order preserved."""
+    seen: set[str] = set()
+    terms: list[str] = []
+    for tok in _RECALL_TERM_RE.findall(text or ""):
+        low = tok.lower()
+        if len(low) < 4 or low in _RECALL_STOPWORDS or low in seen:
+            continue
+        seen.add(low)
+        terms.append(tok)
+    return terms[:8]
+
+
+def _render_recall(hits: list[dict]) -> str:
+    """Compact reference block from archive hits — each rendered like the summarizer sees it,
+    capped so recall can't itself blow the budget it's meant to protect."""
+    out = []
+    for h in hits:
+        t = _render_transcript([h["message"]])
+        if len(t) > 800:
+            t = t[:800] + "…"
+        out.append(t)
+    return "\n\n".join(out)
+
+
+def _maybe_inject_recall(conv: Conversation, session_id: str, cwd: str | None) -> bool:
+    """If the latest user turn dangles a reference to earlier work, recall the most relevant
+    archived turns and insert them just before that turn as reference context. Returns True if
+    anything was injected. Best-effort — never raises into the turn loop."""
+    try:
+        from . import persist
+        if not persist.enabled() or not conv.messages:
+            return False
+        last = conv.messages[-1]
+        if last.role != Role.USER or not (last.text or "").strip():
+            return False
+        if not _DANGLING_RE.search(last.text):
+            return False
+        terms = _recall_terms(last.text)
+        if not terms:
+            return False
+        hits = persist.search_archive(session_id, cwd or ".", terms, limit=3)
+        if not hits:
+            return False
+        # Prepend the recalled context INTO the latest user turn rather than inserting a new
+        # message: a resumed conversation's tail can already end on a user-role tool-results
+        # turn, and adding another user message would create consecutive same-role turns that
+        # Gemini's API rejects. Merging keeps the user's request last, marked reference-only.
+        last.text = _RECALL_PREFIX + _render_recall(hits) + "\n\n---\n\n" + (last.text or "")
+        return True
+    except Exception:
+        return False
 
 
 # --- confirmation routed to the UI thread -----------------------------------
@@ -1117,6 +1242,9 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
         desc += ("\n\n(Plan mode is on: do NOT edit or write files. Use the read-only tools to "
                  "investigate, then present a concrete, numbered plan as your final answer.)")
     conv.append(Message.user(desc))
+    # If this request points back at earlier work that compaction folded away, pull the
+    # referenced turns from the archive and inject them as reference context (P17).
+    _maybe_inject_recall(conv, task.id, session.cwd)
 
     first_turn = not any(m.role.value == "assistant" for m in conv.messages)
     loop_guard = _LoopGuard()
@@ -1136,7 +1264,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 _finish_stopped(task, on_event)
                 return
 
-            _maybe_compact(conv, provider, model, task, on_event)
+            _maybe_compact(conv, provider, model, task, on_event, cwd=session.cwd)
             task.status_line = "Thinking"
             task.turn_started_at = time.monotonic()
             # Best-effort perf readout (local models). May be blank on the very
@@ -1327,7 +1455,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             if loop_broken else
             ("You've reached the tool-call limit. Give your best final answer now, "
              "based on what you've already found — do not call any more tools.")))
-        _maybe_compact(conv, provider, model, task, on_event)
+        _maybe_compact(conv, provider, model, task, on_event, cwd=session.cwd)
         task.status_line = "Thinking"
         task.turn_started_at = time.monotonic()
         on_event(AgentEvent(EventType.TURN_START, task.id))

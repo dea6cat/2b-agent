@@ -33,6 +33,27 @@ CREATE TABLE IF NOT EXISTS sessions (
   PRIMARY KEY (id, cwd)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd, updated_at DESC);
+
+-- The compaction archive (P17): individual turns folded away by compaction are kept
+-- here, searchable, so a later "that file you edited earlier" can be recalled without
+-- carrying every turn in the live context. Lossy compaction stays; this is the durable
+-- backstop behind it. `role`/`tool_name` are indexed for cheap filtered LIKE recall; the
+-- full message is stored as JSON so a hit can be re-injected verbatim. No embeddings —
+-- pure stdlib. (FTS5 + INSERT/DELETE/UPDATE triggers are the documented next tier if
+-- substring recall ever proves too coarse; the LIKE floor ships first.)
+CREATE TABLE IF NOT EXISTS archive (
+  session_id   TEXT NOT NULL,
+  cwd          TEXT NOT NULL,
+  seq          INTEGER NOT NULL,     -- ordinal within (session_id, cwd), for stable ordering
+  role         TEXT,                 -- 'user' | 'assistant'
+  tool_name    TEXT,                 -- tool called (assistant) or answered (result turn); '' otherwise
+  text         TEXT,                 -- flattened searchable text of the turn
+  message_json TEXT NOT NULL,        -- full serialized Message, for verbatim re-injection
+  created_at   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_archive_key ON archive(session_id, cwd, seq);
+CREATE INDEX IF NOT EXISTS idx_archive_role ON archive(role);
+CREATE INDEX IF NOT EXISTS idx_archive_tool ON archive(tool_name);
 """
 
 _initialized: set[str] = set()
@@ -170,3 +191,140 @@ def most_recent_id(cwd: str) -> str | None:
     """The id of the latest session in this project dir, for `--continue`."""
     rows = list_sessions(cwd=cwd, limit=1)
     return rows[0]["id"] if rows else None
+
+
+# --- compaction archive (P17) -----------------------------------------------
+# Turns dropped by compaction are archived here so they can be recalled on demand,
+# instead of being lost the moment they fall out of the live context.
+
+_ARCHIVE_TEXT_CAP = 4000        # per-turn stored text ceiling — recall needs a fingerprint, not the whole body
+
+
+def _turn_tool_name(m, call_names: dict) -> str:
+    """The tool a turn is about: the (first) call an assistant made, or the tool a
+    result turn answers (looked up by call id via `call_names`). '' when neither."""
+    if m.tool_calls:
+        return m.tool_calls[0].name or ""
+    for r in m.tool_results:
+        name = call_names.get(r.tool_call_id)
+        if name:
+            return name
+    return ""
+
+
+def _capped_message_dict(m) -> dict:
+    """A serializable Message dict with every large text field bounded to _ARCHIVE_TEXT_CAP,
+    so the stored JSON (which is re-injected verbatim on recall) can't hold a full file-read
+    or long command output forever. Recall wants a fingerprint of the turn, not its full body."""
+    d = _conv.message_to_dict(m)
+    if d.get("text"):
+        d["text"] = d["text"][:_ARCHIVE_TEXT_CAP]
+    if d.get("thinking"):
+        d["thinking"] = d["thinking"][:_ARCHIVE_TEXT_CAP]
+    for c in d.get("tool_calls") or []:
+        args = c.get("arguments")
+        if isinstance(args, dict):
+            for k, v in list(args.items()):
+                if isinstance(v, str) and len(v) > _ARCHIVE_TEXT_CAP:
+                    args[k] = v[:_ARCHIVE_TEXT_CAP]
+    for r in d.get("tool_results") or []:
+        if r.get("content"):
+            r["content"] = r["content"][:_ARCHIVE_TEXT_CAP]
+    return d
+
+
+def _searchable_text(m) -> str:
+    """Flatten one Message to the text worth searching: user/assistant prose, the
+    assistant's tool calls with their arguments, and any tool-result bodies."""
+    parts: list[str] = []
+    if m.text:
+        parts.append(m.text)
+    if m.thinking:
+        parts.append(m.thinking)
+    for c in m.tool_calls:
+        parts.append(f"{c.name} {c.arguments}")
+    for r in m.tool_results:
+        if r.content:
+            parts.append(r.content)
+    return "\n".join(parts)[:_ARCHIVE_TEXT_CAP]
+
+
+def archive_messages(session_id: str, cwd: str, messages) -> None:
+    """Append `messages` (turns being folded away by compaction) to the searchable
+    archive, in order, after whatever is already stored for this (session, cwd).
+    Skips empty turns and prior recap summaries. Best-effort — never raises."""
+    if not enabled() or not messages:
+        return
+    try:
+        abscwd = os.path.abspath(cwd or ".")
+        now = time.time()
+        call_names: dict[str, str] = {}
+        rows = []
+        for m in messages:
+            # Track call id -> tool name so a following result turn can be labeled.
+            for c in m.tool_calls:
+                call_names[c.id] = c.name
+            text = _searchable_text(m)
+            if not text.strip():
+                continue                      # nothing to recall from an empty turn
+            rows.append((
+                m.role.value,
+                _turn_tool_name(m, call_names),
+                text,
+                json.dumps(_capped_message_dict(m)),
+            ))
+        if not rows:
+            return
+        with _db() as c:
+            base = c.execute("SELECT COALESCE(MAX(seq), -1) + 1 FROM archive WHERE session_id=? AND cwd=?",
+                             (session_id, abscwd)).fetchone()[0]
+            c.executemany(
+                "INSERT INTO archive(session_id, cwd, seq, role, tool_name, text, message_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(session_id, abscwd, base + i, role, tool, text, mj, now)
+                 for i, (role, tool, text, mj) in enumerate(rows)],
+            )
+    except Exception as e:
+        _debug(f"archive_messages({session_id}) failed: {e}")
+
+
+def search_archive(session_id: str, cwd: str, terms, limit: int = 3) -> list[dict]:
+    """Recall archived turns for this (session, cwd) whose text matches `terms`, ranked by
+    how many distinct terms hit (then most-recent-first). Returns dicts with the rebuilt
+    `message` plus role/tool_name/seq. A host-side LIKE search — no embeddings. Best-effort."""
+    terms = [t for t in (terms or []) if t and len(t) >= 2][:8]
+    if not enabled() or not terms:
+        return []
+    try:
+        abscwd = os.path.abspath(cwd or ".")
+        # Score = count of matched terms; each term is an escaped, case-insensitive LIKE.
+        # ESCAPE '\' so a term containing % or _ can't turn into a wildcard.
+        like = "text LIKE ? ESCAPE '\\'"
+        score = " + ".join([f"({like})"] * len(terms))
+        where = " OR ".join([like] * len(terms))
+        like_args = [f"%{_like_escape(t)}%" for t in terms]
+        sql = (
+            f"SELECT role, tool_name, message_json, seq, ({score}) AS hits "
+            f"FROM archive WHERE session_id=? AND cwd=? AND ({where}) "
+            "ORDER BY hits DESC, seq DESC LIMIT ?"
+        )
+        with _db() as c:
+            rows = c.execute(sql, like_args + [session_id, abscwd] + like_args + [limit]).fetchall()
+        out = []
+        for role, tool_name, mj, seq, hits in rows:
+            if not hits:
+                continue
+            try:
+                msg = _conv.message_from_dict(json.loads(mj))
+            except Exception:
+                continue
+            out.append({"role": role, "tool_name": tool_name, "seq": seq, "hits": hits, "message": msg})
+        return out
+    except Exception as e:
+        _debug(f"search_archive({session_id}) failed: {e}")
+        return []
+
+
+def _like_escape(term: str) -> str:
+    """Escape LIKE wildcards so a search term is matched literally (ESCAPE '\\')."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

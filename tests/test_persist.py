@@ -134,5 +134,91 @@ class Persistence(unittest.TestCase):
         self.assertEqual(len(persist.load("sid", cwd="/proj/a").messages), 6)
 
 
+class Archive(unittest.TestCase):
+    """The P17 compaction archive: folded-away turns are stored, indexed, and recalled."""
+    def setUp(self):
+        self.db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db.close()
+        os.environ["TWOB_HISTORY_DB"] = self.db.name
+        os.environ.pop("TWOB_NO_HISTORY", None)
+        self.addCleanup(lambda: os.environ.pop("TWOB_HISTORY_DB", None))
+        self.addCleanup(lambda: os.path.exists(self.db.name) and os.unlink(self.db.name))
+
+    def _seed(self, session="s1", cwd="/proj/a"):
+        msgs = [
+            Message.user("please refactor the parser"),
+            Message.assistant(text="reading it",
+                              tool_calls=[ToolCall.new("read_file", {"path": "lexer.dart"}, id="c1")]),
+            Message.results([ToolResult(tool_call_id="c1", content="class Lexer { tokenize() {} }")]),
+            Message.assistant(text="editing",
+                              tool_calls=[ToolCall.new("edit_file", {"path": "parser.dart"}, id="c2")]),
+            Message.results([ToolResult(tool_call_id="c2", content="applied change to parseExpr")]),
+        ]
+        persist.archive_messages(session, cwd, msgs)
+        return msgs
+
+    def test_archive_and_recall_by_term(self):
+        self._seed()
+        hits = persist.search_archive("s1", "/proj/a", ["parseExpr"])
+        self.assertTrue(hits)
+        # The recalled hit rebuilds a real Message (the edit's result turn).
+        self.assertIn("parseExpr", hits[0]["message"].tool_results[0].content)
+
+    def test_recall_ranks_by_number_of_matched_terms(self):
+        self._seed()
+        # 'Lexer' + 'tokenize' both live in the read result; only that turn matches both.
+        hits = persist.search_archive("s1", "/proj/a", ["Lexer", "tokenize", "parser"])
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]["hits"], 2)
+        self.assertIn("Lexer", hits[0]["message"].tool_results[0].content)
+
+    def test_tool_name_is_recorded_on_calls_and_results(self):
+        self._seed()
+        hits = persist.search_archive("s1", "/proj/a", ["parser.dart", "parseExpr"], limit=10)
+        names = {h["tool_name"] for h in hits}
+        self.assertIn("edit_file", names)      # the call turn and its result both tagged edit_file
+
+    def test_recall_is_scoped_to_session_and_project(self):
+        self._seed(session="s1", cwd="/proj/a")
+        self.assertEqual(persist.search_archive("s1", "/proj/b", ["parseExpr"]), [])   # other project
+        self.assertEqual(persist.search_archive("s2", "/proj/a", ["parseExpr"]), [])   # other session
+
+    def test_empty_turns_are_not_archived(self):
+        persist.archive_messages("s1", "/proj/a", [Message.assistant(text=""), Message.user("")])
+        self.assertEqual(persist.search_archive("s1", "/proj/a", ["anything"]), [])
+
+    def test_like_wildcards_in_terms_are_literal(self):
+        persist.archive_messages("s1", "/proj/a", [Message.user("the value is 100 percent")])
+        # A term with a bare '%' must not match everything — it's escaped to a literal.
+        self.assertEqual(persist.search_archive("s1", "/proj/a", ["%%%%"]), [])
+        self.assertTrue(persist.search_archive("s1", "/proj/a", ["percent"]))
+
+    def test_disabled_archive_is_a_noop(self):
+        os.environ["TWOB_NO_HISTORY"] = "1"
+        self.addCleanup(lambda: os.environ.pop("TWOB_NO_HISTORY", None))
+        self._seed()
+        self.assertEqual(persist.search_archive("s1", "/proj/a", ["parseExpr"]), [])
+
+    def test_stored_message_json_is_size_capped(self):
+        # A huge tool-result body must not be stored (or recalled) in full — the stored
+        # JSON is bounded, not just the search column.
+        big = "parseExpr " + ("Z" * 50_000)
+        persist.archive_messages("s1", "/proj/a", [
+            Message.assistant(tool_calls=[ToolCall.new("read_file", {"path": "big.dart"}, id="c1")]),
+            Message.results([ToolResult(tool_call_id="c1", content=big)]),
+        ])
+        hit = persist.search_archive("s1", "/proj/a", ["parseExpr"])[0]
+        recalled = hit["message"].tool_results[0].content
+        self.assertIn("parseExpr", recalled)                       # fingerprint preserved
+        self.assertLessEqual(len(recalled), persist._ARCHIVE_TEXT_CAP)   # but bounded
+
+    def test_seq_continues_across_archive_calls(self):
+        persist.archive_messages("s1", "/proj/a", [Message.user("first batch alpha")])
+        persist.archive_messages("s1", "/proj/a", [Message.user("second batch beta")])
+        a = persist.search_archive("s1", "/proj/a", ["alpha"])[0]
+        b = persist.search_archive("s1", "/proj/a", ["beta"])[0]
+        self.assertLess(a["seq"], b["seq"])     # ordering preserved across appends
+
+
 if __name__ == "__main__":
     unittest.main()

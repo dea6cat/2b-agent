@@ -825,6 +825,22 @@ def _jail_blocked(session: Session, grant_key: str, path: str) -> str:
     return ""
 
 
+def _is_sensitive(path: str) -> bool:
+    """True if `path` points at a secrets/credential file — checking the raw path, the
+    resolved read path, AND the symlink-resolved real path, so a symlink named
+    innocuously (notes.txt -> ~/.ssh/id_rsa) can't slip past the guard."""
+    seen = []
+    for p in (path, tools.resolve_read_path(path), tools._safe_path(path)):
+        if not p:
+            continue
+        seen.append(p)
+        try:
+            seen.append(os.path.realpath(p))
+        except (OSError, ValueError):   # ValueError: embedded NUL byte in the path arg
+            pass
+    return any(cmdguard.references_sensitive_path(p) for p in seen)
+
+
 def _refresh_mtime(task: Task, path: str) -> None:
     """After 2B writes a file, record its new mtime so the next edit isn't falsely
     flagged as stale by our own change."""
@@ -954,7 +970,9 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
             pre = f.read()
     normalized = content if content.endswith("\n") or not content else content + "\n"
     preview = f"(full overwrite of {path}: {len(normalized.splitlines())} lines)"
-    if not request_confirmation(session, task, f"Apply write to {path}?", preview, grant_key="write_file"):
+    # A write to a secrets/credential path re-prompts even under a grant (force=).
+    if not request_confirmation(session, task, f"Apply write to {path}?", preview, grant_key="write_file",
+                                force=_is_sensitive(path)):
         return "write rejected by user"
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -989,7 +1007,9 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     import difflib
 
     diff = "\n".join(difflib.unified_diff(pre.splitlines(), new_content.splitlines(), lineterm="", n=1))
-    if not request_confirmation(session, task, f"Apply edit to {path}?", diff, grant_key="edit_file"):
+    # An edit to a secrets/credential path re-prompts even under a grant (force=).
+    if not request_confirmation(session, task, f"Apply edit to {path}?", diff, grant_key="edit_file",
+                                force=_is_sensitive(path)):
         return "edit rejected by user"
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -1097,8 +1117,9 @@ def _run_git(session: Session, task: Task, git_args: str, read_cap: int | None) 
         return (f"error: plan mode is on — not running mutating git (git {git_args}). Use read-only "
                 "git (status/diff/log) to inspect, and present a plan in your final answer.")
     # A destructive-but-legitimate git op (force-push, reset --hard, clean -fdx, branch -D,
-    # history rewrite) re-prompts even if run_git was 'allowed for this session'.
-    force = cmdguard.git_is_high_risk(git_args)
+    # history rewrite) — or one that names a secrets path (e.g. `git add ~/.ssh/id_rsa`, the
+    # staging half of an exfil-via-commit) — re-prompts even under a session grant.
+    force = cmdguard.git_is_high_risk(git_args) or cmdguard.references_sensitive_path(git_args)
     prompt = ("Run this HIGH-RISK git command?" if force else "Run:") + f" git {git_args}?"
     if not request_confirmation(session, task, prompt, f"$ git {git_args}", grant_key="run_git", force=force):
         return "git command rejected by user"
@@ -1176,7 +1197,15 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
         if not request_confirmation(session, task, "Run this shell command?", f"$ {cmd}",
                                     grant_key="run_command", force=cmdguard.is_high_risk(cmd)):
             return "command rejected by user"
-        return tools.do_run_command(cmd, max_chars=read_cap, cancel=task.cancel_flag)
+        # If the workspace sandbox blocks a write outside the project, offer to re-run
+        # without it — but only when a human is present. Unattended (accept-edits or a
+        # 'run_command' grant) fails closed: the sandbox stays on and the denial stands.
+        unattended = session.approve_writes or ("run_command" in session.granted)
+        on_denied = None if unattended else (lambda: request_confirmation(
+            session, task,
+            "The workspace sandbox blocked a write outside the project. Re-run without the sandbox?",
+            f"$ {cmd}", grant_key=None, force=True))
+        return tools.do_run_command(cmd, max_chars=read_cap, cancel=task.cancel_flag, on_denied=on_denied)
     if mcp_client.manager.is_mcp_tool(name):        # curated MCP tool -> route to its server
         if session.read_only:                       # plan mode: MCP tools may have side effects
             return ("error: plan mode is on — external MCP tools are not run (they may change state). "
@@ -1195,6 +1224,18 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
                 guard = _read_guard(task, args["path"])
                 if guard:
                     return guard
+            # A read of a secrets/credential file is confirmed even in normal mode (a
+            # prompt, not a refusal — 2B stays point-anywhere), so a poisoned instruction
+            # can't silently slurp ~/.ssh or ~/.aws credentials. In a parallel read batch
+            # we can't safely prompt (many threads share task.pending), so we refuse and
+            # tell the model to read it alone — where the confirm below applies.
+            if _is_sensitive(args["path"]):
+                if batch:
+                    return ("error: reading a secrets file must be a single read_file call, not part of a "
+                            "parallel read batch — call read_file on it by itself so it can be confirmed.")
+                if not request_confirmation(session, task, f"Read {args['path']}? (looks like a secrets file)",
+                                            args["path"], grant_key=None, force=True):
+                    return "read rejected by user"
             out = tools.do_read_file(args["path"], max_chars=read_cap)
             _record_read(task, args["path"])
             if not batch:                              # streak state is per-sequential-read
@@ -1202,7 +1243,17 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
                 task.read_repeat = 1
             return out
         if name == "search_files":
-            return tools.do_search_files(args["query"], args.get("path", "."))
+            spath = args.get("path", ".")
+            # Same exfil guard as read_file: searching a secrets dir would surface its
+            # contents. Confirm (or refuse in a batch) before scanning a sensitive path.
+            if _is_sensitive(spath):
+                if batch:
+                    return ("error: searching a secrets location must be a single search_files call, "
+                            "not part of a parallel read batch — call it by itself so it can be confirmed.")
+                if not request_confirmation(session, task, f"Search {spath}? (looks like a secrets location)",
+                                            spath, grant_key=None, force=True):
+                    return "search rejected by user"
+            return tools.do_search_files(args["query"], spath)
         return f"error: unknown tool {name}"
 
     # In a batch the concurrent caller owns one process-wide stdout redirect (redirect_stdout

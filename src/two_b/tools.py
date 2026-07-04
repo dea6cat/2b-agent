@@ -15,6 +15,8 @@ import signal
 import subprocess
 import time
 
+from . import seatbelt
+
 MAX_FILE_BYTES = 200_000
 GIT_TIMEOUT = 120
 CMD_TIMEOUT = 600        # general shell commands (tests/builds can be slow)
@@ -701,19 +703,36 @@ def do_run_git(args, max_chars=None, cancel=None):
     return f"error: git exited {rc}\n{out}" if rc else out
 
 
-def do_run_command(command, max_chars=None, cancel=None):
+def do_run_command(command, max_chars=None, cancel=None, on_denied=None):
     """Run an arbitrary shell command in the project (cloud models only — see the
     orchestrator's model-aware tool exposure). Confirmation/plan gating happens
     upstream; this just executes. Output is capped and non-zero exit is flagged.
     `cancel` (a threading.Event) lets esc kill the command — and the whole process
-    group it spawns (tests, builds) — immediately instead of blocking on timeout."""
+    group it spawns (tests, builds) — immediately instead of blocking on timeout.
+
+    When the workspace seatbelt is active (see seatbelt.mode), the command runs under
+    `sandbox-exec` with writes confined to the project. `on_denied` (an optional
+    callable → bool) is consulted only when a sandboxed command fails in a way that
+    looks like a write denial: if it returns True the command is re-run once WITHOUT
+    the sandbox. It's left None in unattended contexts so a denial simply stands
+    (fail-closed — never silently widen the sandbox without a human)."""
     if not (command or "").strip():
         return "error: no command given"
+    argv, _strict = seatbelt.wrap(command)
+    sandboxed = argv is not None
     try:
-        rc, out, status = _run_cancellable(command, shell=True,
-                                           timeout=CMD_TIMEOUT, cancel=cancel)
+        rc, out, status = _run_cancellable(argv if sandboxed else command,
+                                           shell=not sandboxed, timeout=CMD_TIMEOUT, cancel=cancel)
     except Exception as e:
         return f"error: {e}"
+    denied = sandboxed and status == "ok" and bool(rc) and seatbelt.looks_like_denial(rc, out)
+    # Sandbox blocked a write and a human chose to drop the sandbox for this one run.
+    if denied and on_denied is not None and on_denied():
+        denied = False
+        try:
+            rc, out, status = _run_cancellable(command, shell=True, timeout=CMD_TIMEOUT, cancel=cancel)
+        except Exception as e:
+            return f"error: {e}"
     if status == "kill_failed":
         return "error: tried to stop the command but it may still be running (could not signal its process group)"
     if status == "cancelled":
@@ -724,7 +743,14 @@ def do_run_command(command, max_chars=None, cancel=None):
     if max_chars and len(out) > max_chars:
         head, tail = out[: max_chars * 2 // 3], out[-max_chars // 3:]
         out = f"{head}\n… [output truncated] …\n{tail}"
-    return f"error: command exited {rc}\n{out}" if rc else out
+    if not rc:
+        return out
+    msg = f"error: command exited {rc}\n{out}"
+    if denied:
+        # Give the model a recoverable explanation so it stops retrying the same write.
+        msg += ("\n(the workspace sandbox blocked a write outside the project — this ran write-confined. "
+                "Write inside the project instead; the user can allow it, or set TWOB_NO_SEATBELT=1.)")
+    return msg
 
 
 # --- tool-call arg coercion (host-side robustness for small models) ----------

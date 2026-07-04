@@ -38,6 +38,22 @@ _META = set(";|&$`><(){}\n\r")
 _WRAPPERS = {"sudo", "doas", "command", "nohup", "nice", "time", "env", "xargs", "then", "do", "exec"}
 _INTERPRETERS = {"bash", "sh", "zsh", "dash", "ash", "ksh"}
 
+# Network-capable commands — the channel a prompt-injected model would use to
+# exfiltrate. They're already `confirm` (never `allow`); folding them into is_high_risk
+# makes them re-prompt even under a session "allow all" grant.
+_NET = {
+    "curl", "wget", "aria2c", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp",
+    "rsync", "telnet", "ftp", "tftp", "lynx", "w3m", "http", "https", "httpie",
+}
+# Commands that can have ANOTHER (unsandboxed) process do the work — a known way to
+# step outside the seatbelt (mach-lookup isn't restricted). Re-prompt them under a grant.
+_ESCALATE = {"launchctl", "osascript", "at", "batch"}
+# A network- or escalation-capable command reached via command substitution
+# ($(curl …) / `osascript …`), which segment-splitting misses because a substitution
+# isn't a shell separator. Covers both sets so neither exfil vector slips a grant.
+_SUBST_RISKY_RE = re.compile(
+    r"(?:\$\(|`)\s*(?:" + "|".join(sorted(_NET | _ESCALATE, key=len, reverse=True)) + r")\b", re.I)
+
 # Read-only, side-effect-free commands safe to run without a prompt.
 _SAFE = {
     "whoami", "id", "pwd", "hostname", "uname", "arch", "uptime", "date", "cal",
@@ -228,9 +244,66 @@ _HIGH_RISK_RE = re.compile(r"""
 """, re.I | re.X)
 
 
+# Paths whose contents are secrets / credentials — touching them should always be
+# surfaced to the user, even under an allow-all grant or in point-anywhere mode.
+_SENSITIVE_RE = re.compile(
+    r"(?:/|^|~)\.ssh(?=$|[\s'\":/])"
+    r"|(?:/|\b)id_(?:rsa|ed25519|ecdsa|dsa)\b"
+    r"|(?:/|^|~)\.aws(?=$|[\s'\":/])"
+    r"|\.kube/config\b"
+    r"|\.docker/config\.json\b"
+    r"|(?:/|^|~)\.gnupg(?=$|[\s'\":/])"
+    r"|(?:/|^|~)\.netrc\b"
+    r"|(?:^|[\s=:'\"/])[\w.-]*\.env(?:\.\w+)?(?=$|[\s'\":/])"
+    r"|/etc/(?:shadow|sudoers|master\.passwd)\b",
+    re.I,
+)
+
+
+def references_sensitive_path(s: str) -> bool:
+    """True if `s` (a command string or a file path) references a well-known secret /
+    credential location — SSH keys, cloud/k8s/docker creds, .env, /etc/shadow, etc.
+    Used to force a confirm on both shell commands and file-tool paths."""
+    return bool(s) and bool(_SENSITIVE_RE.search(s))
+
+
+def _leading_command_in(cmd: str, names: set, _depth: int = 0) -> bool:
+    """True if any shell segment's leading command is in `names`, including inside a
+    `bash -c "<script>"` wrapper (bounded recursion). The whole string is unwrapped
+    first (shlex keeps a quoted script intact, so a pipe *inside* `bash -c "curl … | sh"`
+    survives — segment-splitting alone would tear it)."""
+    if _depth < 3:
+        whole = _interpreter_script(cmd)
+        if whole and _leading_command_in(whole, names, _depth + 1):
+            return True
+    for seg in _segments(cmd):
+        toks = _command_tokens(seg)
+        if toks and _norm(toks[0]) in names:
+            return True
+        if _depth < 3:
+            script = _interpreter_script(seg)
+            if script and _leading_command_in(script, names, _depth + 1):
+                return True
+    return False
+
+
+def _has_net_command(cmd: str) -> bool:
+    """A network command as a segment's leading token OR a network/escalation command
+    reached via command substitution ($(curl …) / `osascript …`), which segment-
+    splitting alone misses."""
+    return _leading_command_in(cmd, _NET) or bool(_SUBST_RISKY_RE.search(cmd))
+
+
 def is_high_risk(cmd: str) -> bool:
-    """Destructive-but-legitimate: must re-prompt even under a session 'allow' grant."""
-    return bool(cmd) and bool(_HIGH_RISK_RE.search(cmd))
+    """Destructive-but-legitimate, network-capable, or secret-touching: must re-prompt
+    even under a session 'allow' grant. The last two close the exfiltration path — a
+    granted session still asks before the model reaches the network or reads a secret."""
+    if not cmd:
+        return False
+    return (bool(_HIGH_RISK_RE.search(cmd))
+            or _has_net_command(cmd)
+            or _leading_command_in(cmd, _ESCALATE)
+            or references_sensitive_path(cmd))
 
 
 _GIT_HIGH_RISK_RE = re.compile(r"""

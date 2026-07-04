@@ -163,25 +163,57 @@ def _classify_exc(e: BaseException) -> str:
     return f"{type(e).__name__}: {text}" if text else type(e).__name__
 
 
-class _LoopGuard:
-    """Detects a model stuck repeating the same tool call with the same result —
-    e.g. re-submitting an edit whose old_text keeps not matching (a real failure
-    mode: without this the loop runs until the tool-call budget or a timeout).
-    Host-side and model-agnostic. record() returns 'nudge' the first time a
-    signature reaches `nudge_at`, 'stop' once it reaches `stop_at`, else ''."""
+# Volatile substrings stripped from a tool result before hashing it for the loop
+# signature, so a result that's identical *except* for a changing timestamp, run
+# duration, or hash still counts as "the same" — the exact case that let a repeated,
+# genuinely-stuck call (e.g. a test rerun whose only difference is "in 1.23s") slip
+# past a whole-result hash. Kept deliberately narrow (clock/ISO times, durations,
+# long hex ids/addresses) so distinct failures — which differ in real text like a
+# test name — never collapse together.
+_VOLATILE_PATTERNS = [
+    re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\S*"),   # ISO date-time
+    re.compile(r"\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b"),           # clock HH:MM:SS
+    re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|s|sec|secs|seconds|min|mins|minutes)\b"),  # durations
+    # Long hex ids / hashes (git SHAs, uuids). The lookahead requires at least one
+    # a–f letter so a plain long DECIMAL (a byte count, epoch-ms, PID) isn't mistaken
+    # for a hash and stripped — that would collapse genuinely-different numeric output.
+    re.compile(r"\b(?=[0-9a-f]{12,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b"),
+    re.compile(r"0x[0-9a-fA-F]+"),                               # hex addresses
+]
 
-    def __init__(self, window: int = 10, nudge_at: int = 3, stop_at: int = 5):
+
+def _strip_volatile(text: str) -> str:
+    for rx in _VOLATILE_PATTERNS:
+        text = rx.sub("~", text)
+    return text
+
+
+class _LoopGuard:
+    """Detects a model stuck repeating the same tool call with no progress and
+    graduates the response, so a stall degrades gracefully instead of hard-stopping:
+
+      warn   (a signature first reaches `warn_at`)   -> nudge the model to change tack
+      veto   (it reaches `veto_at`)                  -> substitute a corrective result
+      breaker(`breaker_vetoes` vetoes accumulate)    -> stop tools, draft a final answer
+
+    Host-side and model-agnostic. The no-progress signature hashes the tool *result*
+    with volatile fields (times/durations/ids) stripped, so an identical-but-for-a-
+    timestamp repeat still trips, while distinct results (real progress) do not."""
+
+    def __init__(self, window: int = 10, warn_at: int = 3, veto_at: int = 5,
+                 breaker_vetoes: int = 3):
         self._recent: collections.deque[str] = collections.deque(maxlen=window)
-        self.nudge_at, self.stop_at = nudge_at, stop_at
-        self._nudged: set[str] = set()
+        self.warn_at, self.veto_at, self.breaker_vetoes = warn_at, veto_at, breaker_vetoes
+        self._warned: set[str] = set()
+        self._vetoes = 0
 
     @staticmethod
     def _sig(name: str, args: dict, result: str) -> str:
-        # Hash the WHOLE result, not just line 1: run_command/run_git failures all
-        # start "error: command exited 1", so a first-line key would collapse every
-        # distinct test failure into one and falsely stop a fix→rerun→fix loop. A
-        # genuinely-stuck repeat (same edit, same "not found" hint) still hashes equal.
-        body = hashlib.sha1((result or "").encode("utf-8", "replace")).hexdigest()[:16]
+        # Hash the WHOLE result (volatile fields stripped), not just line 1:
+        # run_command/run_git failures all start "error: command exited 1", so a
+        # first-line key would collapse every distinct test failure into one and
+        # falsely trip a fix→rerun→fix loop. A genuinely-stuck repeat still hashes equal.
+        body = hashlib.sha1(_strip_volatile(result or "").encode("utf-8", "replace")).hexdigest()[:16]
         # Put `path` first so it survives truncation even when a large old_text/new_text
         # would otherwise push it past the arg-string cap and collide across files.
         path = args.get("path", "") if isinstance(args, dict) else ""
@@ -190,13 +222,18 @@ class _LoopGuard:
     def record(self, name: str, args: dict, result: str) -> str:
         sig = self._sig(name, args, result)
         self._recent.append(sig)
-        self._nudged &= set(self._recent)   # forget signatures that aged out of the window
+        self._warned &= set(self._recent)   # forget signatures that aged out of the window
         n = self._recent.count(sig)
-        if n >= self.stop_at:
-            return "stop"
-        if n >= self.nudge_at and sig not in self._nudged:
-            self._nudged.add(sig)
-            return "nudge"
+        if n >= self.veto_at:
+            # _vetoes is a task-lifetime count (never reset), so vetoes on different
+            # signatures still add up to the breaker. Intended: a run that stalls this
+            # hard three separate times is genuinely struggling, and the breaker only
+            # degrades to a graceful final answer — not a hard failure.
+            self._vetoes += 1
+            return "breaker" if self._vetoes >= self.breaker_vetoes else "veto"
+        if n >= self.warn_at and sig not in self._warned:
+            self._warned.add(sig)
+            return "warn"
         return ""
 
 
@@ -205,6 +242,22 @@ _LOOP_NUDGE = (
     "approach isn't working, so stop repeating it. If an edit_file old_text isn't "
     "matching, read_file the file again and copy the exact text (including indentation) "
     "from what you see; otherwise try a genuinely different approach."
+)
+
+# Substituted in place of a vetoed repeat's real result, so the model sees a correction
+# instead of the same output yet again (and role-alternation/tool pairing is preserved).
+_LOOP_VETO = (
+    "[blocked] You've made this exact call repeatedly with the same result and no progress. "
+    "Its output is unchanged from the earlier attempts above — stop repeating it. Try a "
+    "materially different approach (re-read the file and copy the exact text, edit a "
+    "different location, or use a different tool). If you're genuinely stuck, say so and "
+    "give your best answer from what you already have."
+)
+
+# Substituted on the breaker step, right before the loop bails to a final-answer turn.
+_LOOP_BREAKER = (
+    "[stopped repeating] This action kept repeating without progress and has been halted. "
+    "No more tools will run — give your best final answer from what you already have."
 )
 
 # A small model sometimes narrates a tool call it never makes ("I'll use edit_file to
@@ -937,6 +990,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
         # a malformed wrapper override an empty/unknown outer name. Fixed for the task;
         # inside the try so even a surprise here lands on the never-throw closure.
         known_tools = tuple(s.name for s in _active_specs(is_local))
+        loop_broken = False   # last turn's breaker state; read post-loop to pick the final prompt
         for _ in range(MAX_TURNS):
             if task.cancel_flag.is_set():
                 _finish_stopped(task, on_event)
@@ -1041,12 +1095,23 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 results.append(ToolResult(tool_call_id=tc.id, content=result))
                 return loop_guard.record(tc.name, tc.arguments, result)
 
-            def _stopped_repeat(tc):
-                conv.append(Message.results(results))
-                task.status_line = ""
-                on_event(AgentEvent(EventType.LOG, task.id,
-                                    {"text": f"Stopped: {tc.name} repeated with no progress."}))
-                _finish_stopped(task, on_event)
+            def _apply_loop_verdict(tc, verdict) -> bool:
+                """Act on the loop-guard's graduated verdict for the just-recorded result.
+                warn -> nudge; veto -> substitute a corrective result; breaker -> substitute
+                and signal a bail to a graceful final answer. Returns True on breaker."""
+                nonlocal nudge_pending
+                if verdict == "warn":
+                    nudge_pending = True
+                elif verdict == "veto":
+                    results[-1].content = _LOOP_VETO
+                    on_event(AgentEvent(EventType.LOG, task.id,
+                                        {"text": f"Repeated {tc.name} vetoed — no progress; asking for a different approach."}))
+                elif verdict == "breaker":
+                    results[-1].content = _LOOP_BREAKER
+                    on_event(AgentEvent(EventType.LOG, task.id,
+                                        {"text": f"Loop breaker: {tc.name} kept repeating — drafting a best-effort answer."}))
+                    return True
+                return False
 
             # Fast path: when the whole batch is side-effect-free reads, run their I/O
             # concurrently (the biggest speed lever on multi-read/-search turns), then emit
@@ -1064,12 +1129,8 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                         _finish_stopped(task, on_event)
                         return
                     _emit_start(tc)
-                    verdict = _record(tc, result)
-                    if verdict == "stop":
-                        _stopped_repeat(tc)
-                        return
-                    if verdict == "nudge":
-                        nudge_pending = True
+                    if _apply_loop_verdict(tc, _record(tc, result)):
+                        loop_broken = True   # finish the batch (every call needs a result), then bail
             else:
                 for tc in calls:
                     if task.cancel_flag.is_set():        # esc while tools are running
@@ -1089,12 +1150,8 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                             _finish_stopped(task, on_event)
                             return
                         raise
-                    verdict = _record(tc, result)
-                    if verdict == "stop":
-                        _stopped_repeat(tc)
-                        return
-                    if verdict == "nudge":
-                        nudge_pending = True
+                    if _apply_loop_verdict(tc, _record(tc, result)):
+                        loop_broken = True   # finish the batch (every call needs a result), then bail
             # Steer: fold any text the user typed mid-turn into the last tool result the
             # model will read next, marked as their latest instruction. Appending to a tool
             # result (rather than adding a user message) preserves role alternation and the
@@ -1104,14 +1161,19 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             if steer and results:
                 results[-1].content += _STEER_MARKER + steer
             conv.append(Message.results(results))
-            if nudge_pending:
+            if nudge_pending and not loop_broken:   # on a breaker, the final-answer prompt below supersedes the nudge
                 conv.append(Message.user(_LOOP_NUDGE))
+            if loop_broken:                 # breaker fired — bail to a graceful final answer
+                break
 
-        # Tool budget exhausted — one final turn for a best-effort answer (no more
-        # tools), so the user gets a summary instead of a bare error.
+        # Tool budget exhausted (or the loop breaker fired) — one final turn for a
+        # best-effort answer (no more tools), so the user gets a summary, not a bare error.
         conv.append(Message.user(
-            "You've reached the tool-call limit. Give your best final answer now, "
-            "based on what you've already found — do not call any more tools."))
+            ("You've repeated the same action several times without progress. Stop calling "
+             "tools now and give your best final answer based on what you already have.")
+            if loop_broken else
+            ("You've reached the tool-call limit. Give your best final answer now, "
+             "based on what you've already found — do not call any more tools.")))
         _maybe_compact(conv, provider, model, task, on_event)
         task.status_line = "Thinking"
         task.turn_started_at = time.monotonic()

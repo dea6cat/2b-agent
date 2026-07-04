@@ -49,7 +49,8 @@ class SensitivePath(unittest.TestCase):
     def test_matches_secret_paths(self):
         for p in ("~/.ssh/id_rsa", "/Users/x/.ssh/id_ed25519", "cat ~/.aws/credentials",
                   "~/.kube/config", "/home/u/.docker/config.json", "cat .env",
-                  "read .env.local", "/etc/shadow", "~/.netrc"):
+                  "read .env.local", "/etc/shadow", "~/.netrc",
+                  "cat ~/.config/2b/keys.json", "cp /Users/x/.config/2b/history.db ./x"):
             self.assertTrue(cmdguard.references_sensitive_path(p), p)
 
     def test_matches_prefixed_env_files(self):

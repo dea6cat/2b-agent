@@ -254,6 +254,7 @@ _SENSITIVE_RE = re.compile(
     r"|\.docker/config\.json\b"
     r"|(?:/|^|~)\.gnupg(?=$|[\s'\":/])"
     r"|(?:/|^|~)\.netrc\b"
+    r"|(?:/|^|~)\.config/2b(?=$|[/\s'\":])"   # 2B's own keys.json / history.db / prefs
     r"|(?:^|[\s=:'\"/])[\w.-]*\.env(?:\.\w+)?(?=$|[\s'\":/])"
     r"|/etc/(?:shadow|sudoers|master\.passwd)\b",
     re.I,

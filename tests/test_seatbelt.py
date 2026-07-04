@@ -101,7 +101,7 @@ class DenyRerunWiring(unittest.TestCase):
         fake = ["sbx", "-p", "pol", "--", "/bin/sh", "-c", "cmd"]
         calls = []
 
-        def runner(cmd, *, shell, timeout, cancel):
+        def runner(cmd, *, shell, timeout, cancel, env=None):
             calls.append(shell)
             # First (sandboxed, shell=False) denial; re-run (shell=True) succeeds.
             return (1, "Operation not permitted", "ok") if not shell else (0, "done", "ok")

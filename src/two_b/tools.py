@@ -13,6 +13,7 @@ import re
 import shlex
 import signal
 import subprocess
+import threading
 import time
 
 from . import seatbelt
@@ -606,39 +607,125 @@ def _killpg(proc) -> bool:
     return proc.poll() is not None   # SIGKILL didn't take (rare: D-state I/O wait)
 
 
-def _run_cancellable(cmd, *, shell, timeout, cancel):
+# --- subprocess environment hygiene (S2) ------------------------------------
+# Ambient shell secrets (AWS_*, GH_TOKEN, exported *_API_KEY, …) must never reach a
+# command 2B spawns. Default: drop credential-shaped var NAMES (usable — build tools
+# that need JAVA_HOME/VIRTUAL_ENV/etc. keep working). strict (TWOB_SEATBELT=strict):
+# keep only a known-safe allowlist. TWOB_NO_ENV_SCRUB=1 inherits the full environment.
+_ENV_SECRET_RE = re.compile(r"(?i)(?:^|_)(?:KEY|SECRET|TOKEN|PASSWD|PASSWORD|CREDENTIALS?|APIKEY)(?:$|_)")
+_ENV_ALLOW = {
+    "PATH", "HOME", "SHELL", "USER", "LOGNAME", "PWD", "OLDPWD", "TMPDIR", "TEMP", "TMP",
+    "TERM", "TERMINFO", "COLORTERM", "COLUMNS", "LINES", "TZ", "LANG", "LANGUAGE", "LC_ALL",
+    "EDITOR", "VISUAL", "PAGER", "DISPLAY", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "JAVA_HOME", "GRADLE_USER_HOME", "M2_HOME", "MAVEN_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT",
+    "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOROOT", "GOMODCACHE", "GOCACHE", "GOBIN",
+    "PUB_CACHE", "FLUTTER_ROOT", "NODE_PATH", "NVM_DIR", "PYENV_ROOT", "VIRTUAL_ENV",
+    "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "GEM_HOME", "GEM_PATH", "HOMEBREW_PREFIX",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "CI",
+}
+_ENV_ALLOW_PREFIX = ("LC_", "GIT_", "XDG_")
+_MAX_OUTPUT_BYTES = 2_000_000   # cap on captured child output — OOM guard vs `yes` / `cat /dev/urandom`
+
+
+def _env_flag(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() not in ("", "0", "no", "false", "off")
+
+
+def _is_secret_env_name(name: str) -> bool:
+    """A credential-shaped var NAME to drop by default. `*_FILE`/`*_PATH` are exempt:
+    by convention they hold a path to a credential (e.g. AWS_WEB_IDENTITY_TOKEN_FILE),
+    not the secret itself, and dropping them breaks legitimate auth/build flows."""
+    if name.upper().endswith(("_FILE", "_PATH")):
+        return False
+    return bool(_ENV_SECRET_RE.search(name))
+
+
+def _child_env():
+    """The environment to hand a spawned command, or None to inherit the parent's as-is
+    (TWOB_NO_ENV_SCRUB opt-out). Default drops credential-shaped names so ambient secrets
+    can't be read by a command 2B runs; strict (TWOB_SEATBELT=strict) keeps only an
+    allowlist of vars a shell/build legitimately needs."""
+    if _env_flag("TWOB_NO_ENV_SCRUB"):
+        return None
+    src = os.environ
+    if (os.environ.get("TWOB_SEATBELT") or "").strip().lower() == "strict":
+        return {k: v for k, v in src.items() if k in _ENV_ALLOW or k.startswith(_ENV_ALLOW_PREFIX)}
+    return {k: v for k, v in src.items() if not _is_secret_env_name(k)}
+
+
+def _run_cancellable(cmd, *, shell, timeout, cancel, env=None):
     """Run a subprocess in its own process group, polling `cancel` (a threading.Event
-    or None) so esc can kill it — and everything it spawned — within ~100ms instead
-    of waiting out `timeout`. Returns (returncode, combined_output, status) where
-    status is 'ok' | 'timeout' | 'cancelled'; returncode is None unless status='ok'.
-    Raises FileNotFoundError if the program isn't found (caller maps the message)."""
+    or None) so esc can kill it — and everything it spawned — within ~100ms instead of
+    waiting out `timeout`. Output (stdout+stderr) is drained on a reader thread and
+    capped at _MAX_OUTPUT_BYTES: past the cap we keep reading (so the child's pipe never
+    wedges) but stop storing, then stop the runaway. `env`, when not None, replaces the
+    child environment (see _child_env). Returns (returncode, combined_output, status)
+    where status is 'ok' | 'timeout' | 'cancelled' | 'kill_failed'. Raises
+    FileNotFoundError if the program isn't found (caller maps the message)."""
     if cancel is not None and cancel.is_set():   # already stopped — don't fork/exec
         return (None, "", "cancelled")
     proc = subprocess.Popen(
         cmd, shell=shell, cwd=os.getcwd(),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, start_new_session=True,
+        text=True, start_new_session=True, env=env,
     )
-    start = time.monotonic()
-    try:
-        while True:
-            if cancel is not None and cancel.is_set():
-                return (None, "", "cancelled" if _killpg(proc) else "kill_failed")
-            if timeout is not None and (time.monotonic() - start) > timeout:
-                return (None, "", "timeout" if _killpg(proc) else "kill_failed")
-            try:
-                out, _ = proc.communicate(timeout=0.1)
-                return (proc.returncode, out or "", "ok")
-            except subprocess.TimeoutExpired:
-                continue
-    finally:
-        # On the kill paths we bail before communicate() drains the pipe; close it
-        # so the fd doesn't leak. (No-op after a clean communicate().)
-        if proc.stdout is not None:
+    chunks, total, capped = [], [0], [False]
+
+    def _drain():
+        # Read to EOF so the pipe never fills (which would wedge the child); store only
+        # up to the cap, then keep reading and discarding. This thread OWNS proc.stdout:
+        # it closes it here when the read finishes. The main function must NOT close it —
+        # close() blocks on the same buffer lock this blocking read() holds, so closing a
+        # stream this thread is parked in would hang the caller whenever the child can't
+        # be killed (root/sudo child, D-state I/O). Leaving ownership here lets the caller
+        # return promptly with 'kill_failed' while this daemon cleans up when the child dies.
+        try:
+            while True:
+                chunk = proc.stdout.read(8192)
+                if not chunk:
+                    break
+                if total[0] < _MAX_OUTPUT_BYTES:
+                    chunks.append(chunk)
+                    total[0] += len(chunk)
+                    if total[0] >= _MAX_OUTPUT_BYTES:
+                        capped[0] = True
+        except (ValueError, OSError):
+            pass
+        finally:
             try:
                 proc.stdout.close()
             except Exception:
                 pass
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    start = time.monotonic()
+
+    def _collect():
+        reader.join(timeout=1.0)
+        text = "".join(chunks)
+        if capped[0]:
+            text += f"\n… [output truncated: exceeded ~{_MAX_OUTPUT_BYTES // 1_000_000}MB cap] …"
+        elif reader.is_alive():   # drain didn't finish in time — flag rather than imply complete
+            text += "\n… [output may be incomplete] …"
+        return text
+
+    while True:
+        if cancel is not None and cancel.is_set():
+            return (None, "", "cancelled" if _killpg(proc) else "kill_failed")
+        if timeout is not None and (time.monotonic() - start) > timeout:
+            return (None, "", "timeout" if _killpg(proc) else "kill_failed")
+        if capped[0]:                        # runaway output — stop it, keep what we have
+            killed = _killpg(proc)
+            out = _collect()
+            rc = proc.poll()
+            return (rc if rc is not None else 0, out, "ok" if killed else "kill_failed")
+        try:
+            proc.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            continue
+        return (proc.returncode, _collect(), "ok")
 
 
 _GIT_SHELL_OPS = {"&&", "||", "|", ";", "&", ">", ">>", "<", ">&", "&>", "|&"}
@@ -685,7 +772,7 @@ def do_run_git(args, max_chars=None, cancel=None):
                 "run_git \"diff --cached\".")
     try:
         rc, out, status = _run_cancellable(["git", *parts], shell=False,
-                                           timeout=GIT_TIMEOUT, cancel=cancel)
+                                           timeout=GIT_TIMEOUT, cancel=cancel, env=_child_env())
     except FileNotFoundError:
         return "error: git is not installed"
     except Exception as e:
@@ -720,9 +807,10 @@ def do_run_command(command, max_chars=None, cancel=None, on_denied=None):
         return "error: no command given"
     argv, _strict = seatbelt.wrap(command)
     sandboxed = argv is not None
+    env = _child_env()
     try:
         rc, out, status = _run_cancellable(argv if sandboxed else command,
-                                           shell=not sandboxed, timeout=CMD_TIMEOUT, cancel=cancel)
+                                           shell=not sandboxed, timeout=CMD_TIMEOUT, cancel=cancel, env=env)
     except Exception as e:
         return f"error: {e}"
     denied = sandboxed and status == "ok" and bool(rc) and seatbelt.looks_like_denial(rc, out)
@@ -730,7 +818,7 @@ def do_run_command(command, max_chars=None, cancel=None, on_denied=None):
     if denied and on_denied is not None and on_denied():
         denied = False
         try:
-            rc, out, status = _run_cancellable(command, shell=True, timeout=CMD_TIMEOUT, cancel=cancel)
+            rc, out, status = _run_cancellable(command, shell=True, timeout=CMD_TIMEOUT, cancel=cancel, env=env)
         except Exception as e:
             return f"error: {e}"
     if status == "kill_failed":

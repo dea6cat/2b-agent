@@ -1,17 +1,27 @@
 # Roadmap execution handoff
 
 Working state for resuming the `docs/performance-reliability-roadmap.md` execution in a
-fresh session. Last updated after the P19+P10+P11 cluster merged.
+fresh session. Last updated after the run_command safety release (P12 + S2) merged.
 
 ## Where things stand
 
-- **Branch/commit:** `main` at `527777c` (`local == origin`). Working tree clean.
-- **Tests:** full suite **471 green** — `python -m unittest discover -s tests -p "test_*.py"`.
-- **Shipped on `main` (22 phases):** P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P13,
-  P14, P15, P16, P17, P20, P22, P23, P25, P27. Each landed as one squash-free feature
-  commit (see `git log --oneline`), reviewed and validated (below).
+- **Branch/commit:** `main` at `a315a84` (`local == origin`). Working tree clean.
+- **Tests:** full suite **513 green** — `python -m unittest discover -s tests -p "test_*.py"`.
+- **Shipped on `main`:** P1–P11, P13–P17, P20, P22, P23, P25, P27 (perf/reliability roadmap),
+  **plus the security release: P12 (macOS seatbelt write-confinement) + its command-approval
+  layer, and S2 (subprocess env scrub + bounded output)** — see the two survey docs
+  `docs/sandbox-capabilities-roadmap.md` and `docs/security-hardening-roadmap.md`, and the
+  `2b-run-command-sandbox` memory. Each landed as one feature commit, reviewed and validated.
 
 ### What each recent cluster added (one line each)
+- **S2** (`a315a84`): subprocess env scrub (`tools._child_env` — denylist default / allowlist under
+  `TWOB_SEATBELT=strict` / `TWOB_NO_ENV_SCRUB` opt-out; applies to run_command AND run_git) +
+  bounded child output (~2MB reader-thread cap, OOM guard) + `~/.config/2b` as a sensitive path.
+- **P12 + command-approval** (`c03b89e`, docs `d1b2646`): `seatbelt.py` macOS `sandbox-exec`
+  write-confinement for run_command (permissive-base + deny-writes, on by default,
+  `TWOB_NO_SEATBELT`/`TWOB_SEATBELT=strict`, deny→ask-to-re-run); `cmdguard` folds network/
+  escalation/secrets-path into `is_high_risk`; file tools + `search_files` + `run_git` confirm on
+  a symlink-resolved secrets path (`orchestrator._is_sensitive`).
 - **P19+P10+P11** (`527777c`): `/tool` direct tool invocation, `/history search` scrollback
   nav, risk-class label on confirmations; `2b trace replay <id>` prompt-drift detection
   (salted prefix hash per session + `driftreplay.py`); TUI Esc-snap-to-bottom + double-Ctrl-C.
@@ -22,10 +32,10 @@ fresh session. Last updated after the P19+P10+P11 cluster merged.
 - **P5/P6/P22/P27** (`19cc21d`): prefix stability + keep-alive, token calibration, structured
   compaction summary.
 
-## Remaining work (consolidated priority order, item #12 — the last)
+## Remaining work
 
-Both are optional/conditional per the roadmap; **get an explicit go-ahead before starting** —
-neither is on the critical path.
+All optional/conditional; **get an explicit go-ahead before starting** — none is on the
+critical path. (P12 shipped; see above.)
 
 - **P18 — Scoped-prompt + bounded state** (roadmap line ~212). For `delegate`/sub-runner work:
   assemble a fresh minimal prompt with a compact ring-buffered state object regenerated each
@@ -33,10 +43,11 @@ neither is on the critical path.
   small `state.py` dataclass; new `tests/test_scoped_state.py`. **Note:** only worth doing if
   2B's subtask execution actually grows — otherwise defer. Check whether `subagents.py`/delegate
   is exercised enough to justify it before proposing.
-- **P12 — macOS `sandbox-exec` seatbelt** (roadmap line ~122). Optionally wrap `run_command` in
-  a `sandbox-exec` profile confining writes to the workspace root. Opt-in; degrade gracefully
-  where unavailable. Files: new `seatbelt.py`, wired in `tools.do_run_command`; tests gated on
-  Darwin. A genuine safety lead if pursued; off the critical path.
+- **Security follow-ons** (`docs/security-hardening-roadmap.md`, §D). Mostly shipped via P12+S2.
+  Still open: **S1 read-side workspace jail** — deliberately NOT done because it reverses 2B's
+  documented "point-anywhere" file access; S7 (shipped) already confirms *secrets* reads, so a
+  blanket read-jail needs an explicit `AskUserQuestion` before starting. Lower-priority items
+  (path-scoped grants, TUI polish from `docs/sandbox-capabilities-roadmap.md`) remain optional.
 
 There are also documented *reinforcements* folded into shipped phases (see the roadmap's
 "Reference implementations & reinforcements" section) — not separate phases.
@@ -90,5 +101,7 @@ There are also documented *reinforcements* folded into shipped phases (see the r
 ## To resume
 
 Read `docs/performance-reliability-roadmap.md` (full specs) + this file, confirm `main` is at
-`527777c` and 471 tests pass, then ask the user which of P18 / P12 (if any) to take — do not
-start either without an explicit go-ahead.
+`a315a84` and 513 tests pass, then ask the user which remaining item (if any) to take — P18, or
+the S1 read-side jail (needs the point-anywhere trade-off decision). Do not start without an
+explicit go-ahead. The `codeObserver` review loop is the highest-value QA step (it caught 10 real
+issues across the P12+S2 rounds, including a critical subprocess hang) — always run it on the diff.

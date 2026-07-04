@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import catalog, changelog, conversation, diagnostics, mcp_client, planparse, registry, tools, verify
+from . import catalog, changelog, cmdguard, conversation, diagnostics, mcp_client, planparse, registry, tools, verify
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers.base import ProviderError, stream_with_retry
 from .session import PendingConfirmation, Session, Task, TaskState
@@ -485,14 +485,18 @@ def _maybe_compact(conv: Conversation, provider, model: str, task: Task,
 # --- confirmation routed to the UI thread -----------------------------------
 
 def request_confirmation(session: Session, task: Task, prompt: str, diff: str,
-                         grant_key: str | None = None) -> bool:
+                         grant_key: str | None = None, force: bool = False) -> bool:
     """Called from a worker thread. Auto-approve when accept-edits mode is on, or when
     `grant_key` was 'allowed for this session' (via the confirm's 'a', or config
     `allowed_tools`). Otherwise hand a PendingConfirmation to the UI thread and block
-    until answered (a backgrounded task simply waits here until foregrounded)."""
+    until answered (a backgrounded task simply waits here until foregrounded).
+
+    `force` (a high-risk command, e.g. force-push / rm -rf <dir>) skips the session
+    "allow" grant so it always re-prompts — but still honors accept-edits mode, since
+    that's an explicit blanket approval and forcing a prompt would hang a headless run."""
     if session.approve_writes:
         return True
-    if grant_key and grant_key in session.granted:
+    if not force and grant_key and grant_key in session.granted:
         return True
     pc = PendingConfirmation(prompt=prompt, diff=diff, grant_key=grant_key)
     task.pending = pc
@@ -553,6 +557,24 @@ def _record_edit(session: Session, task: Task, path: str, pre: str | None) -> No
     tid = getattr(task, "id", "")
     if tid:
         changelog.save(tid, getattr(session, "cwd", ".") or ".", task.edit_history)
+
+
+def _jail_blocked(session: Session, grant_key: str, path: str) -> str:
+    """Path jail for UNATTENDED writes only. When a write would apply without a human
+    confirmation — accept-edits mode, or a per-session 'allow' grant for this tool — confine
+    it to the workspace root, since an unattended write escaping cwd (via ../ or a symlink)
+    has no human gate to catch it. Interactive normal mode is unaffected: the write is still
+    individually confirmed, and 2B stays a personal tool you can point outside the project.
+    Returns an error string to refuse, or '' to proceed."""
+    unattended = session.approve_writes or bool(grant_key and grant_key in session.granted)
+    if not unattended:
+        return ""
+    if cmdguard.escapes_root(tools._safe_path(path) or path, os.path.abspath(session.cwd or ".")):
+        return (f"error: refused — {path} is outside the workspace and this write would apply without "
+                "confirmation (accept-edits/granted). Auto-applied writes are confined to the project so "
+                "an unattended one can't escape it. Turn off accept-edits to confirm it individually, or "
+                "write inside the project.")
+    return ""
 
 
 def _refresh_mtime(task: Task, path: str) -> None:
@@ -657,6 +679,9 @@ def _run_reads_concurrently(session: Session, task: Task, calls, read_cap):
 # --- write/edit wrappers: snapshot for /undo, confirm via UI, then apply -----
 
 def apply_write(session: Session, task: Task, path: str, content: str) -> str:
+    jail = _jail_blocked(session, "write_file", path)
+    if jail:
+        return jail
     stale = _stale_check(task, path)
     if stale:
         return stale
@@ -697,6 +722,9 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
         return "error: empty or invalid path"
     if not os.path.isfile(full):
         return f"error: no such file: {path}"
+    jail = _jail_blocked(session, "edit_file", path)
+    if jail:
+        return jail
     stale = _stale_check(task, path)
     if stale:
         return stale
@@ -817,7 +845,11 @@ def _run_git(session: Session, task: Task, git_args: str, read_cap: int | None) 
     if session.read_only:
         return (f"error: plan mode is on — not running mutating git (git {git_args}). Use read-only "
                 "git (status/diff/log) to inspect, and present a plan in your final answer.")
-    if not request_confirmation(session, task, f"Run: git {git_args}?", f"$ git {git_args}", grant_key="run_git"):
+    # A destructive-but-legitimate git op (force-push, reset --hard, clean -fdx, branch -D,
+    # history rewrite) re-prompts even if run_git was 'allowed for this session'.
+    force = cmdguard.git_is_high_risk(git_args)
+    prompt = ("Run this HIGH-RISK git command?" if force else "Run:") + f" git {git_args}?"
+    if not request_confirmation(session, task, prompt, f"$ git {git_args}", grant_key="run_git", force=force):
         return "git command rejected by user"
     return tools.do_run_git(git_args, max_chars=read_cap, cancel=task.cancel_flag)
 
@@ -883,7 +915,15 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
         cmd = (args.get("command") or "").strip()
         if not cmd:
             return "error: no command given"
-        if not request_confirmation(session, task, "Run this shell command?", f"$ {cmd}", grant_key="run_command"):
+        verdict, reason = cmdguard.classify_command(cmd)
+        if verdict == "block":                       # catastrophic — un-bypassable, never runs
+            return (f"error: refused — this command is blocked for safety ({reason}). It will not run "
+                    "under any mode. Do the work with the file tools, or use a safe, specific command.")
+        if verdict == "allow":                       # trivial read-only probe — no prompt
+            return tools.do_run_command(cmd, max_chars=read_cap, cancel=task.cancel_flag)
+        # A high-risk command re-prompts even if run_command was 'allowed for this session'.
+        if not request_confirmation(session, task, "Run this shell command?", f"$ {cmd}",
+                                    grant_key="run_command", force=cmdguard.is_high_risk(cmd)):
             return "command rejected by user"
         return tools.do_run_command(cmd, max_chars=read_cap, cancel=task.cancel_flag)
     if mcp_client.manager.is_mcp_tool(name):        # curated MCP tool -> route to its server

@@ -152,6 +152,16 @@ class OllamaProvider:
         (Ollama otherwise defaults to a small ~4k window regardless of the
         model's trained max)."""
         opts = {"temperature": 0.2, "repeat_penalty": 1.1}
+        # Opt-in reproducible sampling for the eval harness only (P9 multi-seed variance):
+        # when TWOB_SAMPLING_SEED is set, pin that seed so a run is reproducible and distinct
+        # seeds measure across-seed variance. Unset in production — see the docstring on why
+        # a fixed seed would make a malformed-call repair regenerate the same bad call.
+        seed = os.environ.get("TWOB_SAMPLING_SEED")
+        if seed:
+            try:
+                opts["seed"] = int(seed)
+            except ValueError:
+                pass
         if self.api_key is None:
             opts["num_ctx"] = self.context_window(model)
         return opts

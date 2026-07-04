@@ -181,6 +181,39 @@ class Aggregation(unittest.TestCase):
         self.assertIsNone(per[("m", "full")]["tool_call_valid"])
 
 
+class Significance(unittest.TestCase):
+    """P9: CIs, across-seed variance, and the McNemar full-vs-ablation paired test."""
+    def _rows(self, condition, per_seed_success, seeds=(0, 1, 2)):
+        # per_seed_success: {seed: [success bools for t0, t1, ...]}
+        out = []
+        for s in seeds:
+            for i, ok in enumerate(per_seed_success[s]):
+                out.append({"task_id": f"t{i}", "tier": "A", "model": "m", "condition": condition,
+                            "seed": s, "success": ok, "landed": ok, "analyze_clean": True,
+                            "tool_call_valid": 1.0, "steps": 3})
+        return out
+
+    def test_ci_and_variance_present_per_cell(self):
+        rows = self._rows("full", {0: [True, True], 1: [True, False], 2: [True, True]})
+        sig = evals.significance(rows)
+        self.assertIn(("m", "full"), sig["cis"])
+        lo, hi = sig["cis"][("m", "full")]
+        self.assertLessEqual(lo, hi)
+        self.assertGreaterEqual(sig["variance"][("m", "full")]["n"], 3)   # variance over 3 seeds
+
+    def test_mcnemar_pairs_full_against_ablation(self):
+        # full passes both tasks every seed; ablation fails t1 every seed -> discordant, one-sided.
+        rows = (self._rows("full", {0: [True, True], 1: [True, True], 2: [True, True]})
+                + self._rows("no_diagnostics", {0: [True, False], 1: [True, False], 2: [True, False]}))
+        sig = evals.significance(rows)
+        m = next(x for x in sig["mcnemar"] if x["condition"] == "no_diagnostics")
+        self.assertEqual(m["c"], 0)          # ablation never beat full
+        self.assertEqual(m["b"], 3)          # full beat ablation on t1 across 3 seeds
+        # 3 discordant pairs all one way -> exact two-sided p = 2*(1/8) = 0.25 (honestly not
+        # significant at n=3; the exact test can't manufacture significance from thin data).
+        self.assertAlmostEqual(m["p_value"], 0.25, places=3)
+
+
 class Cli(unittest.TestCase):
     def _quiet(self, argv):
         import contextlib

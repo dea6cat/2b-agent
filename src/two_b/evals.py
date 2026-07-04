@@ -26,6 +26,7 @@ import argparse
 import csv
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,9 +38,16 @@ from typing import Callable
 
 DEFAULT_TIMEOUT = 180
 _OLLAMA_HOST = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434")
+# The `2b` binary the harness drives. Override (TWOB_EVAL_CLI) to score a specific build —
+# e.g. a dev checkout — instead of whatever `2b` is on PATH, so a build can be evaluated
+# before it's published.
+_CLI = os.environ.get("TWOB_EVAL_CLI", "2b")
 
 
 def _have(cmd: str) -> bool:
+    # An override may be a full path or a multi-word command; only a bare name is a PATH lookup.
+    if os.sep in cmd or " " in cmd:
+        return True
     return shutil.which(cmd) is not None
 
 
@@ -150,8 +158,12 @@ EXPECTED: dict[str, tuple[str, str]] = {
     "no_semantics":   ("steps", "higher"),     # expected to cost more steps (esp. tier C)
 }
 
-ROW_FIELDS = ["task_id", "tier", "model", "condition", "success", "landed",
+ROW_FIELDS = ["task_id", "tier", "model", "condition", "seed", "success", "landed",
               "analyze_clean", "tool_call_valid", "steps", "latency_s", "notes"]
+
+# Sampling the harness pins (mirrors providers/ollama._options); recorded in the env
+# snapshot so a published number is tied to the params that produced it.
+SAMPLING = {"temperature": 0.2, "repeat_penalty": 1.1}
 
 
 # --- scoring primitives (pure; unit-tested) ----------------------------------
@@ -217,9 +229,12 @@ def _safe(fn, *a) -> bool:
 
 # --- run a task through the real agent (integration) -------------------------
 
-def run_one(task: Task, model: str, condition: str, timeout: int = DEFAULT_TIMEOUT) -> dict:
-    """Drive `2b` headlessly on one task under one condition; score the result.
-    Needs a live model and `2b` on PATH (integration, not unit-tested)."""
+def run_one(task: Task, model: str, condition: str, timeout: int = DEFAULT_TIMEOUT,
+            seed: int | None = None, out_dir: str | None = None) -> dict:
+    """Drive `2b` headlessly on one task under one condition; score the result. Each run gets
+    its own mkdtemp workspace, deleted after the trace is copied out (to `out_dir`, if given).
+    `seed` pins reproducible sampling for multi-seed variance. Needs a live model and `2b` on
+    PATH (integration, not unit-tested)."""
     d = tempfile.mkdtemp(prefix="2b-eval-")
     try:
         for rel, content in task.files.items():
@@ -230,13 +245,15 @@ def run_one(task: Task, model: str, condition: str, timeout: int = DEFAULT_TIMEO
         trace = os.path.join(d, ".2b-trace.jsonl")
         env = {**os.environ, "OLLAMA_API_BASE": _OLLAMA_HOST,
                "TWOB_TRACE": trace, **CONDITIONS[condition]}
+        if seed is not None:
+            env["TWOB_SAMPLING_SEED"] = str(seed)
         t0 = time.time()
         proc, note = None, ""
         try:
             # stdin=DEVNULL is load-bearing: without it the headless `2b` finishes the
             # task then blocks in its REPL on the inherited tty until the timeout fires.
-            proc = subprocess.run(["2b", "--classic", "--model", model, "--yes", task.prompt],
-                                  cwd=d, capture_output=True, text=True, timeout=timeout,
+            cli = shlex.split(_CLI) + ["--classic", "--model", model, "--yes", task.prompt]
+            proc = subprocess.run(cli, cwd=d, capture_output=True, text=True, timeout=timeout,
                                   stdin=subprocess.DEVNULL, env=env)
         except subprocess.TimeoutExpired:
             note = f"timed out after {timeout}s"
@@ -250,21 +267,32 @@ def run_one(task: Task, model: str, condition: str, timeout: int = DEFAULT_TIMEO
         landed = _safe(task.verify, d)
         clean = _dart_analyze_clean(d)
         steps, valid = read_trace(trace)
+        # Copy the trace OUT before the workspace is deleted, so the run stays auditable.
+        if out_dir and os.path.exists(trace):
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+                tag = f"{task.id}.{condition}.seed{'NA' if seed is None else seed}.jsonl"
+                shutil.copyfile(trace, os.path.join(out_dir, tag))
+            except OSError:
+                pass
         return {"task_id": task.id, "tier": task.tier, "model": model, "condition": condition,
-                "success": landed and clean, "landed": landed, "analyze_clean": clean,
+                "seed": seed, "success": landed and clean, "landed": landed, "analyze_clean": clean,
                 "tool_call_valid": valid, "steps": steps, "latency_s": wall, "notes": note}
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def run_matrix(models, tasks=None, conditions=None) -> list[dict]:
+def run_matrix(models, tasks=None, conditions=None, seeds=(0,), out_dir=None) -> list[dict]:
+    """Sequential execution against the local backend: every (model, condition, seed, task)
+    cell, one at a time (no parallelism — it would contend for the single local model)."""
     tasks = tasks if tasks is not None else TASKS
     conditions = conditions or list(CONDITIONS)
     rows = []
     for m in models:
         for c in conditions:
-            for t in tasks:
-                rows.append(run_one(t, m, c))
+            for s in seeds:
+                for t in tasks:
+                    rows.append(run_one(t, m, c, seed=s, out_dir=out_dir))
     return rows
 
 
@@ -303,6 +331,41 @@ def summarize(rows: list[dict]) -> tuple[dict, list[dict]]:
     return per, checks
 
 
+def significance(rows: list[dict]) -> dict:
+    """Statistical rigor over the raw rows (P9): a seeded bootstrap CI on success per
+    (model, condition) cell, across-seed variance of that cell's per-seed success, and a
+    McNemar paired test of `full` vs each ablation (paired by task_id+seed). Pure — delegates
+    the math to evalstats — so it's unit-testable without a live model."""
+    from . import evalstats
+    by: dict[tuple, list[dict]] = {}
+    for r in rows:
+        by.setdefault((r["model"], r["condition"]), []).append(r)
+    cis, variance = {}, {}
+    for key, rs in by.items():
+        succ = [1.0 if r["success"] else 0.0 for r in rs]
+        cis[key] = evalstats.bootstrap_ci(succ, seed=0)
+        per_seed: dict = {}
+        for r in rs:
+            per_seed.setdefault(r.get("seed"), []).append(1.0 if r["success"] else 0.0)
+        variance[key] = evalstats.seed_summary([sum(v) / len(v) for v in per_seed.values()])
+    mcnemar = []
+    for model in sorted({m for (m, _c) in by}):
+        base = {(r["task_id"], r.get("seed")): bool(r["success"]) for r in by.get((model, "full"), [])}
+        for cond in CONDITIONS:
+            if cond == "full":
+                continue
+            cell = by.get((model, cond))
+            if not cell or not base:
+                continue
+            pairs = [(base[k], bool(r["success"])) for r in cell
+                     if (k := (r["task_id"], r.get("seed"))) in base]
+            if pairs:
+                res = evalstats.mcnemar(pairs)
+                res.update({"model": model, "condition": cond})
+                mcnemar.append(res)
+    return {"cis": cis, "variance": variance, "mcnemar": mcnemar}
+
+
 def write_csv(rows: list[dict], path: str) -> None:
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=ROW_FIELDS)
@@ -313,13 +376,23 @@ def write_csv(rows: list[dict], path: str) -> None:
 
 def _print_report(rows: list[dict], csv_path: str) -> None:
     per, checks = summarize(rows)
+    sig = significance(rows)
     print(f"\n{len(rows)} runs — row detail written to {csv_path}\n")
-    print(f"{'model':22} {'condition':16} {'n':>3} {'success':>8} {'valid':>7} {'steps':>7}")
+    print(f"{'model':22} {'condition':16} {'runs':>4} {'success':>8} {'95% CI':>16} "
+          f"{'sd(seed)':>9} {'valid':>7} {'steps':>7}")
     for (model, cond) in sorted(per):
         c = per[(model, cond)]
         valid = "  —  " if c["tool_call_valid"] is None else f"{c['tool_call_valid']:.2f}"
-        print(f"{model:22} {cond:16} {c['n']:>3} {c['success']:>8.2f} "
-              f"{valid:>7} {c['steps']:>7.1f}")
+        lo, hi = sig["cis"].get((model, cond), (0.0, 0.0))
+        sd = sig["variance"].get((model, cond), {}).get("stdev", 0.0)
+        print(f"{model:22} {cond:16} {c['n']:>4} {c['success']:>8.2f} "
+              f"{f'[{lo:.2f}, {hi:.2f}]':>16} {sd:>9.3f} {valid:>7} {c['steps']:>7.1f}")
+    if sig["mcnemar"]:
+        print("\nMcNemar — full vs ablation (paired per task+seed); p<0.05 = a real difference:")
+        for m in sig["mcnemar"]:
+            verdict = "significant" if m["p_value"] < 0.05 else "not significant (within noise)"
+            print(f"  {m['model']:22} full vs {m['condition']:16} "
+                  f"b={m['b']} c={m['c']} n={m['n']} p={m['p_value']:.3f} — {verdict}")
     if checks:
         print("\n§5 — did each ablation move its expected metric vs full?")
         for ck in checks:
@@ -338,6 +411,10 @@ def main(argv=None) -> int:
     ap.add_argument("--tiers", nargs="+", choices=["A", "B", "C"], help="Restrict to task tiers")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Per-run wall cap in seconds")
     ap.add_argument("--csv", default="2b-eval-results.csv", help="Where to write the row-level CSV")
+    ap.add_argument("--seeds", type=int, default=3, help="Sampling seeds per case (N>=3 gives variance)")
+    ap.add_argument("--out-dir", default="2b-eval-traces", help="Where per-run traces are copied out")
+    ap.add_argument("--publish", action="store_true",
+                    help="Refuse to run unless the working tree is clean (results tied to a commit)")
     ap.add_argument("--list", action="store_true", help="List the task set and exit")
     args = ap.parse_args(argv)
 
@@ -349,15 +426,33 @@ def main(argv=None) -> int:
         print("error: pass --models (e.g. --models qwen3.5:9b). Use --list to see the tasks.",
               file=sys.stderr)
         return 2
-    if not _have("2b"):
-        print("error: `2b` is not on PATH — the harness drives the real CLI.", file=sys.stderr)
+    if not _have(_CLI):
+        print(f"error: `{_CLI}` is not on PATH — the harness drives the real CLI.", file=sys.stderr)
         return 2
+
+    from . import evalstats
+    seeds = list(range(max(1, args.seeds)))
+    snapshot = evalstats.env_snapshot({**SAMPLING, "seeds": seeds})
+    ok, reason = evalstats.can_publish(snapshot)
+    if args.publish and not ok:
+        print(f"error: --publish refused: {reason}", file=sys.stderr)
+        return 3
+    sha = (snapshot["git_sha"] or "unknown")[:12]
+    dirty = snapshot["dirty_files"]
+    tree = "state unknown" if dirty is None else ("clean" if dirty == 0 else f"{dirty} dirty")
+    print(f"env: git {sha} ({tree}) · sampling {SAMPLING} · seeds {seeds}")
 
     tasks = [t for t in TASKS if not args.tiers or t.tier in args.tiers]
     if not tasks:
         print("error: no tasks match --tiers.", file=sys.stderr)
         return 2
-    rows = run_matrix(args.models, tasks, args.conditions)
+    rows = run_matrix(args.models, tasks, args.conditions, seeds=seeds, out_dir=args.out_dir)
     write_csv(rows, args.csv)
+    # Persist the reproducibility snapshot beside the CSV.
+    try:
+        with open(os.path.splitext(args.csv)[0] + "-env.json", "w") as f:
+            json.dump(snapshot, f, indent=2)
+    except OSError:
+        pass
     _print_report(rows, args.csv)
     return 0

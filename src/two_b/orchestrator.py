@@ -356,14 +356,18 @@ def pick_default_model() -> str:
     return DEFAULT_MODEL if DEFAULT_MODEL in models else models[0]
 
 
-PROJECT_DOC_MAX = 2800   # cap on the /init 2B.md folded into the system prompt
-MCP_LOCAL_CAP = 6        # max MCP tools shown to a local model (protect its context/focus)
+PROJECT_DOC_MAX = 2800            # cap on the /init 2B.md folded into the system prompt
+PROJECT_INSTRUCTIONS_MAX = 4000   # cap on a project CLAUDE.md/AGENTS.md folded in (P8)
+MCP_LOCAL_CAP = 6                 # max MCP tools shown to a local model (protect its context/focus)
 
 
-def _project_context() -> str:
-    """The /init project map (2B.md), capped, to orient the model up front — so it
-    knows the layout instead of hunting for files. AGENTS.md is a fallback."""
-    for name in ("2B.md", "AGENTS.md"):
+def _read_project_file(names: tuple[str, ...], cap: int, skip: str | None = None) -> tuple[str, str | None]:
+    """First existing, non-empty file in `names` (project root), capped. Returns
+    (text, filename_used) or ("", None). `skip` excludes a filename already consumed
+    elsewhere, so a file that's a fallback for two slots isn't injected twice."""
+    for name in names:
+        if name == skip:
+            continue
         path = os.path.join(os.getcwd(), name)
         if not os.path.isfile(path):
             continue
@@ -373,8 +377,24 @@ def _project_context() -> str:
         except OSError:
             continue
         if doc:
-            return doc[:PROJECT_DOC_MAX] + ("\n… [truncated]" if len(doc) > PROJECT_DOC_MAX else "")
-    return ""
+            return doc[:cap] + ("\n… [truncated]" if len(doc) > cap else ""), name
+    return "", None
+
+
+def _project_context() -> tuple[str, str | None]:
+    """The /init project map (2B.md), capped, to orient the model up front — so it
+    knows the layout instead of hunting for files. AGENTS.md is a fallback. Returns
+    (text, filename_used)."""
+    return _read_project_file(("2B.md", "AGENTS.md"), PROJECT_DOC_MAX)
+
+
+def _project_instructions(skip: str | None = None) -> str:
+    """Project-root coding instructions (P8): a CLAUDE.md, fallback AGENTS.md, read once
+    and injected verbatim (capped) so the model follows the project's conventions. `skip`
+    drops a file already used as the project map, so AGENTS.md isn't folded in twice.
+    No keywords, no watching, no state — just read-once-at-start."""
+    text, _name = _read_project_file(("CLAUDE.md", "AGENTS.md"), PROJECT_INSTRUCTIONS_MAX, skip=skip)
+    return text
 
 
 def _active_specs(is_local: bool):
@@ -1233,9 +1253,14 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     sub_provider, sub_model = _resolve_subagent_model(reg, provider, model)
 
     if task.conversation is None:
-        doc = _project_context()
-        sysprompt = SYSTEM_PROMPT + (f"\n\n# Project map (from /init)\n{doc}" if doc else "")
-        task.conversation = Conversation(system_prompt=sysprompt)
+        doc, doc_name = _project_context()
+        instr = _project_instructions(skip=doc_name)   # don't fold AGENTS.md in as both map and instructions
+        parts = [SYSTEM_PROMPT]
+        if doc:
+            parts.append(f"# Project map (from /init)\n{doc}")
+        if instr:
+            parts.append(f"### project instructions\n{instr}")
+        task.conversation = Conversation(system_prompt="\n\n".join(parts))
     conv = task.conversation
     desc = task.description
     if session.read_only:

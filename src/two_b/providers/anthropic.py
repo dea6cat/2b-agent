@@ -9,6 +9,7 @@ traces anyway.
 import os
 from typing import Callable
 
+from .. import catalog
 from ..conversation import Conversation, Message, Role, ToolCall
 from ..toolspec import ToolSpec, to_anthropic
 from .base import ProviderResponse, post_json
@@ -65,7 +66,7 @@ class AnthropicProvider:
             tools_json[-1] = {**tools_json[-1], "cache_control": {"type": "ephemeral"}}
         payload = {
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": catalog.max_tokens(model, 4096),
             "system": [{"type": "text", "text": conversation.system_prompt,
                         "cache_control": {"type": "ephemeral"}}],
             "tools": tools_json,

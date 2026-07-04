@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import conversation, diagnostics, mcp_client, planparse, registry, tools
+from . import catalog, conversation, diagnostics, mcp_client, planparse, registry, tools
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers.base import ProviderError, stream_with_retry
 from .session import PendingConfirmation, Session, Task, TaskState
@@ -267,18 +267,20 @@ def _active_specs(is_local: bool):
 
 
 def context_budget(provider, model: str) -> int:
-    """Token budget for a provider/model. For local Ollama this is the window 2B
-    actually pins via num_ctx — detected from the model (min of its trained max and
-    a RAM-safe cap), or TWOB_CONTEXT_TOKENS if set — so the budget matches reality."""
+    """Token budget for a provider/model. Ollama (local or cloud) sizes its own
+    window — local from the model's trained max capped to what RAM allows (or
+    TWOB_CONTEXT_TOKENS), cloud a fixed large window. For cloud providers the
+    per-model catalog gives the model's real window; unknown models fall back to
+    the coarse per-provider constant, so the budget matches reality either way."""
     name = getattr(provider, "name", "")
-    if name == "ollama" and hasattr(provider, "context_window"):
+    if name.startswith("ollama") and hasattr(provider, "context_window"):
         try:
             return provider.context_window(model)
         except Exception:
             pass
-    env = os.environ.get("TWOB_CONTEXT_TOKENS")
-    if name == "ollama" and env and env.isdigit():
-        return int(env)
+    win = catalog.context_window(model)
+    if win:
+        return win
     return CONTEXT_BUDGETS.get(name, 8000)
 
 

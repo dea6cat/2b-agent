@@ -88,17 +88,11 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 
 > **5.1 (per-session allow) is shipped.** The inline confirm now offers a third key — `a` "allow all edits/writes/git/commands this session" — alongside `y`/`n`. `Session.granted` holds the tool keys allowed this session; `request_confirmation(grant_key=…)` auto-approves a granted tool without prompting; a config `allowed_tools` list pre-grants at startup. Per-tool granularity (not the coarse accept-edits mode), so you can trust `run_command` while still reviewing edits. Tests: `tests/test_grants.py`.
 
-#### 5.2 PreToolUse hooks  (T14) — *remaining*
-- **Spec:** Optional `hooks` config: shell commands run before a tool call that can block (exit 2), allow, or inject context (stdout). Host-side; off by default.
-- **Files:** new `hooks.py`, `orchestrator._dispatch_tool`, `config.py`.
-- **Effort:** M. **Note:** power-user; low priority.
+> **5.2 (PreToolUse hooks) was skipped by design.** A configurable shell-command-before-every-tool extension point is a team/policy feature; for a personal, local-first agent it adds config surface and a shell path for a thin audience, and the safety needs it would serve are already covered by plan mode, per-command confirmation, 5.1 grants, and the `run_git` git-only guard. Phase 5 is complete with 5.1.
 
 ### Phase 6 — Model catalog (optional)
 
-#### 6.1 Per-model context-window/capability catalog  (T12)
-- **Spec:** A small bundled JSON (model → context_window, supports_images, default_max_tokens) so auto-compaction/read-caps are accurate per cloud model instead of per-provider constants. Ollama stays dynamic (`num_ctx`).
-- **Files:** `catalog.json` + `registry.py`/`orchestrator.context_budget`.
-- **Effort:** S–M.
+> **6.1 (per-model catalog) is shipped.** A bundled `catalog.json` (model → context_window, default_max_tokens, supports_images) with a longest-prefix `catalog.py` loader gives cloud models their real context window for auto-compaction and read-caps, instead of a coarse per-provider constant. `orchestrator.context_budget` consults it (Ollama, local and cloud, still sizes its own window dynamically and is absent from the catalog); `providers/anthropic.py` uses `catalog.max_tokens` for its output cap; `--print-ctx` surfaces window/output/image support for catalogued models (ollama-first so a locally-pulled name collision reports real `num_ctx`). A missing/corrupt catalog degrades to "unknown" and never crashes startup. Tests: `tests/test_catalog.py`. (Landed as `catalog.py`, not `registry.py` — that name was already the provider registry.)
 
 ---
 
@@ -109,6 +103,7 @@ Effort: S = <½ day, M = 1–2 days, ★ scale = value to 2B.
 3. **Phase 4.1** — one-afternoon TUI win (context meter) that serves the local-window thesis.
 4. ~~Phase 3 (persistence + resume/list + multi-level undo)~~ — **shipped**; stdlib-only.
 5. ~~Phase 4 (context meter, inline diff, tool spinners+detail, @-completion, notifications, session list)~~ — **shipped.**
-6. **Phase 5 / 6** — optional, as needed.
+6. ~~Phase 5 (per-session allow grants)~~ — **shipped** (5.1); 5.2 hooks skipped by design.
+7. ~~Phase 6 (per-model context-window/capability catalog)~~ — **shipped.**
 
 Each phase item is independently shippable on its own branch and testable without a live model (the reliability + safety + persistence items are all unit-testable host-side).

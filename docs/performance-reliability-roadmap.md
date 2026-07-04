@@ -1,9 +1,19 @@
-# atomic-agent → 2B: speed & reliability — what to take, what not, and a roadmap
+# Local-agent survey → 2B: speed & reliability — what to take, what not, and a roadmap
 
 **Date:** 2026-07-03
-**Source analyzed:** `/Users/do519-lap/repo_apps/atomic-agent` (AtomicBot-ai — TypeScript/Node, ~1100 TS files, local-first, **llama.cpp-first** via a raw `llama-server` `/completion` endpoint, ink TUI, GBNF-constrained tool calls, memory/intent/skills fabrics, MCP, HTTP + Tauri sidecar).
-**Why we looked:** it publishes a **GAIA validation Level-1** benchmark (53 tasks, same local `qwen-3.6-35b`) claiming **69.8% vs 58.5%** accuracy and **~217 s vs ~351 s / task** against the "Hermes" agent (NousResearch) — i.e. "+11.3pp, ~1.6× faster, same model." If the *agent loop* alone buys that, it's worth mining.
+**Sources analyzed:**
+- **Part I** — `/Users/do519-lap/repo_apps/atomic-agent` (AtomicBot-ai — TypeScript/Node, ~1100 TS files, local-first, **llama.cpp-first** via a raw `llama-server` `/completion` endpoint, ink TUI, GBNF-constrained tool calls, memory/intent/skills fabrics, MCP, HTTP + Tauri sidecar).
+- **Part II** — `/Users/do519-lap/repo_apps/loom` (Python, ~500 files, local-ready LLM *execution harness*: decompose → dependency-graph → parallel subtasks → independent verification → replan, model routing, fuzzy edit tool, lossless SQLite memory + recall tool, Textual TUI, REST/MCP). Same "the harness drives, not the model" thesis as 2B — and being Python, its code is directly liftable.
+- **Part III** — `/Users/do519-lap/repo_apps/successor-agent` (Python, ~210 files, terminal chat harness for local + OpenAI-compatible models; **zero third-party runtime deps — pure stdlib**, a custom five-layer cell renderer, native file + shell tools with concurrent multi-tool dispatch, a three-tier autocompactor, a declared verification contract, always-on session traces + a reviewer app, and a 10-step setup wizard). Shares 2B's thesis most closely (Python, terminal-first, stdlib-only) — the sharpest "already-parity / already-ahead" comparison, with a few liftable stdlib gems.
+- **Part IV** — `/Users/do519-lap/repo_apps/hermes-agent` (Nous Research — Python, **2800+ files**, a cloud-first *self-improving assistant* + multi-platform gateway: Telegram/Discord/Slack/WhatsApp/Signal, a cron scheduler, six execution backends incl. serverless Modal/Daytona, a learning loop that writes its own skills, Honcho user modeling, a TS/Ink TUI over a Python gateway, batch trajectory generation for model training; god-files up to 721KB). The *furthest* from 2B's thesis of the four — mostly SKIP — but two genuine gems and several reference implementations survive the filter.
+**Why we looked:** atomic-agent publishes a **GAIA Level-1** benchmark claiming **+11.3pp accuracy, ~1.6× faster** vs Hermes; Loom markets fuzzy edits, lossless memory, harness-driven verification; Successor markets a pure-stdlib renderer, evidence-backed verification, durable recordings; Hermes markets a self-improving learning loop, interrupt-and-redirect, and programmatic tool calling. If the *agent loop / host-side machinery* alone buys reliability on small models, it's worth mining.
 **Filter applied:** 2B's thesis — *frozen 5-tool schema, all complexity host-side, native Ollama `/api/chat` (no shim), local-first, small-model reliability, stdlib-heavy, macOS-first.* Anything that widens the model's world or bolts on a service is rejected unless it lives entirely host-side.
+
+> **Reading guide.** Part I (atomic-agent) defines phases **P1–P12**. Part II (Loom) adds **P13–P19**. Part III (Successor) adds **P20–P24**. Part IV (Hermes) adds **P25–P28**. Where a later source independently confirms an earlier finding, it says so and **reinforces** the existing phase rather than duplicating it. The consolidated priority order (P1–P28) is at the very end.
+
+---
+
+# Part I — atomic-agent → 2B
 
 ---
 
@@ -116,7 +126,7 @@ Ordered by ROI. P1–P4 are the reliability/speed core and the highest-value wor
 
 ---
 
-## Suggested order
+## Part I suggested order (P1–P12)
 
 1. **P1 + P2** — tool-call robustness + never-throw closure. Highest thesis-fit, pure host-side, directly raises small-model reliability (the real accuracy lever, vs the grammar we can't take).
 2. **P3** — parallel read batching. The biggest *speed* win; where atomic-agent's ~1.6× mostly comes from.
@@ -128,3 +138,284 @@ Ordered by ROI. P1–P4 are the reliability/speed core and the highest-value wor
 8. **P12** — seatbelt sandbox, if we want to lead on safety.
 
 **Honest footnote on the benchmark that prompted this.** The +11.3pp accuracy is within single-run noise (McNemar p≈0.3) and was measured with the opponent's skills disabled and its temperature uncontrolled; treat it as *not established*. The ~1.6× speed edge is more believable but partly reflects design differences, not pure loop efficiency. The right takeaway isn't "we're losing" — it's that the **loop mechanics above are real, portable, and on-thesis**, and that 2B can out-*rigor* the comparison by reporting CI-bounded numbers (P9).
+
+---
+
+# Part II — Loom → 2B
+
+**What Loom is:** a Python local-ready *execution harness* that decomposes a goal into a subtask dependency graph, runs independent subtasks in parallel, verifies each with an independent model, and replans on failure — plus a fuzzy-matching edit tool, a verbatim SQLite conversation store with a `conversation_recall` tool, model routing (thinking/acting/verifier roles), and a Textual TUI. It shares 2B's core creed ("a weaker model in a strong harness beats a stronger model in a weak one") and, unlike atomic-agent, is **Python — so the good parts are liftable code, not just ideas.**
+
+## The one-paragraph verdict
+
+**Loom's whole-engine ambition is off-thesis, but its host-side reliability primitives are the best haul in either survey — and several drop straight into 2B's frozen schema.** The genuinely valuable, liftable wins are all *host-side and orthogonal to the 5-tool schema*: an **edit-ambiguity rejection layer** ("won't silently edit the wrong place"), **durable restart-surviving undo** covering create/delete/rename, **deterministic-first verification with a severity taxonomy**, a **path jail + command/exec hardening**, and **scoped-prompt + bounded-state discipline** that kills the "declares DONE after step 1 of 100" failure. Loom's two headline differentiators are weaker than advertised: its "**lossless memory**" is a compaction+archive+recall hybrid that **still compacts under budget**, and its recall path leans on a small model reliably driving a 9-action tool — the exact thing small models are worst at, so **lossless-recall does not beat 2B's existing compaction** and a `conversation_recall` 6th tool is not worth the frozen-schema cost. The heavyweight half (DAG fan-in, phase system, a 574-line iteration-gate DSL, multi-vote consensus, role/tier routing, a 200-line TOML with 40+ execution knobs) is exactly the complexity 2B's thesis is right to refuse — Loom's config surface is a useful *cautionary tale*. Net: 2B is already **ahead** on pre-approval inline diffs, mode cycling, headless one-shot mode, `--doctor`, install-time model grading, and `/undo`; take Loom's edit-safety, durable-undo, verification, and safety-hardening code, and decline its engine.
+
+## A. What to TAKE from Loom (host-side, liftable Python) — ranked
+
+| # | Take | Why it helps | Notes |
+|---|---|---|---|
+| L1 | **Edit-ambiguity rejection** — when a tolerant/fuzzy `edit_file` match is used, refuse if a *second* window also clears the similarity threshold and is within a small margin of the best (Loom: `second_ratio ≥ 0.85 and best−second < 0.05`). Plus a **uniqueness gate** (exact `old_text` appearing >1× → fail, don't replace-first) and a **corrective closest-match snippet** (numbered ±3 context lines) on failure. | "Won't silently edit the wrong place" — the one materially-better-than-tolerant-match property. The corrective snippet turns a dead-end into a retryable hint (disproportionately helps small models). | ~a few dozen lines of stdlib `difflib`. Builds on 2B's existing tolerant edits. **SKIP** tree-sitter narrowing (non-stdlib dep) and the batch `edits[]` mode (breaks the frozen single-`edit_file` contract). |
+| L2 | **Durable undo** — a persistent, restart-surviving changelog + before-state snapshots covering **create / modify / delete / rename**, with per-scope revert (single / group / all). | 2B's undo is in-memory, edit-only, and lost on exit; this closes the biggest gap. | ADAPT + **improve on Loom**: Loom's writes and index-saves are non-atomic (torn-file / lost-history risk) despite its README — use temp+`os.replace`, and snapshot content on rename/dir-delete. Pure stdlib (`shutil`, `json`, `pathlib`). |
+| L3 | **Deterministic-first verification + severity taxonomy** — run zero-model structural checks (file exists/non-empty, syntax parses, placeholder markers `[TODO]/[TBD]`, build/test exit code) *before* any model call; classify a failure as `infra`→retry, `semantic`/`hard`→replan, `advisory`→warn so the loop reacts correctly instead of binary pass/fail. | Cheapest reliability win; makes retry/replan decisions principled. Extends 2B's post-edit diagnostics. | Pure stdlib (`re`, `pathlib`, `subprocess`). Return a small verdict `{passed, severity, feedback}` where `feedback` flows into the next turn. |
+| L4 | **Path jail** — a shared `Path(p).expanduser().resolve()` then `.relative_to(repo_root)` confinement for all 5 file tools, rejecting `../` traversal and outward symlinks with a clear error. | A safety layer 2B's stale-file detection + git guard don't cover. | ~15 lines stdlib. Skip Loom's multi-root read-map unless cross-repo reads are needed. |
+| L5 | **Command/exec hardening** — bounded output reader (cap ~1 MB per stream, then drain-and-discard) + **kill-and-await subprocess on cancel/timeout** for `run_command`; a destructive-**git** blocklist (`push --force`, `reset --hard`, `clean -f`, `branch -D`, `checkout .`) with **no-shell argv exec**; and a **high-risk carve-out** that ignores a session "allow" grant and always re-prompts. | Prevents OOM from runaway output, orphaned processes, and silent destruction of uncommitted work that even undo can't recover. | *Reinforces & extends **P7*** (atomic-agent's hardline-block/safe-allow tiers). Merge into one command-safety phase. |
+| L6 | **Scoped prompt + bounded regenerated state** — for any multi-step/subtask work, build a *fresh minimal prompt* (task + acceptance criteria + a compact, ring-buffered state object regenerated each call) instead of carrying full chat history. | Directly targets "declares DONE after step 1 of 100"; caps tokens flat regardless of task length; keeps small models oriented. | ADAPT. Most relevant if 2B grows subtask execution beyond `delegate`; the state-object habit (bounded decisions/errors, empties dropped) is useful even in the flat loop. |
+| L7 | **Fresh-context self-check on high-stakes edits** — one optional gated pass where the *same* Ollama model reviews the diff against acceptance criteria from a **fresh prompt** (no self-justifying history), prompted as a skeptical reviewer. | Breaks a small model's self-consistency bias (rubber-stamping its own edit) for exactly one extra call — no second model needed, so it fits the single-model thesis. | ADAPT, gated to risky changes only. |
+| L8 | **Memory hybrid (tool-free)** — keep 2B's lossy compaction, and add: (a) a **breadcrumb line** in the compaction summary ("N earlier messages summarized; full transcript in the session archive"); (b) make the existing sqlite store **searchable host-side** (indexed `tool_name`/`role` columns + a `LIKE` helper that *host code*, not a model tool, uses to auto-inject relevant archived turns on dangling references like "that file"/"earlier"); (c) a **tool-exchange-integrity invariant** in the compaction tail — never split an assistant-tool-call ↔ tool-result pair, and never lead the window with an orphan tool message. | ~80% of Loom's memory benefit at ~0 thesis cost, all host-side. The tool-exchange invariant fixes a real Ollama malformed-history crash risk. | ADAPT. **SKIP** the `conversation_recall` 6th tool, FTS5, the LLM/regex typed-memory indexer, and the semantic compactor. |
+| L9 | **Anti-thrash fingerprinting** — hash `subtask_id/step + failure_reason` and refuse to re-attempt the same failing fix twice; pair with a couple of hard caps (iterations, wall-clock). | Small models loop hardest on the same broken step. | *Reinforces **P4*** (loop-guard). Fold the fingerprint idea into P4's veto ladder. |
+| L10 | **Reproducible sampling** — pass an explicit low `temperature` **and a `seed`** in Ollama `options` for the main loop (and any verifier pass). | Loom sets neither; 2B can beat it on reproducibility, which strengthens P9's eval credibility. | *Reinforces **P1** (conservative sampling) + **P9** (eval).* Cheap. |
+| L11 | **CLI/TUI power tools** — `/tool <name> key=val\|json` to invoke a frozen tool directly (trivial with only 5 tools; great for debugging); `/history search <q>` with next/prev jump over the append-only scrollback; risk-class labeling (write/execute/delete + impact text) on the inline confirmation. | Power-user ergonomics; the search fits 2B's append-only log naturally. | TAKE the three; small. |
+
+## B. What NOT to take from Loom (and why)
+
+| Not taking | Why |
+|---|---|
+| **`conversation_recall` as a 6th core tool** | Lossless-recall does **not** beat 2B's lossy compaction for a *small* model: it trades a guaranteed-in-window summary for a conditional fetch gated on the model noticing the gap and driving a 9-action tool correctly — the small model's weakest skills. Loom itself hedges (keyword nudges, archive-index menu) and *still compacts* in `/run`. If recall is ever added, expose **one** dumb `recall(query)` (stdlib `LIKE`), never the 9-action mega-tool. Prefer the host-side hybrid (L8). |
+| **Decompose → DAG → parallel-subtask → replan engine** | The scheduler+async-gather core is small, but the surrounding output-conflict single-writer batching, fan-in finalizers, and ID-preserving replan contract are hundreds of lines solving problems a reactive coding agent doesn't have. Adopt only the *scoped-prompt/state* nuggets (L6); grow a plan object later only if a real need appears. |
+| **Multi-vote consensus (Tier 3)** | N× model calls per decision — worst cost/benefit on latency-sensitive local models; disabled by default even in Loom; only meaningful with temperature variance (which 2B's reproducibility goal suppresses). |
+| **Role/tier model router** | 2B is single-model native Ollama by design. A role/tier registry is complexity the thesis rejects. (Borrow only the graceful-degrade default: if an optional verifier is unavailable, skip-with-warning, don't block.) |
+| **Iteration-gate DSL** (574 lines: `tool_metric`/`artifact_regex`/`command_exit`/`verifier_field` with operators) | A verification framework a small model can't reliably author specs for. Reuse only the one idea already in L3: run an allowlisted build/test command and gate on exit code. |
+| **Process/phase system, `/learned`, `/telemetry`, `/auth`+`/mcp` manager tabs, tabbed multi-pane layout, animated activity glyph, the REST-API-server execution model** | Scope 2B has deliberately rejected (CLI/terminal-first, frozen schema). |
+| **The `loom.toml` config surface (200 lines, 40+ execution knobs, three `[limits.*]` tables)** | The clearest anti-pattern to avoid. Nobody tunes `chars_per_token_estimate=2.8`; those belong in code constants. The one good idea is Loom's *runtime registry* (only **12** curated, typed, scoped entries exposed to live `/config`) — copy that shape **only if** 2B ever adds a live-config editor; never the file. |
+| **Tree-sitter structural narrowing in the edit tool; batch `edits[]` mode** | Non-stdlib dependency / breaks the frozen single-`edit_file` contract, for marginal gain (the sliding-window path is the real engine). |
+
+**Already ahead / at parity (no action):** pre-approval **inline line-numbered diff** (Loom's diff is post-execution; its approval modal shows only args); **shift+tab mode cycling** (Loom has no `/mode`); **headless `-p` one-shot stdout mode** and **`/undo`** (gaps Loom does *not* fill); **`--doctor`** (Loom's `loom doctor` is nice but 2B already has one) and **install-time model grading** (Loom discovers but doesn't grade); session list/`--resume`; per-session "allow" grants; command palette; streaming + tool one-liners.
+
+## C. Roadmap additions (Loom) — phases P13–P19
+
+Each is host-side, liftable stdlib Python, and independently shippable & unit-testable.
+
+### Phase P13 — Edit-safety layer (L1)
+- **Spec:** In `edit_file`'s tolerant path: (1) uniqueness gate — exact `old_text` matching >1× fails with a "add more context" message; (2) when falling back to fuzzy/whitespace-tolerant matching, compute the best and runner-up similarity and **refuse** if two windows both clear the threshold within a small margin (ambiguous); (3) on any miss, return a numbered closest-match snippet (±3 lines) so the model can retry. Add CRLF/mixed-line-ending tolerance.
+- **Files:** `tools.py` (edit path), `orchestrator.py` (edit dispatch). New `tests/test_edit_ambiguity.py`.
+- **Effort:** S–M. **Note:** highest-value Loom take; pure `difflib`.
+
+### Phase P14 — Durable undo (L2)
+- **Spec:** Replace/augment the in-memory pre-edit stack with a persistent changelog: a JSON index + before-state snapshots on disk (survives restart), covering create/modify/delete/rename, with revert-one / revert-group / revert-all. Atomic writes (`os.replace`) for both snapshots and index; snapshot content on rename and dir-delete.
+- **Files:** new `changelog.py` (dep-free), wired into `edit_file`/`write_file` (and any delete/move). `persist.py` for the index location. New `tests/test_changelog_undo.py`.
+- **Effort:** M.
+
+### Phase P15 — Deterministic verification + severity (L3, L7)
+- **Spec:** After a mutating turn, run zero-model checks (target file exists/non-empty, syntax parse for known types, placeholder-marker scan, optional allowlisted build/test exit code); classify failures by severity (`infra`/`semantic`/`hard`/`advisory`) and route (retry vs surface vs warn). Optionally, on high-stakes edits, one gated fresh-context self-check pass using the same model. Return a verdict carrying `feedback` into the next turn.
+- **Files:** new `verify.py` (dep-free), wired in `orchestrator.py`. New `tests/test_verify.py`.
+- **Effort:** M. Extends existing post-edit diagnostics.
+
+### Phase P16 — Path jail + command/exec hardening (L4, L5) — *extends P7*
+- **Spec:** (a) Shared canonicalize-and-confine helper for all 5 file tools. (b) `run_command`: bounded per-stream output reader with drain, kill-and-await on cancel/timeout. (c) `run_git`: destructive-pattern blocklist + argv exec (no shell). (d) High-risk carve-out that always re-prompts even under a session "allow". Build this *together with* P7's hardline-block/safe-allow tiers as one command-and-path-safety module.
+- **Files:** `cmdguard.py` (merged with P7), `tools.py` (`do_run_command`/`_run_git`/path helper), `orchestrator.py`. New `tests/test_cmdguard.py` + `tests/test_path_jail.py`.
+- **Effort:** M.
+
+### Phase P17 — Memory archive hybrid (L8) — *complements P5/P6*
+- **Spec:** Keep lossy compaction. Add: a breadcrumb line in the compaction summary; indexed `tool_name`/`role` columns + a host-side `LIKE` search helper; auto-inject the most relevant archived turn(s) when the latest user message contains dangling-reference phrases; enforce the tool-exchange-integrity invariant (never split call↔result; strip a leading orphan tool message) in the compaction tail. No new model-facing tool.
+- **Files:** `persist.py` (schema/columns + search helper), `orchestrator.py` (compaction tail + injection). Extend `tests/test_persist.py`; new `tests/test_archive_inject.py`.
+- **Effort:** M.
+
+### Phase P18 — Scoped-prompt + bounded state (L6) — *optional, complements delegate*
+- **Spec:** For `delegate`/sub-runner work (and optionally long single tasks), assemble a fresh minimal prompt with a compact, ring-buffered state object (bounded decisions/errors, empty fields dropped) regenerated each call, instead of carrying full history. Anti-thrash fingerprint (L9) folds into P4.
+- **Files:** `subagents.py` (delegate prompt assembly), a small `state.py` dataclass. New `tests/test_scoped_state.py`.
+- **Effort:** M. **Note:** only if 2B grows subtask execution; otherwise defer.
+
+### Phase P19 — CLI/TUI power tools (L11)
+- **Spec:** `/tool <name> key=val|json` direct invocation of a frozen tool (bypass the model); `/history search <q>` with next/prev jump over scrollback; risk-class label (write/execute/delete + one-line impact) on the inline confirmation.
+- **Files:** `commands.py`, `app_tui.py`.
+- **Effort:** S.
+
+*(Reinforcements — no new phase: **L9** folds into **P4** (loop-guard fingerprint); **L10** folds into **P1** (sampling) + **P9** (eval seed/CI); **L5** merges into **P16**/**P7**.)*
+
+---
+
+## Consolidated priority order after Parts I–II (P1–P19)
+
+1. **P1 + P2** (tool-call robustness + never-throw closure) — real accuracy lever; +**L10** reproducible sampling.
+2. **P13** (edit-safety layer) — highest-value Loom take, pure stdlib, guards the frozen `edit_file`.
+3. **P3** (parallel read batching) — biggest speed win.
+4. **P4** (loop-guard upgrade) — +**L9** anti-thrash fingerprint.
+5. **P15** (deterministic verification + severity) — cheap, principled retry/replan; extends post-edit diagnostics.
+6. **P14** (durable undo) — closes 2B's biggest undo gap.
+7. **P16** (path jail + command/exec hardening) — absorbs **P7**; safety floor + less prompt fatigue.
+8. **P5 + P6** (prefix stability + context budgeting) — free latency + long-context correctness.
+9. **P17** (memory archive hybrid) — the right, tool-free answer to Loom's "lossless memory."
+10. **P8, P9** (project instructions + CI-bounded eval) — coding accuracy + credibility edge.
+11. **P19, P10, P11** (CLI/TUI power tools + drift replay + TUI polish).
+12. **P18** (scoped-prompt/state) — only if subtask execution grows; **P12** (seatbelt sandbox) — if we want to lead on safety.
+
+**Bottom line across both surveys.** atomic-agent proves the *speed* levers (parallel reads, stable prefix, early cutoff); Loom supplies the *reliability* primitives (edit-ambiguity rejection, durable undo, deterministic verification, safety hardening). Both validate 2B's frozen-schema/host-side thesis by showing the opposite: their differentiators that we *can't* or *shouldn't* take (GBNF grammar, KV quant, memory/intent fabrics, DAG engine, role routing, 200-line config) are exactly the complexity 2B is right to refuse. The take list is entirely host-side, mostly stdlib, and leaves the 5-tool schema untouched.
+
+---
+
+# Part III — Successor → 2B
+
+**What Successor is:** a Python terminal chat harness for local + OpenAI-compatible models, **with zero third-party runtime dependencies — pure stdlib** (renderer, chat surface, file tools, bash dispatch, autocompactor, wizard all hand-rolled). It has a custom five-layer cell renderer (not Textual), 12 native tools with concurrent multi-tool dispatch, a three-tier percentage-with-floors autocompactor, a model-authored "verification contract," always-on session traces + a React reviewer app, and a 10-step setup wizard. It's the closest sibling to 2B of the three sources — so most of it is parity or *2B-already-ahead*, and the value is a handful of sharp, directly-liftable stdlib primitives.
+
+## The one-paragraph verdict
+
+**Successor is the sharpest mirror: it shares 2B's exact thesis, so it mostly confirms 2B's design and 2B is already ahead where it counts — but its handful of liftable stdlib primitives are excellent.** The standouts, all pure stdlib and orthogonal to what's already planned: a **file-tool safety stack** (refuse an edit unless the file was fully read this session, dedup identical re-reads, and a hard **read-loop circuit breaker** after N identical reads) and a **deterministic recovery-nudge table** (a failure-class→exact-recipe message on a *rejected well-formed* call — the concrete form of "never-throw closure"); an **always-on structured JSONL session trace** (~113 lines) that captures tool lifecycle/timing/timeouts 2B's sqlite state doesn't; a **KV-cache-friendly summarization prompt** (reuses Ollama's prefix KV — a real local perf win) plus cheap compaction robustness (estimate **calibration**, circuit breaker, temporal recompact guard, round-granular truncation, a **blocking tier + token floors** for tiny windows); a host-run **verification contract** (declared claim→evidence where the *host* runs command-based evidence, folded onto an existing tool — never a 6th tool) with a **symmetric "done → stop" nudge** and repo-command discovery from `pyproject.toml`/`package.json`; an **Ollama-port kill guard** (a small model told to "free a port" could `kill` its own model server); and the **two-tier config pattern** (tiny runtime JSON + lenient/clamp-don't-reject parse). Successor's own weak spots *validate 2B's plans*: its concurrent dispatch runs writes and reads together with **prompt-only, off-by-default ordering** (2B's host-side read-only batching is safer), it has **no malformed-tool-call repair at all** (2B's planned lenient-parse + bounded repair is strictly stronger), and its gorgeous wizard does **no connectivity test or grading** (2B grades at install). What to refuse is equally clear: the whole pure-stdlib renderer (Textual already delivers it — rewrite-for-purity is a bad trade), the 12-tool surface, keystroke replay + the React reviewer app, the runbook, and the 60-knob config menu.
+
+## A. What to TAKE from Successor (host-side, pure stdlib, liftable) — ranked
+
+| # | Take | Why it helps | Notes |
+|---|---|---|---|
+| S1 | **File-tool safety stack** — refuse `edit_file`/`write_file` unless the file was fully read this session; dedup an identical unchanged re-read to a stub (saves tokens); a **hard read-loop circuit breaker** after N (≈4) consecutive identical reads with no intervening call; newline-normalize + restore line endings on edit. | Targets the two dominant small-model failure modes: blind edits against unread/stale content, and read-loop stalls. Deterministic — the model can't argue with it. | Pure stdlib; drops onto 2B's read/edit/write. *Reinforces & extends 2B's stale-file detection* (adds read-before-write + dedup + read-loop breaker). |
+| S2 | **Deterministic recovery-nudge table** — when a well-formed write/edit is *rejected* by a guard (not read / matched N locations / modified since read), synthesize a specific next-turn recovery recipe and explicitly forbid `sed`/heredoc fallback. | Turns a hard error into a guided retry with no code-level repair loop — high small-model payoff. | *Reinforces P2/P15* (never-throw closure): this is the concrete failure-class→recipe form. Distinct stage from P1 repair (P1 fixes *malformed calls*; this fixes *rejected valid calls*). |
+| S3 | **Always-on session trace** — a thread-safe structured JSONL runtime event log (turn/stream/tool/bash lifecycle, timeouts, retries, cancellations), flush-per-line, bounded retention, clipped payloads; plus a `2b trace summarize` that prints per-run aggregates (tools used, event counts, turn durations, failures, verify pass/fail). | Captures tool lifecycle/timing/timeout data 2B's sqlite *conversation* state doesn't — postmortem-grade debugging + eval evidence. | ~113 lines stdlib, liftable near-verbatim. Add the `.git/info/exclude` auto-ignore trick so recordings never dirty the user's repo. *Complements P10* (drift replay). **SKIP** frame capture, keystroke replay, and the React reviewer app. |
+| S4 | **KV-cache-friendly summarization prompt** — build the compaction request as the *existing* system+rounds structure followed by a trailing "summarize everything above except the last N rounds" instruction, so Ollama reuses the prefix KV cache instead of re-evaluating the whole transcript. | A large local-model perf win on compaction (their claim: ~14 min → ~1 s at 256K). | *Reinforces P5/P17*. Just message-list construction; no deps. |
+| S5 | **Compaction robustness bundle** — estimate **calibration** (EMA nudging the char-heuristic toward observed `prompt_tokens`, clamped); a **blocking tier + token floors** (hard-refuse before the API rejects; floors matter because a % of a tiny RAM-sized window collapses to near-zero); a **temporal recompact guard** (don't recompact within ~30 s / <3 turns) and a **circuit breaker** (stop after N failed summaries); **round-granular truncation** (never split an assistant tool_call from its result); an **attachment-hint round** (list recently-touched files post-compaction so the working set survives). | Cheap, independently-liftable hardening around 2B's existing compaction; the floors + blocking tier directly serve 2B's small dynamic windows. | *Reinforces P6* and echoes Loom's tool-exchange-integrity (round-granular). Each piece is 10–40 lines of pure arithmetic/dataclass. |
+| S6 | **Host-run verification contract + symmetric stop-nudge + repo-command discovery** — let the model declare claim→evidence, but where evidence is a command (test/lint/exit code) the **host** runs it and sets pass/fail (not the model); inject the "what must be proven" ledger once per turn; add a one-shot **"all proven → stop calling tools"** nudge; and discover the repo's *real* checks from `pyproject.toml`/`package.json` (ruff/pytest/npm). | Structural counter-pressure against "confidently DONE without proof," and the missing *symmetric* stop-signal (models over-run verification into compulsive re-verify loops). Repo-command discovery answers "what command should the host run." | *Extends P15.* Fold onto an existing tool/field — **never a 6th tool** (Successor's ~10 tools violate the frozen thesis). Heed their dated finding: inject verification reminders **once per turn, not per tick** (per-tick re-injection *degraded* models). |
+| S7 | **Ollama-endpoint kill guard** — block bash that force-kills the port owning the model provider (`kill`/`fuser -k`/`lsof … | xargs kill` against the Ollama port). | A small model told to "free up a port" can `kill` the Ollama server it's running on — self-lobotomy. Almost tailor-made for 2B's native-Ollama architecture. | *Reinforces P16/P7.* ~100 lines stdlib (`re`, `urllib.parse`), retargeted to the Ollama endpoint. |
+| S8 | **Two-tier config hygiene** — a tiny runtime JSON (ignore-unknown-keys / default-missing, `setdefault` versioned migrations, atomic temp-file+rename write at `0o600`) and a lenient **clamp-don't-reject** parse for any structured config (invalid threshold sets revert to safe defaults rather than erroring). Plus a `[no server]`-style multi-path remediation hint on connection failure. | Robust, forward-compatible config that never crashes on an old/edited file — matches 2B's simplicity ethos. | TAKE the pattern. **AVOID** Successor's 60-knob config *menu* (worse than the 200-line-TOML anti-pattern; mostly per-optional-tool knob sprawl 2B's frozen schema doesn't have). |
+| S9 | **Streaming tool-preview data model** — turn partial streamed tool-call JSON into a typed preview with **sticky-prior caching** so a resolved label/path never flaps back to "pending…" mid-stream. | Strengthens 2B's existing per-tool live detail; solves a genuinely fiddly incomplete-JSON problem. | *Reinforces P11.* Framework-agnostic pure data (no Textual conflict); rewrite the builder table for 2B's 5 tools. |
+
+## B. What NOT to take from Successor (and why)
+
+| Not taking | Why |
+|---|---|
+| **The pure-stdlib five-layer cell renderer** (cell grid, minimal-diff flush, double-buffer, grapheme width, scrollback viewport; the 519×/16× caches) | It's a from-scratch reimplementation of what Textual already gives 2B for free. Adopting it means rewriting a working TUI to delete one mature dependency — rewrite-for-purity. The cache wins solve a per-frame full-scrollback-recompute problem 2B doesn't have; its grapheme/width table is a pragmatic *subset*, not better than Rich's. Existence proof that a stdlib TUI is possible ≠ reason to rebuild 2B's. |
+| **The 12-tool surface** (`bash`, `verify`, `runbook`, `task`, `skill`, `holonet`, `browser`, `vision`, no native `search_files`/`list_files`) | The opposite of the frozen-5 thesis — it even delegates search/list to `bash`. 2B's 5 tools + host-side machinery is the deliberate, validated counter-position. Fold verification/ledger ideas onto existing tools/fields, never as new tools. |
+| **Keystroke replay (`recorder.py`/`successor replay`)** | Its own docstring admits it's input-only and **non-deterministic** (the model is re-queried). 2B's planned prompt-drift replay (hash the prefix, flag drift) targets the real determinism boundary and is strictly better. |
+| **The React/Vite reviewer web app** | A full TS/React/Vite toolchain + vendored build artifacts — the antithesis of stdlib CLI-first. Take only its *aggregation schema* as the `trace summarize` CLI (S3). |
+| **`runbook.py` experiment frame** | 600 lines of objective/hypothesis/evaluator/attempt-log autonomy scaffolding + its own tool. Project-management state, not correctness — squarely against YAGNI. |
+| **The 60-knob config menu / cosmetic setup wizard** | The config menu is a worse instance of the TOML anti-pattern (mostly per-optional-tool sprawl). The wizard is ~200 KB of TUI doing **no connectivity test and no grading** — 2B's install-time grading is substantively ahead. Keep 2B's installer + grade + `--doctor`. |
+| **`/tokenize` endpoint token counting; provider preset breadth; `sx`-style alias** | Ollama exposes no per-string tokenize endpoint (use the char-heuristic + calibration from S5); 8 cloud presets are needless for a local-first agent; `2b` is already a two-char command. |
+| **Fuzzy edit matching** | Successor deliberately doesn't do it (exact + newline-normalize + recovery nudges) — this *confirms* 2B's edit-safety direction (P13): predictable exact matching + ambiguity rejection over silent fuzzy edits. |
+
+**Already ahead / at parity (no action):** the whole TUI surface (streaming, tool one-liners, status bar, palette, session list — all Textual parity); **install-time model grading** (Successor has none — only a cosmetic preview + a manual `doctor`); **malformed-tool-call repair** (Successor drops the call and ends the turn; 2B's planned P1 is strictly stronger); **host-side read/write ordering** for concurrent dispatch (Successor's is prompt-only and off-by-default for local models; 2B's P3 read-only batching is safer); a **persistent searchable archive** (Successor has none; 2B's P17 is ahead); pre-approval inline diff, mode cycling, per-session grants, `--doctor`, `/undo`.
+
+## C. Roadmap additions (Successor) — phases P20–P24
+
+Each is host-side, pure stdlib, and independently shippable & unit-testable.
+
+### Phase P20 — File-tool safety stack (S1, S2)
+- **Spec:** (a) Refuse `edit_file`/`write_file` unless the target was fully read this session (track a per-session read-state map). (b) Dedup an identical unchanged `read_file` to a short stub. (c) Hard **read-loop circuit breaker**: after ~4 consecutive identical reads with no intervening call, return a deterministic error. (d) Newline-normalize (CRLF→LF) for matching, restore original ending on write. (e) On a *rejected* guard failure, emit a failure-class→recipe recovery nudge for the next turn (and forbid `sed`/heredoc fallback).
+- **Files:** `tools.py` (read/edit/write + read-state), `orchestrator.py` (nudge wiring). New `tests/test_file_safety.py`.
+- **Effort:** M. **Note:** extends existing stale-file detection; highest-value Successor take. Pairs with P13 (edit-ambiguity) and P2 (never-throw).
+
+### Phase P21 — Session trace + `trace summarize` (S3)
+- **Spec:** An always-on thread-safe JSONL runtime-event log (turn/stream/tool/command lifecycle, timeouts, retries, cancellations), flush-per-line, bounded retention, clipped payloads, written under 2B's config dir and auto-added to `.git/info/exclude`. A `2b trace summarize [session]` command prints per-run aggregates (tools used, event counts, turn durations, failures, verify pass/fail).
+- **Files:** new `session_trace.py` (dep-free), emit call-sites in `orchestrator.py`, a `commands.py`/`cli.py` summarize command. New `tests/test_session_trace.py`.
+- **Effort:** S–M. Complements P10 (drift replay).
+
+### Phase P22 — Compaction hardening (S4, S5)
+- **Spec:** (a) Rebuild the summarization request as existing-structure + trailing "summarize all but last N rounds" (KV-cache reuse). (b) Estimate calibration (EMA toward observed `prompt_tokens`, clamped). (c) A blocking tier that hard-refuses before the API rejects, plus token floors under the percentage thresholds. (d) Temporal recompact guard + failure circuit breaker. (e) Round-granular truncation (never orphan a tool_call↔result — merges with P17's tool-exchange-integrity). (f) Post-compaction attachment-hint round listing recently-touched files.
+- **Files:** `orchestrator.py` (compaction), `context_usage`-equivalent (calibration/meter). Extend `tests/test_context_meter.py`; new `tests/test_compaction_hardening.py`.
+- **Effort:** M. Reinforces P5/P6/P17.
+
+### Phase P23 — Verification contract + guardrails (S6, S7)
+- **Spec:** (a) A host-run claim→evidence ledger surfaced once per turn; where evidence is a command, the **host** runs it and sets pass/fail. (b) A one-shot "all proven → stop" nudge (symmetric to the not-done nudge). (c) Discover the repo's real checks from `pyproject.toml`/`package.json`. (d) An Ollama-endpoint kill guard in the command path. Fold the ledger onto an existing tool/field — no new tool. Inject verification reminders once per turn, not per tick.
+- **Files:** extend the P15 `verify.py`; `cmdguard.py` (P16) for the port guard; a repo-check discovery helper. New `tests/test_verify_contract.py`.
+- **Effort:** M. Extends P15/P16.
+
+### Phase P24 — Config & profile hygiene (S8)
+- **Spec:** A tiny runtime-config JSON with ignore-unknown/default-missing, `setdefault` versioned migrations, atomic `0o600` writes; a lenient clamp-don't-reject parse for any structured config; a `[no server]`-style multi-path remediation hint on connection failure. Optionally a *minimal* named profile (`{provider, model, system_prompt}`) reusing `/default`. Explicitly do **not** grow a multi-section config menu.
+- **Files:** `config.py`, connection-error messaging in `providers/ollama.py`/`cli.py`. Extend `tests/test_persist.py` or new `tests/test_config_hygiene.py`.
+- **Effort:** S. Quality/robustness.
+
+*(Reinforcements — no new phase: **S9** streaming tool-preview → **P11**; the control-ledger-as-regenerated-tail idea and round-granular truncation → **P17**/**P22**; host-enforced read-only subagent scoping + semaphore-bounded async forks → **P18**; keep `raw_arguments`+error offset for the repair pass → **P1**; thread+queue+wait-all dispatch mechanic → **P3**.)*
+
+---
+
+## Consolidated priority order after Parts I–III (P1–P24)
+
+> Superseded by the Parts I–IV order at the very end of the document.
+
+1. **P1 + P2** — tool-call robustness + never-throw closure (+**L10** sampling; keep raw args for repair).
+2. **P13 + P20** — edit-safety layer + file-tool safety stack. Together these harden the frozen `edit_file`/`write_file` against the top small-model failure modes (wrong-location edits, blind/stale edits, read-loops) — the single highest-leverage reliability cluster, all pure stdlib.
+3. **P3** — parallel read batching (host-side read-only ordering; take Successor's thread+queue+wait-all mechanic).
+4. **P4** — loop-guard upgrade (+**L9** anti-thrash fingerprint).
+5. **P15 + P23** — deterministic verification + severity, then the host-run contract, symmetric stop-nudge, repo-command discovery, and Ollama-port guard.
+6. **P14** — durable undo.
+7. **P16** (+P7, +S7 port guard) — path jail + command/exec hardening.
+8. **P5 + P6 + P22** — prefix stability + context budgeting + compaction hardening (KV-cache summarization, calibration, floors, round-granular).
+9. **P17** — memory archive hybrid (the tool-free answer to "lossless memory").
+10. **P21** — session trace + `trace summarize` (debugging + eval evidence).
+11. **P8, P9** — project instructions + CI-bounded eval.
+12. **P19, P10, P11, P24** — CLI/TUI power tools + drift replay + TUI polish (+S9 sticky tool-preview) + config hygiene.
+13. **P18** (scoped-prompt/state) — if subtask execution grows; **P12** (seatbelt sandbox) — to lead on safety.
+
+**Bottom line across all three surveys.** The three agents triangulate the same conclusion from different angles: **atomic-agent** supplies the *speed* levers (parallel reads, stable prefix, early cutoff), **Loom** the heavyweight *reliability* primitives (edit-ambiguity rejection, durable undo, deterministic verification), and **Successor** — 2B's closest sibling — the *robustness details* (read-before-write guards, read-loop breakers, recovery-nudge tables, trace logging, cheap compaction hardening) plus the strongest confirmation that 2B is already on the right path (it's ahead on grading, repair, read/write ordering, and archive; and its frozen-5 schema is the deliberate opposite of all three sources' tool sprawl). Everything on the take list is host-side, overwhelmingly stdlib, and leaves the 5-tool schema untouched; everything refused (GBNF grammar, KV quant, memory/intent fabrics, DAG engine, role routing, a from-scratch renderer, 60-knob configs) is exactly the complexity 2B's thesis exists to reject.
+
+---
+
+# Part IV — Hermes → 2B
+
+**What Hermes is:** Nous Research's flagship — a cloud-first, self-improving, multi-platform *assistant* (Telegram/Discord/Slack/WhatsApp/Signal from one gateway, a cron scheduler, six execution backends incl. serverless Modal/Daytona, a learning loop that autonomously writes and patches its own skill files, agent-curated `MEMORY.md`/`USER.md`, Honcho SaaS user modeling, a TS/Ink TUI driving a 13.8k-line Python gateway, batch trajectory generation for fine-tuning tool-calling models). 2800+ Python files, god-files up to 721KB. This is the maximalist opposite of 2B on nearly every axis.
+
+## The one-paragraph verdict
+
+**Hermes is the furthest from 2B's thesis — the vast majority is off-thesis and skipped — but buried in the scale are two genuine gems, a long-run-coherence technique, and a set of reference implementations that de-risk the work 2B already planned.** The two gems: **steer / interrupt-and-redirect** (type mid-turn to fold a correction into the *running* turn without discarding in-flight tool work — materially ahead of 2B's stop-only esc, and pure host-side Python that never touches the 5-tool schema), and **Programmatic Tool Calling** (the model writes one Python script that calls tools over a local socket; only the script's *stdout* re-enters context, collapsing a 10-step pipeline into one turn and keeping intermediate blobs out of a tiny window — its 7 allowed tools already map ~1:1 onto 2B's frozen schema). The coherence technique is a **structured summarization prompt** — verbatim capture of the outstanding task, temporal anchoring of finished work into dated past tense, and a "reference only / latest message wins / do not resume stale work" frame, updated iteratively across compactions — the direct antidote to "declares DONE after step 1 of 100," and pure prompt text orthogonal to the KV-cache-friendly summary already planned. Everything else is either a **reference implementation** that confirms and de-risks planned work (`coerce_tool_args` is a near-verbatim P1 arg-coercer; a read-only-allow-list + path-non-overlap concurrency gate is P3; a HARDLINE-floor + `rm -rf` regex-hardening + 43-line path jail is P7/P16; an FTS5+trigger recall recipe is P17; a subagent isolation contract is P18), or the anti-thesis 2B rightly refuses (the self-improving learning loop, agent-curated cross-session memory, Honcho SaaS, a 72KB YAML + 123-var `.env` config, six terminal backends, a TS/Ink+gateway client/server TUI). Two honest debunks worth banking: Hermes has **no coding-eval harness at all** (`mini_swe_runner.py` is a *training-data* generator with self-reported, unverified success — 2B's fixture grading is already stronger), and its advertised "LLM summarization for cross-session recall" **does not exist in the code** (recall is pure BM25). Net: 2B is already *ahead* on eval, config minimalism, and approval simplicity; take the two gems and the coherence prompt, harvest the reference implementations, and refuse the assistant.
+
+## A. What to TAKE from Hermes — ranked
+
+| # | Take | Why it helps | Notes |
+|---|---|---|---|
+| H1 | **Steer / interrupt-and-redirect** — while a turn runs, "type + Enter" (or `/steer`) stashes the text under a lock and, at the next tool-batch boundary, **appends it to the last `tool` result message with a user-origin marker**; the model sees the redirect on its very next step. Drop pending steer on a hard interrupt; re-stash if there's no tool result this batch. | A real UX win over stop-only esc: the user course-corrects without discarding in-flight tool work. | **New (top priority).** Pure host-side Python, no schema change (mutates a tool *result*, not the tool set), preserves role-alternation. Keep esc = hard stop; add steer alongside. |
+| H2 | **Programmatic Tool Calling (scripting mode)** — a `run_command`-adjacent mode where the model writes one Python script that calls the frozen tools as functions over a **local Unix socket**; only stdout re-enters context. Reuse 2B's existing host-side dispatch as the RPC handler; token-auth the socket; cap tool-calls + timeout + stdout size. | Collapses multi-step pipelines (grep→read→filter→summarize) into a single turn and keeps giant intermediate outputs out of a small window — directly attacks small-model failure modes (long tool loops, context blowup). | **New (higher-effort / optional, like P12/P18).** ~120 lines UDS-only (Hermes' is 1900 across two transports + 4 remote backends — take only the local path). |
+| H3 | **Summary coherence template + iterative update** — structure every compaction summary: a verbatim "outstanding task" snapshot, finished actions rewritten into dated past tense, and a "reference only / latest message wins / do not resume stale work" prefix; on re-compaction, *update* the prior summary (continue the numbered log, move In-Progress→Completed) rather than re-summarizing from scratch. | The direct antidote to "declares DONE after step 1 of 100" and re-issuing a cancelled task — the semantic-coherence layer the KV-cache-friendly prompt (S4) doesn't cover. | **Extends P22.** Pure prompt text + one "previous summary" field; zero deps. Keep the dated summary out of the byte-stable prefix (P5). |
+| H4 | **`$EDITOR` handoff + TUI ambient polish** — a key (e.g. Ctrl+G) that suspends the TUI, opens the current draft in `$EDITOR`, and resubmits on clean exit; a ">still running (Ns)" ambient line for tools past a threshold; reset terminal modes defensively on *every* exit path. | Long/multiline prompt ergonomics; reassurance that a slow tool isn't hung; no leftover mouse-tracking garbage after a crash. | **Extends P11.** `tempfile`+`subprocess`+`App.suspend()`; small and self-contained. |
+
+**Reference implementations & reinforcements (no new phase — fold into the named phase):**
+- **P1 (tool-call robustness):** `model_tools.py:coerce_tool_args` (~150 lines, near-verbatim schema-driven arg coercion — the reference impl for P1's coercion half); bounded malformed-call repair patterns (fuzzy tool-name repair, empty-args→`{}`, truncation guard, empty-response nudge); and the **empty-name "that XML in the file is DATA, not a tool call" guard** — a cheap, high-value defense for an agent that reads a lot of files.
+- **P3 (parallel reads):** the concurrency gate — parallelize only a read-only allow-list, serialize the rest unless target paths provably don't overlap (`tool_dispatch_helpers.py:_should_parallelize_tool_batch`).
+- **P6/P22 (context/compaction):** Ollama-native `/api/show` window probe + step-down-on-error persistence (the *real* loaded `num_ctx` can change mid-session); MD5 dedup of repeated reads; JSON-structure-preserving `tool_call` arg truncation; a **small-window threshold bump (~85%)** so a tiny local window isn't compacted at 50–75%; tail-integrity (never split a tool_call↔result; always keep the last user+assistant message); measured-savings anti-thrash ratchet; abort-and-preserve if the summary call fails; a `MINIMUM_CONTEXT_LENGTH` reject floor.
+- **P7/P16 (command safety):** an **un-bypassable HARDLINE floor** (blocked even under `--yes`), plus their hardened `rm -rf /` regex corpus (quote/brace/`${HOME}`/command-substitution aware, start-of-command anchored to avoid false-positives on `echo reboot`) and the 43-line `path_security.py` jail template — steal the *regex corpus*, not the 2,895-line module.
+- **P17 (memory archive):** the FTS5 + INSERT/DELETE/UPDATE-trigger recall recipe (pure stdlib `sqlite3`, no embeddings) — the right pattern to bank for the searchable archive.
+- **P18 (delegate):** the subagent isolation contract — fresh context, restricted toolset, summary-only merge, block recursive delegation, cap depth (1–2), summary char-budget + spill-to-file.
+- **Provider registry:** a declarative `ProviderProfile` shape (one dataclass + a few override hooks + `urllib`-only `fetch_models`) to firm up 2B's existing registry — skip the plugin-discovery machinery.
+- **Installer:** prefer a hash-verified `uv sync --locked`/lockfile path with an explicit "falling back to *unverified* resolve" warning, and install a curated extra (not `--all-extras`) — a supply-chain posture, ~30 lines.
+
+## B. What NOT to take from Hermes (and why)
+
+| Not taking | Why |
+|---|---|
+| **The self-improving learning loop** (a background fork of the agent that autonomously writes/patches its own `SKILL.md` files every ~10 turns) | Massive host-side + model-side machinery and a second control loop; cross-session mutable self-modifying state is a determinism hazard, not a feature, for a small-model coding agent. |
+| **Agent-curated memory** (`MEMORY.md`/`USER.md` + periodic nudges) & **Honcho** user modeling | Long-lived-assistant scope; Honcho is an external SaaS (API key, per-turn HTTP) — both violate the local-first/stdlib/no-service thesis. Their own prompt guardrails against storing stale facts prove the contamination trap. The one nugget (a project-instructions file) is 2B's existing CLAUDE.md idea. |
+| **SKILL.md skill subsystem** (`skill_view`/`skill_manage` tools, hub installer) | Adds tools + a prompt-injection layer — breaks the frozen-5 schema. Note the *format* as the agentskills.io convention; a single injected CLAUDE.md is the 2B-sized version. |
+| **`trajectory_compressor.py`, `mini_swe_runner.py`, `batch_runner.py`** | Offline training-data tooling (HF `AutoTokenizer` + OpenRouter). `mini_swe_runner` is **not** a SWE-bench harness — success is a self-reported magic string, never verified. Nothing to complement 2B's fixture grading, which is stronger. |
+| **Six terminal backends + Docker/Modal/Daytona isolation** (a 2,978-line `terminal_tool.py`, 58KB of Docker plumbing) | Off-thesis for local-first macOS + Ollama. File one idea only: "an isolation boundary *is* the safety, replacing command vetting" — a mental model, not a build. |
+| **TS/Ink TUI + `tui_gateway` client/server split** (13.8k-line gateway, WebSocket transport) | Exists to serve many non-terminal clients from one engine; a single-process Python+Textual agent gains nothing and loses simplicity. |
+| **72KB `cli-config.yaml` + 123-var `.env` (19 sections, per-provider→per-model→per-field timeout trees)** | The over-configuration anti-pattern at ~6× the scale already flagged. Well-documented, but the *surface* is the problem. Keep 2B's tiny prefs config. |
+| **Aux/fallback model routing; 29-provider plugin discovery** | Off-thesis for a single-model, native-Ollama, frozen-schema local agent. |
+
+**Already ahead / at parity (no action):** **eval** (2B has correctness scoring + install-time model grading; Hermes has *neither* — only unverified training-data generation); **config minimalism** (tiny prefs vs 19 YAML sections + 123 env vars); **frozen schema** (5 tools vs a `terminal()` with six pluggable backends); **approval simplicity** (per-turn + per-session vs a 2,895-line module wired to gateway/cron); local-first native Ollama; the whole TUI input surface (slash/@/path autocomplete, model palette, multiline, session list, history) — parity.
+
+## C. Roadmap additions (Hermes) — phases P25–P28
+
+### Phase P25 — Steer (interrupt-and-redirect) (H1)
+- **Spec:** Add a thread-safe `_pending_steer` buffer. Route "type + Enter while a turn runs" (and a `/steer <text>` command) to it. At the next tool-batch boundary, before the next model call, append the buffered text (with a `[user steer]` marker) to the content of the last `tool` result message; clear the buffer. Drop pending steer on a hard interrupt (esc stays a full stop); if the batch produced no tool result, re-stash for next-turn delivery.
+- **Files:** `orchestrator.py` (loop boundary hook + buffer), `app_tui.py` (busy-input routing + keybinding). New `tests/test_steer.py`.
+- **Effort:** M. **Note:** top-priority UX win; no schema change.
+
+### Phase P26 — Programmatic Tool Calling (scripting mode) (H2) — *optional, higher-effort*
+- **Spec:** A `run_command`-adjacent mode: the model submits a Python script; the host runs it in a child process with a generated stub module whose functions call the frozen tools over a local Unix socket back into 2B's existing dispatch. Only stdout returns to the model. Token-auth the socket; cap tool-calls (≈50), wall-clock timeout, stdout size cap; scrub secrets from the child env; local-only (no remote backends).
+- **Files:** new `ptc.py` (socket server + stub generation, dep-free), wired via `orchestrator.py`/`tools.py`. New `tests/test_ptc.py`.
+- **Effort:** L. **Note:** powerful but a real new execution surface — gate behind the same simplicity scrutiny as P12/P18; ship only if it proves out.
+
+### Phase P27 — Summary coherence template + iterative update (H3) — *extends P22*
+- **Spec:** Give the compaction summarizer a structured template: a verbatim outstanding-task snapshot, finished actions in dated past tense, a "reference only / latest message wins / don't resume stale work" prefix. On re-compaction, feed the prior summary + only new turns and instruct it to update in place (continue numbering; In-Progress→Completed). Keep the dated summary out of the byte-stable prefix.
+- **Files:** `orchestrator.py` (`COMPACT_SYSTEM` + summarize path), a stored "previous summary" reference. Extend the compaction tests.
+- **Effort:** S–M. Pure prompt engineering; the highest-leverage long-run-coherence item.
+
+### Phase P28 — `$EDITOR` handoff + TUI ambient polish (H4) — *extends P11*
+- **Spec:** A keybinding that suspends the TUI, opens the current input draft in `$EDITOR`, and resubmits on clean exit. A ">still running (Ns)" ambient line for a tool past a threshold. Reset terminal modes on every exit path (incl. signals).
+- **Files:** `app_tui.py`.
+- **Effort:** S.
+
+*(Reinforcements — no new phase: **coerce_tool_args**/malformed-repair/empty-name guard → **P1**; concurrency gate → **P3**; `/api/show` probe + read-dedup + arg truncation + 85% small-window + tail-integrity + anti-thrash ratchet + abort-preserve + min-context floor → **P6/P22**; HARDLINE floor + `rm -rf` regex corpus + path-jail template → **P7/P16**; FTS5+trigger recall recipe → **P17**; subagent isolation contract → **P18**; ProviderProfile shape → registry; hash-verified install → installer.)*
+
+---
+
+## Consolidated priority order after Parts I–IV (P1–P28)
+
+1. **P1 + P2** — tool-call robustness + never-throw closure (+**L10** sampling; **H5-ref** `coerce_tool_args` as the arg-coercer; empty-name-XML guard).
+2. **P13 + P20** — edit-safety layer + file-tool safety stack. Hardens the frozen `edit_file`/`write_file` against the top small-model failure modes (wrong-location edits, blind/stale edits, read-loops) — the highest-leverage reliability cluster, pure stdlib.
+3. **P3** — parallel read batching (host-side read-only ordering; concurrency-gate allow-list + path-non-overlap).
+4. **P25** — steer / interrupt-and-redirect. Cheap, host-side, and the clearest UX win of the whole survey.
+5. **P4** — loop-guard upgrade (+**L9** anti-thrash fingerprint).
+6. **P15 + P23** — deterministic verification + severity → host-run contract, symmetric stop-nudge, repo-command discovery, Ollama-port guard.
+7. **P14** — durable undo.
+8. **P16** (+P7, +S7 port guard, +Hermes HARDLINE floor & `rm -rf` regex corpus) — path jail + command/exec hardening.
+9. **P5 + P6 + P22 + P27** — prefix stability + context budgeting + compaction hardening + **summary-coherence template** (the long-run-coherence antidote).
+10. **P17** — memory archive hybrid (+ FTS5+trigger recall recipe when recall is wanted).
+11. **P8, P9** — project instructions + CI-bounded eval (2B is already ahead of all four sources on eval — this widens the lead).
+12. **P19, P10, P11, P24, P28** — CLI/TUI power tools + drift replay + TUI polish (+S9 sticky tool-preview, +`$EDITOR` handoff, +ambient "still running" line) + config hygiene.
+13. **P18** (scoped-prompt/state + subagent isolation contract) — if subtask execution grows; **P26** (programmatic tool calling) and **P12** (seatbelt sandbox) — powerful, optional, higher-effort; ship only if they prove out.
+
+**Bottom line across all four surveys.** Four independent agents — a TS/llama.cpp speed-optimizer, a Python DAG harness, a pure-stdlib terminal sibling, and a maximalist cloud assistant — converge on the same map for 2B. The *speed* levers come from atomic-agent (parallel reads, stable prefix, early cutoff); the heavyweight *reliability* primitives from Loom (edit-ambiguity rejection, durable undo, deterministic verification); the *robustness details* from Successor (read-before-write guards, read-loop breakers, recovery-nudge tables, trace logging, cheap compaction hardening); and from Hermes, two genuine *UX/architecture* gems (steer, programmatic tool calling) plus the *long-run-coherence* summary prompt and a pile of reference implementations that de-risk the rest. Crucially, all four **validate 2B's thesis by contrast**: every differentiator that can't or shouldn't be taken — GBNF grammar, KV-cache quant, memory/intent/skills fabrics, a DAG engine, model-role routing, a from-scratch renderer, a self-improving learning loop, six execution backends, 60–120-knob configs — is exactly the complexity 2B's frozen-schema, host-side, local-first, stdlib-heavy design exists to reject. The entire take list (P1–P28) is host-side, overwhelmingly stdlib, and leaves the 5-tool schema untouched; and on the axes that matter for shipping a trustworthy local coding agent — eval rigor, config minimalism, approval simplicity, and edit/undo safety — 2B is already at or ahead of all four.

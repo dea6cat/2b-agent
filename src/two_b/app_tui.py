@@ -488,9 +488,12 @@ class TwoBApp(App):
 
     def _start_task(self, description: str) -> None:
         active = self.session.active_task
-        if active is not None and active.state in (TaskState.ACTIVE, TaskState.BACKGROUNDED):
-            self.enqueue_task(description)             # queue; will run when current finishes
-            self.log_write(Text(f"  queued: {description[:60]}", style="dim"))
+        if active is not None and active.state == TaskState.ACTIVE:
+            # A plain message typed while the foreground task is running is a STEER: fold it
+            # into the current turn (delivered at the next tool boundary) instead of queuing
+            # a separate task. esc is still the hard stop; /steer does the same explicitly.
+            active.push_steer(description)
+            self.log_write(Text(f"  ⤷ steering: {description[:70]}", style=self.c("accent")))
             return
         task = self.enqueue_task(description)
         self._run(task)
@@ -516,6 +519,7 @@ class TwoBApp(App):
     def action_interrupt(self) -> None:
         t = self.session.active_task
         if t is not None and t.state == TaskState.ACTIVE:
+            t.clear_steer()                     # hard stop drops any pending mid-turn steer
             t.cancel_flag.set()                 # orchestrator aborts the stream; subprocess tools killpg within ~100ms
             # Tear down the long-lived helpers (LSP/MCP) off the UI thread so a slow
             # server can't freeze the interface while we stop everything.
@@ -690,10 +694,12 @@ class TwoBApp(App):
                 self._close_tool_group()
                 self.log_write(Text(f"error: {ev.payload.get('error', 'unknown')}", style=f"bold {self.c('err')}"))
                 self._notify_finished(ev.task_id, ok=False)
+                self._flush_leftover_steer(ev.task_id)
             elif t == EventType.TASK_DONE:
                 self._commit_stream()
                 self._close_tool_group()
                 self._notify_finished(ev.task_id, ok=True)
+                self._flush_leftover_steer(ev.task_id)
 
         # Write/edit confirmation waiting? Show it INLINE in the conversation (diff +
         # y/n), never a popup. Answered by _resolve_confirm on a keypress.
@@ -854,6 +860,19 @@ class TwoBApp(App):
 
     def on_app_focus(self, event) -> None:
         self._focused = True
+
+    def _flush_leftover_steer(self, task_id: str) -> None:
+        """Steer typed on a task's very last turn has no tool boundary left to land on.
+        Rather than silently drop the user's words, resubmit them as a fresh task once the
+        run has ended."""
+        task = self.session.find(task_id)
+        if task is None:
+            return
+        leftover = task.take_steer()
+        if leftover:
+            self.log_write(Text(f"  ⤷ steer arrived after the turn ended — running it as a new task",
+                                style=self.c("dim")))
+            self._start_task(leftover)
 
     def _notify_finished(self, task_id: str, ok: bool) -> None:
         """Desktop-notify that a task finished — but only when the terminal isn't

@@ -80,10 +80,36 @@ class Task:
     pending: "PendingConfirmation | None" = None     # set when blocked on a backgrounded write
     error: str | None = None
     last_compact_tokens: int = 0                     # size floor after the last compaction (anti-thrash)
+    steer_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _steer: list[str] = field(default_factory=list)  # mid-turn user redirects awaiting the next tool boundary
 
     def __post_init__(self):
         if not self.title:
             self.title = _short_title(self.description)
+
+    # --- steer: fold a mid-turn user message into the running turn --------------
+    # The UI thread pushes text the user typed while this task was running; the worker
+    # thread drains it at the next tool-batch boundary. Guarded by a lock since the two
+    # threads touch the buffer concurrently.
+    def push_steer(self, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        with self.steer_lock:
+            self._steer.append(text)
+
+    def take_steer(self) -> str:
+        """Return all pending steer text (newline-joined) and clear the buffer; '' if none."""
+        with self.steer_lock:
+            if not self._steer:
+                return ""
+            out = "\n".join(self._steer)
+            self._steer.clear()
+            return out
+
+    def clear_steer(self) -> None:
+        with self.steer_lock:
+            self._steer.clear()
 
     def push_edit(self, path: str, pre: str | None) -> None:
         """Record a file's pre-edit content on the undo stack (newest last), capped so

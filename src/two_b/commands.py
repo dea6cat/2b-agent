@@ -352,6 +352,21 @@ def _fg(rest, app):
     app.request_foreground(task.id)
 
 
+@command("steer")
+def _steer(rest, app):
+    """Redirect the running task mid-turn without stopping it: /steer <text> (typing while it runs does the same)."""
+    text = rest.strip()
+    if not text:
+        app.ui.print("Usage: /steer <text>  — fold a course-correction into the running turn")
+        return
+    active = app.session.active_task
+    if active is None or active.state != TaskState.ACTIVE:
+        app.ui.print("Nothing is running to steer — type your message to start a task.")
+        return
+    active.push_steer(text)
+    app.ui.print(f"⤷ steering: {text[:70]}")
+
+
 @command("yes")
 def _yes(rest, app):
     """Toggle accept-edits mode (auto-approve writes/edits) for the session."""

@@ -217,6 +217,11 @@ _TOOL_NAMES = ("edit_file", "write_file", "read_file", "search_files", "list_fil
 _INTENT_RE = re.compile(r"\b(i['’]?ll|i will|i['’]?m going to|i['’]?m about to|let me|"
                         r"going to|i need to|i can (?:now )?)\b", re.IGNORECASE)
 
+_STEER_MARKER = (
+    "\n\n[user steer — the user sent this while the turn was running; it is their latest, "
+    "highest-priority instruction. Adjust course to follow it]:\n"
+)
+
 _PROMISE_NUDGE = (
     "You described a tool call but didn't actually make one. Don't just describe the "
     "change — make the tool call now to perform it (e.g. call edit_file with the exact "
@@ -1090,6 +1095,14 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                         return
                     if verdict == "nudge":
                         nudge_pending = True
+            # Steer: fold any text the user typed mid-turn into the last tool result the
+            # model will read next, marked as their latest instruction. Appending to a tool
+            # result (rather than adding a user message) preserves role alternation and the
+            # tool_call↔result pairing every provider needs. Consumed only when there's a
+            # result to carry it; otherwise it stays buffered for the UI to handle at finish.
+            steer = task.take_steer()
+            if steer and results:
+                results[-1].content += _STEER_MARKER + steer
             conv.append(Message.results(results))
             if nudge_pending:
                 conv.append(Message.user(_LOOP_NUDGE))

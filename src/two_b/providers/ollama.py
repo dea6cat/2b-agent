@@ -6,7 +6,6 @@ on Ollama's own protocol, because the /v1 translation measurably degrades their
 tool selection. The serialized payload here is byte-equivalent to the validated
 prototype's.
 """
-import json
 import os
 
 import json as _json
@@ -25,6 +24,20 @@ CTX_FLOOR = 2048         # never pin below this
 CTX_ROUND = 1024         # round the computed window down to a clean multiple
 KV_RESERVE_BYTES = 3 * 1024 ** 3   # RAM kept free for OS + app + compute buffers
 KV_USE_FRACTION = 0.75             # of the RAM left after weights+reserve, give this to KV
+
+
+def _parse_args(args):
+    """Tool-call arguments as a dict. A small local model sometimes emits the
+    arguments as a (occasionally malformed) JSON string; a broken string must not
+    raise here and abort the task — it becomes {} so the host-side coercion +
+    required-arg check can hand the model a recoverable error instead. Mirrors the
+    guard the OpenAI-compatible adapter already applies."""
+    if isinstance(args, str):
+        try:
+            args = _json.loads(args)
+        except (ValueError, TypeError):
+            return {}
+    return args if isinstance(args, dict) else {}
 
 
 def _total_ram_bytes() -> int:
@@ -124,10 +137,18 @@ class OllamaProvider:
         return self._ctx_cache[model]
 
     def _options(self, model: str) -> dict:
-        """Runtime options. Locally we pin num_ctx to context_window so the model
-        actually runs at the size 2B budgets for (Ollama otherwise defaults to a
-        small ~4k window regardless of the model's trained max)."""
-        return {} if self.api_key is not None else {"num_ctx": self.context_window(model)}
+        """Runtime options. Conservative sampling (low temperature + a mild
+        repeat penalty) steadies small-model tool selection and curbs
+        degenerate loops — a host-side reliability lever, no schema change. We
+        deliberately do NOT pin a seed: an identical seed would make a repair
+        retry regenerate the same malformed call verbatim. Locally we also pin
+        num_ctx to context_window so the model runs at the size 2B budgets for
+        (Ollama otherwise defaults to a small ~4k window regardless of the
+        model's trained max)."""
+        opts = {"temperature": 0.2, "repeat_penalty": 1.1}
+        if self.api_key is None:
+            opts["num_ctx"] = self.context_window(model)
+        return opts
 
     def is_available(self) -> bool:
         if self.api_key is not None and not self.api_key:
@@ -174,15 +195,14 @@ class OllamaProvider:
         calls = []
         for c in msg.get("tool_calls") or []:
             fn = c["function"]
-            args = fn["arguments"]
-            if isinstance(args, str):
-                args = json.loads(args)
+            args = _parse_args(fn["arguments"])
             calls.append(ToolCall.new(name=fn["name"], arguments=args))
         text = (msg.get("content") or "").strip()
         thinking = (msg.get("thinking") or "").strip()
         return ProviderResponse(
             message=Message.assistant(text=text or None, thinking=thinking or None, tool_calls=calls),
             raw=raw,
+            done_reason=raw.get("done_reason"),
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
@@ -195,6 +215,7 @@ class OllamaProvider:
             "options": self._options(model),
         }
         content, thinking, calls = [], [], []
+        done_reason = None
         for line in post_stream(f"{self.host}/api/chat", payload, headers=self._headers(),
                                 provider=self.name):
             line = line.strip()
@@ -209,17 +230,17 @@ class OllamaProvider:
                 thinking.append(m["thinking"])
             for c in m.get("tool_calls") or []:
                 fn = c["function"]
-                args = fn["arguments"]
-                if isinstance(args, str):
-                    args = _json.loads(args)
+                args = _parse_args(fn["arguments"])
                 calls.append(ToolCall.new(name=fn["name"], arguments=args))
             if obj.get("done"):
+                done_reason = obj.get("done_reason")
                 break
         text = "".join(content).strip()
         think = "".join(thinking).strip()
         return ProviderResponse(
             message=Message.assistant(text=text or None, thinking=think or None, tool_calls=calls),
             raw={},
+            done_reason=done_reason,
         )
 
 

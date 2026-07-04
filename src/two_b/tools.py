@@ -7,6 +7,7 @@ Only the transport layer (which provider serializes this schema) changes in
 later milestones.
 """
 import difflib
+import json
 import os
 import re
 import shlex
@@ -706,3 +707,84 @@ def do_run_command(command, max_chars=None, cancel=None):
         head, tail = out[: max_chars * 2 // 3], out[-max_chars // 3:]
         out = f"{head}\n… [output truncated] …\n{tail}"
     return f"error: command exited {rc}\n{out}" if rc else out
+
+
+# --- tool-call arg coercion (host-side robustness for small models) ----------
+# A small model often emits a valid tool call in a malformed-but-recoverable
+# shape: the arguments as a JSON *string*, the real args nested one level under
+# an 'arguments'/'args' key, or the tool name present only *inside* that wrapper
+# (with an empty or generic outer name). coerce_tool_args untangles those shapes
+# before dispatch so a recoverable call isn't rejected. It never invents a name
+# or arguments — an unrecognizable shape yields empty args, which the required-
+# argument check then reports back to the model as a recoverable error.
+_NAME_KEYS = ("name", "tool", "action", "tool_name", "function")
+_ARG_KEYS = ("arguments", "args", "parameters", "params", "input", "tool_input")
+# Only these frozen tools are ever unwrapped from a wrapper shape. Their parameter
+# names never collide with a wrapper key, so unwrapping is unambiguous. run_git's
+# own parameter is literally named 'args', run_command takes a raw 'command', and
+# MCP tools carry arbitrary schemas that may legitimately have a sole 'input'/
+# 'params' object — unwrapping any of those would silently send the wrong shape.
+_UNWRAP_TOOLS = frozenset({"read_file", "edit_file", "write_file", "search_files", "list_files"})
+
+
+def _as_arg_dict(value) -> dict:
+    """A dict of arguments from `value`, re-parsing a stringified-JSON object.
+    Anything that isn't (or doesn't parse to) an object becomes {}."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if s:
+            try:
+                parsed = json.loads(s)
+            except (ValueError, TypeError):
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+    return {}
+
+
+def _unwrap_nested(args: dict) -> tuple[dict, str] | None:
+    """If `args` is only a wrapper around the real arguments — an 'arguments'/'args'/
+    'input' key plus at most a name key — return (inner_args, name_found_inside);
+    else None. 'name_found_inside' is '' when the wrapper carries no name key. The
+    'only a wrapper' guard keeps a genuine call that also carries one of these field
+    names from being unwrapped by mistake."""
+    for k in _ARG_KEYS:
+        if k in args:
+            inner = _as_arg_dict(args[k])
+            extra = set(args) - {k} - set(_NAME_KEYS)
+            if inner and not extra:
+                wrapped_name = ""
+                for nk in _NAME_KEYS:
+                    v = args.get(nk)
+                    if isinstance(v, str) and v.strip():
+                        wrapped_name = v.strip()
+                        break
+                return inner, wrapped_name
+    return None
+
+
+def coerce_tool_args(name: str, args, known: tuple[str, ...] = ()) -> tuple[str, dict]:
+    """Normalize a model's (name, arguments) into a clean (name, dict) before dispatch.
+
+    Recovers the common small-model malformations for the frozen file tools: args as
+    a JSON string, args nested under an 'arguments'/'args'/… key, or the tool name
+    present only inside that wrapper (with an empty/unknown outer name). `known` is the
+    set of currently-valid tool names; a name found inside a wrapper overrides an
+    empty or unknown outer name. Only the frozen file tools are unwrapped (see
+    _UNWRAP_TOOLS) — never run_git/run_command/MCP, whose own params could collide
+    with a wrapper key. Pure and side-effect free.
+    """
+    name = (name or "").strip()
+    args = _as_arg_dict(args)
+    unwrapped = _unwrap_nested(args)
+    if unwrapped is None:
+        return name, args
+    inner, wrapped_name = unwrapped
+    eff_name = name
+    if wrapped_name and (not name or (known and name not in known)):
+        eff_name = wrapped_name
+    if eff_name in _UNWRAP_TOOLS:
+        return eff_name, inner
+    return name, args

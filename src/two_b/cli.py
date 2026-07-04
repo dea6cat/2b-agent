@@ -342,11 +342,24 @@ def main() -> None:
         raise SystemExit(0)
 
     if args.print_ctx is not None:
-        from . import registry
+        from . import catalog, registry
         m = args.print_ctx or args.model or orchestrator.pick_default_model()
+        # Ollama-first, matching orchestrator.context_budget: a locally-pulled
+        # model whose name collides with a cloud catalog entry (codestral,
+        # devstral, …) must report its real pinned num_ctx, not cloud numbers.
         ol = registry.build_registry().get("ollama")
-        win = ol.context_window(m) if ol is not None else 0
-        console.print(f"{m}: {win} tokens (num_ctx 2B will pin on this machine)")
+        try:
+            local_models = ol.list_models() if ol is not None else []
+        except Exception:
+            local_models = []
+        info = catalog.lookup(m)
+        if info is not None and m not in local_models:
+            imgs = "yes" if info.supports_images else "no"
+            console.print(f"{m}: {info.context_window} tokens context · "
+                          f"{info.default_max_tokens} max output · images: {imgs} (catalog)")
+        else:
+            win = ol.context_window(m) if ol is not None else 0
+            console.print(f"{m}: {win} tokens (num_ctx 2B will pin on this machine)")
         raise SystemExit(0)
 
     try:

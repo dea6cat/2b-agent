@@ -109,7 +109,7 @@ class DenyRerunWiring(unittest.TestCase):
         with mock.patch.object(tools.seatbelt, "wrap", return_value=(fake, False)), \
              mock.patch.object(tools, "_run_cancellable", side_effect=runner):
             out = tools.do_run_command("cmd", on_denied=lambda: True)
-        self.assertEqual(out, "done")
+        self.assertIn("done", out)               # output is fenced as untrusted
         self.assertEqual(calls, [False, True])   # sandboxed then unsandboxed re-run
 
 

@@ -16,7 +16,7 @@ import subprocess
 import threading
 import time
 
-from . import seatbelt
+from . import seatbelt, untrusted
 
 MAX_FILE_BYTES = 200_000
 GIT_TIMEOUT = 120
@@ -283,7 +283,7 @@ def do_read_file(path, max_chars=None):
                     break
                 if i >= lo:
                     seg.append(line.rstrip("\n"))
-        return f"{note}# {rel} lines {lo}-{hi}\n" + "\n".join(seg)
+        return f"{note}# {rel} lines {lo}-{hi}\n" + untrusted.wrap("\n".join(seg), f"read_file:{rel}")
 
     if os.path.getsize(full) > MAX_FILE_BYTES:
         return f'error: file too large ({os.path.getsize(full)} bytes) — read a section, e.g. read_file "{rel}:1-200"'
@@ -298,7 +298,10 @@ def do_read_file(path, max_chars=None):
     outline = symbols.outline(full)
     if outline and max_chars and len(note) + len(content) + len(outline) > max_chars:
         outline = ""                                       # never push the read past its budget
-    return note + content + outline
+    # Fence content AND the outline together: the outline is derived from the (untrusted)
+    # file bytes (raw declaration lines), so it must live INSIDE the fence — appending it
+    # after the close would smuggle attacker text into a trusted-looking region.
+    return note + untrusted.wrap(content + outline, f"read_file:{rel}")
 
 
 def do_write_file(path, content, auto_yes):
@@ -369,11 +372,13 @@ def do_search_files(query, path):
             header = "defined in: " + "; ".join(f"{l.path}:{l.line}" for l in locs[:5]) + "\n"
     if overflow:
         return (
-            header + "\n".join(ordered[:MAX_SEARCH_MATCHES])
+            header + untrusted.wrap("\n".join(ordered[:MAX_SEARCH_MATCHES]), f"search_files:{query}")
             + f"\n(stopped after {MAX_SEARCH_MATCHES} matches — too broad. "
             "Narrow the query, e.g. include a type/keyword, or add a more specific path.)"
         )
-    return header + "\n".join(ordered) if ordered else f"no matches for '{query}' under {path}"
+    if not ordered:
+        return f"no matches for '{query}' under {path}"
+    return header + untrusted.wrap("\n".join(ordered), f"search_files:{query}")
 
 
 def _leading_ws(s: str) -> str:
@@ -787,6 +792,7 @@ def do_run_git(args, max_chars=None, cancel=None):
     if max_chars and len(out) > max_chars:
         head, tail = out[: max_chars * 2 // 3], out[-max_chars // 3:]
         out = f"{head}\n… [git output truncated] …\n{tail}"
+    out = untrusted.wrap(out, f"run_git:{parts[0]}")   # repo content is untrusted (commit msgs, diffs)
     return f"error: git exited {rc}\n{out}" if rc else out
 
 
@@ -831,6 +837,7 @@ def do_run_command(command, max_chars=None, cancel=None, on_denied=None):
     if max_chars and len(out) > max_chars:
         head, tail = out[: max_chars * 2 // 3], out[-max_chars // 3:]
         out = f"{head}\n… [output truncated] …\n{tail}"
+    out = untrusted.wrap(out, "run_command")   # command output is untrusted (may carry injected text)
     if not rc:
         return out
     msg = f"error: command exited {rc}\n{out}"

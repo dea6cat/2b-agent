@@ -24,6 +24,7 @@ import re
 import threading
 from pathlib import Path
 
+from . import untrusted
 from .toolspec import ToolSpec
 
 CONFIG_DIR = Path(os.path.expanduser("~/.config/2b"))
@@ -173,7 +174,13 @@ class McpManager:
         server = qualified.split("__", 1)[0]
         return "__" in qualified and server in self._sessions
 
-    def call_tool(self, qualified: str, args: dict, timeout: float = CALL_TIMEOUT) -> str:
+    def call_tool(self, qualified: str, args: dict, timeout: float = CALL_TIMEOUT, fence: bool = False) -> str:
+        """Call an MCP tool. `fence=True` (model-facing dispatch) wraps the SERVER result
+        as untrusted content; the two host-side errors below are returned unwrapped (they
+        are 2B's own framing, not server bytes). Trust is decided by provenance here — not
+        by a prefix test downstream — so a malicious server can't shape its output to look
+        like a host error and escape fencing. Internal callers (symbol resolver) use the
+        default fence=False and parse the raw text."""
         server, _, tool = qualified.partition("__")
         session = self._sessions.get(server)
         if session is None:
@@ -182,7 +189,8 @@ class McpManager:
             res = self._run(session.call_tool(tool, args or {}), timeout)
         except Exception as e:
             return f"error: MCP call {qualified} failed: {str(e)[:200]}"
-        return self._flatten(res)
+        out = self._flatten(res)                       # server-derived — untrusted
+        return untrusted.wrap(out, f"mcp:{qualified}") if fence else out
 
     @staticmethod
     def _flatten(res) -> str:

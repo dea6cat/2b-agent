@@ -49,7 +49,8 @@ class SearchTagging(Project):
         self._write("uses.py", "s = Session()\nreturn Session\n")
         self._write("model.py", "class Session:\n    pass\n")
         out = tools.do_search_files("Session", ".")
-        lines = out.splitlines()
+        # matches are fenced as untrusted content; drop the fence marker lines
+        lines = [l for l in out.splitlines() if not l.startswith(("<untrusted_data", "</untrusted_data"))]
         self.assertTrue(lines[0].startswith("▸def "))          # definition floated to top
         self.assertIn("class Session:", lines[0])
         self.assertEqual(sum(l.startswith("▸def ") for l in lines), 1)  # only the real def
@@ -77,7 +78,8 @@ class SearchTagging(Project):
         out = tools.do_search_files("foo", ".")
         self.assertIn("stopped after", out)
         # bounded: at most MAX_SEARCH_MATCHES match lines (+ optional header + note line)
-        body = [l for l in out.splitlines() if l and not l.startswith(("defined in:", "(stopped"))]
+        body = [l for l in out.splitlines() if l and not l.startswith(
+            ("defined in:", "(stopped", "<untrusted_data", "</untrusted_data"))]
         self.assertLessEqual(len(body), tools.MAX_SEARCH_MATCHES)
 
 

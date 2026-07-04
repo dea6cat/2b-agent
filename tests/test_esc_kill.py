@@ -23,7 +23,7 @@ class Cancellable(unittest.TestCase):
         return os.path.join(d, "marker")
 
     def test_normal_command_still_returns_output(self):
-        self.assertEqual(tools.do_run_command("echo hello").strip(), "hello")
+        self.assertIn("hello", tools.do_run_command("echo hello"))   # output is fenced as untrusted
 
     def test_nonzero_exit_is_flagged(self):
         out = tools.do_run_command("sh -c 'exit 3'")

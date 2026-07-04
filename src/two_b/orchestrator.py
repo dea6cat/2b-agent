@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import catalog, conversation, diagnostics, mcp_client, planparse, registry, tools
+from . import catalog, conversation, diagnostics, mcp_client, planparse, registry, tools, verify
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers.base import ProviderError, stream_with_retry
 from .session import PendingConfirmation, Session, Task, TaskState
@@ -677,7 +677,7 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
         task.push_edit(path, pre)
         task.last_diff = preview
         _refresh_mtime(task, path)
-        result += diagnostics.summarize(path)
+        result += diagnostics.summarize(path) + verify.summarize_edit(content)
     return result
 
 
@@ -709,7 +709,7 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
         task.push_edit(path, pre)
         task.last_diff = diff
         _refresh_mtime(task, path)
-        result += diagnostics.summarize(path)
+        result += diagnostics.summarize(path) + verify.summarize_edit(new_text)
     return result
 
 
@@ -785,7 +785,7 @@ def apply_worker_changes(session: Session, task: Task, changes) -> str:
             task.push_edit(ap, pre)
             task.last_diff = combined_preview
             _refresh_mtime(task, ap)
-            res += diagnostics.summarize(ap)
+            res += diagnostics.summarize(ap) + verify.summarize_edit(final)
         applied.append(res)
     lines.append(f"applied {len(to_apply)} worker change(s):")
     lines.extend(applied)
@@ -985,10 +985,14 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     first_turn = not any(m.role.value == "assistant" for m in conv.messages)
     loop_guard = _LoopGuard()
     promise_nudges = 0   # times we've nudged a "said it'd call a tool but didn't" turn
+    verify_nudged = False  # done-verify reminder fires at most once per task
     try:
+        # The project's real check commands (test/lint), discovered once, to remind a model
+        # that can run commands to verify its edits before finishing (see below). Inside the
+        # try so even a surprise here lands on the never-throw closure.
+        repo_checks = verify.discover_checks(os.getcwd()) if not os.environ.get("TWOB_NO_VERIFY") else []
         # Valid tool names for this task, so coerce_tool_args can let a name nested in
-        # a malformed wrapper override an empty/unknown outer name. Fixed for the task;
-        # inside the try so even a surprise here lands on the never-throw closure.
+        # a malformed wrapper override an empty/unknown outer name. Fixed for the task.
         known_tools = tuple(s.name for s in _active_specs(is_local))
         loop_broken = False   # last turn's breaker state; read post-loop to pick the final prompt
         for _ in range(MAX_TURNS):
@@ -1055,6 +1059,18 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                     promise_nudges += 1
                     conv.append(msg)
                     conv.append(Message.user(_PROMISE_NUDGE))
+                    continue
+                # Done-verify (once): if the model made edits and can run commands, remind it
+                # to run the project's real checks before finishing — the deterministic
+                # counterpart to "declare done, then actually verify". Local models (run_git
+                # only) can't run project checks, so it's skipped for them.
+                if (content and not verify_nudged and not is_local and repo_checks and task.edit_history):
+                    verify_nudged = True
+                    conv.append(msg)
+                    conv.append(Message.user(
+                        "Before finishing: you've edited files but haven't verified them. Run the "
+                        f"project's checks with run_command ({', '.join(repo_checks[:3])}) and fix any "
+                        "failures; if they pass (or you already ran them), give your final answer."))
                     continue
                 planparse.finalize_steps(task.plan_steps)
                 task.status_line = ""

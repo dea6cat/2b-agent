@@ -29,6 +29,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from enum import Enum
@@ -92,6 +93,9 @@ TOOL_ARG_HINT = (
     "  write_file{path, content}\n"
     "  run_git{args}\n"
     "  run_command{command}"
+    "\n\nWhen you need several independent read-only lookups (read_file, search_files, "
+    "list_files), you may request them together in one step — they run in parallel. A "
+    "single tool call per step is equally fine; do whichever is clearer."
 )
 SYSTEM_PROMPT = BASE_SYSTEM_PROMPT + TOOL_ARG_HINT + planparse.PLAN_PROMPT
 
@@ -537,6 +541,51 @@ def _read_guard(task: Task, path: str) -> str:
             "use them instead of reading it again)")
 
 
+# --- parallel read batching --------------------------------------------------
+
+_PARALLEL_READ_CAP = 8   # max concurrent reads per batch — plenty for a real turn
+
+
+def _is_parallel_read(name: str, args) -> bool:
+    """True if this call is a lock-free, side-effect-free filesystem read that can run
+    concurrently with other reads: no confirmation, no mutation, no plan-mode gate, no
+    shared-state hazard. Only the three pure-read file tools qualify. run_git is
+    excluded even when read-only — concurrent git processes can collide on
+    .git/index.lock (e.g. `git status` refreshing it); run_command/edit/write stay
+    serialized behind their gates."""
+    return name in ("read_file", "list_files", "search_files")
+
+
+def _run_reads_concurrently(session: Session, task: Task, calls, read_cap):
+    """Execute a batch of parallel-safe reads concurrently, preserving call order.
+
+    Identical (name, args) calls are deduped — a model that repeats a read in one batch
+    does the I/O once (and doesn't pile identical results toward the loop-guard's stop).
+    Only the tool I/O runs in threads; the sole task state they touch is read_mtimes,
+    whose writes are atomic under the GIL (distinct files → distinct keys; a repeated
+    file → same key, same value), and the read-streak is reset by the caller after the
+    batch. No stdout redirect: the three parallel read tools don't print, and
+    redirect_stdout patches the *global* sys.stdout — unsafe across threads — so any
+    tool added to _is_parallel_read must stay print-free. A read that raises becomes an
+    error string so one failure never sinks the batch (the never-throw contract)."""
+    order, unique = [], {}
+    for c in calls:
+        key = f"{c.name}|{json.dumps(c.arguments, sort_keys=True, default=str)}"
+        order.append(key)
+        unique.setdefault(key, c)
+
+    def one(c):
+        try:
+            return _dispatch_tool(session, task, c.name, c.arguments, read_cap, batch=True)
+        except Exception as e:
+            return f"error: {_classify_exc(e)}"
+    keys = list(unique)
+    workers = min(len(keys), _PARALLEL_READ_CAP)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        computed = dict(zip(keys, ex.map(lambda k: one(unique[k]), keys)))
+    return [computed[k] for k in order]
+
+
 # --- write/edit wrappers: snapshot for /undo, confirm via UI, then apply -----
 
 def apply_write(session: Session, task: Task, path: str, content: str) -> str:
@@ -729,7 +778,11 @@ def _missing_required(name: str, args) -> list[str]:
     return [k for k in req if args.get(k) is None]
 
 
-def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap: int | None = None) -> str:
+def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap: int | None = None,
+                   batch: bool = False) -> str:
+    # batch=True: this call is running as part of a concurrent read batch. The read-loop
+    # guard, read-streak bookkeeping, and stdout redirect are skipped (the batch caller
+    # owns streak reset and one shared redirect), so nothing races on shared task state.
     if not name:
         # A tool call with no name usually means the model echoed tool-call-like
         # text it read from a file (XML/JSON) as if it were a call. Tell it plainly
@@ -743,9 +796,10 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
         need = ", ".join(_REQUIRED_ARGS[name])
         return (f"error: {name} call is missing required argument(s): {', '.join(missing)}. "
                 f"Call {name} again with all of: {need}.")
-    if name != "read_file":
+    if not batch and name != "read_file":
         # Any non-read action breaks a read streak, so the read-loop breaker only
-        # counts *consecutive* identical reads with nothing done in between.
+        # counts *consecutive* identical reads with nothing done in between. (In a
+        # concurrent read batch the caller resets the streak once, after the batch.)
         task.last_read_arg = None
         task.read_repeat = 0
     if session.read_only and name in ("edit_file", "write_file"):
@@ -773,23 +827,33 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
         return apply_edit(session, task, args["path"], args["old_text"], args["new_text"])
     if name == "write_file":
         return apply_write(session, task, args["path"], args["content"])
-    # read-only tools: capture any stray stdout, none expected
-    buf = io.StringIO()
-    with redirect_stdout(buf):
+
+    def _read_only() -> str:
         if name == "list_files":
             return tools.do_list_files(args.get("path", "."), max_chars=read_cap)
         if name == "read_file":
-            guard = _read_guard(task, args["path"])
-            if guard:
-                return guard
+            if not batch:                              # dedup / loop-breaker: sequential reads only
+                guard = _read_guard(task, args["path"])
+                if guard:
+                    return guard
             out = tools.do_read_file(args["path"], max_chars=read_cap)
             _record_read(task, args["path"])
-            task.last_read_arg = args["path"]
-            task.read_repeat = 1
+            if not batch:                              # streak state is per-sequential-read
+                task.last_read_arg = args["path"]
+                task.read_repeat = 1
             return out
         if name == "search_files":
             return tools.do_search_files(args["query"], args.get("path", "."))
-    return f"error: unknown tool {name}"
+        return f"error: unknown tool {name}"
+
+    # In a batch the concurrent caller owns one process-wide stdout redirect (redirect_stdout
+    # patches the global sys.stdout and can't be nested per-thread); otherwise capture any
+    # stray stdout here, though the read tools aren't expected to print.
+    if batch:
+        return _read_only()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        return _read_only()
 
 
 # --- the turn loop -----------------------------------------------------------
@@ -951,46 +1015,81 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 return
 
             conv.append(msg)
+            calls = msg.tool_calls
+            # Normalize each malformed-but-recoverable call shape (stringified args, args
+            # nested under an "arguments" key, name only inside the wrapper) up front — so
+            # classification, display, plan inference, dispatch, and the loop-guard all see
+            # the same coerced values that actually ran.
+            for tc in calls:
+                tc.name, tc.arguments = tools.coerce_tool_args(tc.name, tc.arguments, known_tools)
             results = []
             nudge_pending = False
-            for tc in msg.tool_calls:
-                if task.cancel_flag.is_set():        # esc while tools are running
-                    _finish_stopped(task, on_event)
-                    return
-                # Normalize a malformed-but-recoverable call shape (stringified args,
-                # args nested under an "arguments" key, name only inside the wrapper)
-                # before anything reads it — so display, plan inference, dispatch, and
-                # the loop-guard all see the same coerced values that actually ran.
-                tc.name, tc.arguments = tools.coerce_tool_args(tc.name, tc.arguments, known_tools)
+
+            def _emit_start(tc):
                 planparse.infer_active_step(task.plan_steps, tc.name, tc.arguments)
                 task.status_line = _STATUS.get(tc.name, "Working")
                 shown = {k: (v if k != "content" else f"<{len(v)} chars>") for k, v in tc.arguments.items()}
                 on_event(AgentEvent(EventType.TOOL_CALL_START, task.id, {"name": tc.name, "shown": shown}))
-                try:
-                    result = _dispatch_tool(session, task, tc.name, tc.arguments, read_cap)
-                except Exception as e:
-                    # esc can tear a tool's helper (LSP/MCP) out from under it mid-call;
-                    # when cancelled, finish quietly rather than surfacing that as an error.
-                    # Log the exception first so an *unrelated* failure that merely
-                    # coincided with the stop isn't lost without a trace.
-                    if task.cancel_flag.is_set():
-                        on_event(AgentEvent(EventType.LOG, task.id,
-                                            {"text": f"(stopped while {tc.name} was running: {e})"}))
-                        _finish_stopped(task, on_event)
-                        return
-                    raise
+
+            def _record(tc, result) -> str:
                 on_event(AgentEvent(EventType.TOOL_CALL_RESULT, task.id, {"name": tc.name, "result": result}))
                 results.append(ToolResult(tool_call_id=tc.id, content=result))
-                verdict = loop_guard.record(tc.name, tc.arguments, result)
-                if verdict == "stop":
-                    conv.append(Message.results(results))
-                    task.status_line = ""
-                    on_event(AgentEvent(EventType.LOG, task.id,
-                                        {"text": f"Stopped: {tc.name} repeated with no progress."}))
+                return loop_guard.record(tc.name, tc.arguments, result)
+
+            def _stopped_repeat(tc):
+                conv.append(Message.results(results))
+                task.status_line = ""
+                on_event(AgentEvent(EventType.LOG, task.id,
+                                    {"text": f"Stopped: {tc.name} repeated with no progress."}))
+                _finish_stopped(task, on_event)
+
+            # Fast path: when the whole batch is side-effect-free reads, run their I/O
+            # concurrently (the biggest speed lever on multi-read/-search turns), then emit
+            # each start/result pair in order so the single-slot TUI tool line stays correct.
+            if len(calls) > 1 and all(_is_parallel_read(c.name, c.arguments) for c in calls):
+                if task.cancel_flag.is_set():
                     _finish_stopped(task, on_event)
                     return
-                if verdict == "nudge":
-                    nudge_pending = True
+                task.status_line = "Reading"
+                computed = _run_reads_concurrently(session, task, calls, read_cap)
+                task.last_read_arg = None            # a multi-read batch isn't a single-file loop
+                task.read_repeat = 0
+                for tc, result in zip(calls, computed):
+                    if task.cancel_flag.is_set():
+                        _finish_stopped(task, on_event)
+                        return
+                    _emit_start(tc)
+                    verdict = _record(tc, result)
+                    if verdict == "stop":
+                        _stopped_repeat(tc)
+                        return
+                    if verdict == "nudge":
+                        nudge_pending = True
+            else:
+                for tc in calls:
+                    if task.cancel_flag.is_set():        # esc while tools are running
+                        _finish_stopped(task, on_event)
+                        return
+                    _emit_start(tc)
+                    try:
+                        result = _dispatch_tool(session, task, tc.name, tc.arguments, read_cap)
+                    except Exception as e:
+                        # esc can tear a tool's helper (LSP/MCP) out from under it mid-call;
+                        # when cancelled, finish quietly rather than surfacing that as an error.
+                        # Log the exception first so an *unrelated* failure that merely
+                        # coincided with the stop isn't lost without a trace.
+                        if task.cancel_flag.is_set():
+                            on_event(AgentEvent(EventType.LOG, task.id,
+                                                {"text": f"(stopped while {tc.name} was running: {e})"}))
+                            _finish_stopped(task, on_event)
+                            return
+                        raise
+                    verdict = _record(tc, result)
+                    if verdict == "stop":
+                        _stopped_repeat(tc)
+                        return
+                    if verdict == "nudge":
+                        nudge_pending = True
             conv.append(Message.results(results))
             if nudge_pending:
                 conv.append(Message.user(_LOOP_NUDGE))

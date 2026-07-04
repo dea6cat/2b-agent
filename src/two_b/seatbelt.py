@@ -1,7 +1,9 @@
-"""macOS write-confinement sandbox for run_command — a host-side backstop that
-confines a command's *writes* to the workspace (plus temp/cache dirs), so a
-misbehaving or prompt-injected cloud model can't clobber files outside the project.
-Never a model-facing tool; dep-free; the policy/argv builders are pure.
+"""OS write-confinement sandbox for run_command — a host-side backstop that confines a
+command's *writes* to the workspace (plus temp/cache dirs), so a misbehaving or
+prompt-injected cloud model can't clobber files outside the project. macOS backend =
+`sandbox-exec` (seatbelt/SBPL); Linux backend = `bwrap` (bubblewrap). Never a model-facing
+tool; dep-free; the policy/argv builders are pure. (The module keeps the "seatbelt" name
+and the TWOB_SEATBELT env vars for historical continuity; it now covers both OSes.)
 
 Model: **permissive-base + deny-writes** SBPL, not deny-default. `(allow default)`
 keeps reads / exec / network working (so `npm test`, `pytest`, compilers don't
@@ -11,16 +13,27 @@ NOT an exfiltration boundary — reads and network stay open, so data-theft is c
 by the command-approval layer (cmdguard), not here. `strict` mode additionally denies
 network for users who want that hard guarantee (at the cost of breaking npm/pip/fetch).
 
-Posture (resolved by mode()): **on by default**; `TWOB_NO_SEATBELT` disables it;
-`TWOB_SEATBELT=strict` adds the network deny. Non-macOS or a missing sandbox binary
+Posture (resolved by mode()): **on by default** on macOS (sandbox-exec present) and Linux
+(bwrap present); `TWOB_NO_SEATBELT` disables it; `TWOB_SEATBELT=strict` adds a network deny
+(macOS: `(deny network*)`; Linux: `--unshare-net`). A platform without its sandbox binary
 degrades to off (we can't confine, so we don't pretend to). run_command is the only
-sandboxed tool — run_git is git-only and left unconfined in v1.
+sandboxed tool — run_git is git-only and left unconfined. Both backends confine WRITES only
+and leave reads open (read-based exfil is handled by the command-approval layer, not here).
 
 Not an airtight jail (by design — it's a backstop, paired with cmdguard's command
 approval): the permissive base leaves mach-lookup/IPC open, so a command that asks a
 system service to write for it (launchctl/osascript, etc.) can step outside. Those
 escalation commands are folded into cmdguard.is_high_risk so they re-prompt even under
 a grant; the sandbox stops the common/accidental cases, and Layer 1 gates the rest.
+
+Linux (bwrap) caveats — parallels to the macOS disclosure above, pending on-Linux
+validation (this module is developed/tested on macOS; the Linux behavioral tests skip
+there): (1) only the mount namespace is unshared, so a same-UID sibling process's open
+fd via /proc/<pid>/fd could be a write path out where Yama ptrace_scope permits it —
+niche, and --unshare-pid is deferred until esc-kill interaction can be verified on Linux;
+(2) is_available() checks that the bwrap binary is present, not that unprivileged user
+namespaces are enabled — on a box where they're disabled, a run would fail at bwrap setup
+(degrading like any command error). Both are Linux-validation items, not shipped guarantees.
 
 Security notes carried from the reference implementation:
   * `/usr/bin/sandbox-exec` is HARD-PINNED (never PATH-resolved) — a tampered binary
@@ -32,10 +45,15 @@ Security notes carried from the reference implementation:
     unwritable AND uncreatable (a plain subpath leaves a gap for first-time mkdir).
 """
 import os
+import shutil
 import sys
 
 # Hard-pinned, never resolved via PATH — see module docstring.
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# Preferred absolute path for bubblewrap; falls back to PATH lookup if not there. Unlike
+# sandbox-exec, bwrap's location varies by distro, so a hard pin alone would miss it — the
+# fixed path is tried first (safer) before a PATH resolve (mild residual risk on Linux).
+_BWRAP_PREFERRED = "/usr/bin/bwrap"
 
 # Device writes many benign commands need even under (deny file-write*).
 _DEV_WRITES = ("/dev/null", "/dev/zero", "/dev/dtracehelper", "/dev/tty", "/dev/stdout", "/dev/stderr")
@@ -43,13 +61,30 @@ _DEV_WRITES = ("/dev/null", "/dev/zero", "/dev/dtracehelper", "/dev/tty", "/dev/
 # A non-zero command whose output carries one of these — while sandboxed — is very
 # likely a sandbox denial rather than an ordinary failure (best-effort; feeds the
 # "blocked from writing outside the workspace — re-run?" prompt, never an auto-action).
-_DENIAL_MARKERS = ("operation not permitted", "sandbox_apply", "deny file-write")
+# "read-only file system" is the bwrap analog (a write to a ro-bound path yields EROFS).
+_DENIAL_MARKERS = ("operation not permitted", "sandbox_apply", "deny file-write",
+                   "read-only file system")
+
+
+def _bwrap_path() -> str | None:
+    """Resolved bubblewrap path (preferred fixed location, else PATH), or None."""
+    if os.path.exists(_BWRAP_PREFERRED):
+        return _BWRAP_PREFERRED
+    return shutil.which("bwrap")
+
+
+def _macos_available() -> bool:
+    return sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC)
+
+
+def _linux_available() -> bool:
+    return sys.platform.startswith("linux") and _bwrap_path() is not None
 
 
 def is_available() -> bool:
-    """True only on macOS with the seatbelt binary present — otherwise we can't
-    confine anything and mode() degrades to 'off'."""
-    return sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC)
+    """True when the current OS has its write-confinement backend available (macOS
+    sandbox-exec / Linux bwrap) — otherwise mode() degrades to 'off'."""
+    return _macos_available() or _linux_available()
 
 
 def _env_disabled() -> bool:
@@ -101,7 +136,9 @@ def writable_roots() -> list[str]:
         if not c:
             continue
         rp = os.path.realpath(c)
-        if os.path.isabs(rp) and rp not in seen:
+        # Never make "/" a writable root — it would re-expose the whole filesystem
+        # (and /dev, /proc) read-write and defeat confinement (degenerate cwd=/ case).
+        if os.path.isabs(rp) and rp != "/" and rp not in seen:
             seen.add(rp)
             out.append(rp)
     return out
@@ -159,15 +196,71 @@ def build_argv(command: str, roots: list[str], protected: list[str], *, strict: 
     return argv
 
 
+def build_bwrap_argv(command: str, roots: list[str], ro_protected: list[str],
+                     tmpfs_protected: list[str], bwrap: str, *, strict: bool = False) -> list[str]:
+    """Full argv for `bwrap … -- /bin/sh -c <command>` (Linux). Whole filesystem bound
+    read-only, then each writable root bound read-write over it, then protected dirs
+    locked on top (bwrap applies binds in ARG ORDER; later overrides earlier):
+      * `ro_protected` (EXISTING .git / 2B config) → `--ro-bind-try`: readable but not
+        writable, matching the macOS backend.
+      * `tmpfs_protected` (MISSING protected paths) → `--tmpfs`: an ephemeral empty dir so
+        the command can't CREATE them on the real fs (e.g. plant a .git/hooks backdoor in a
+        non-repo dir). A write "succeeds" into the throwaway tmpfs and is discarded. This is
+        the Linux stand-in for the macOS literal+subpath "uncreatable" guarantee.
+    Paths must be absolute (writable_roots/protected_paths guarantee this)."""
+    for p in [*roots, *ro_protected, *tmpfs_protected]:
+        if not os.path.isabs(p):
+            raise ValueError(f"seatbelt root must be absolute: {p!r}")
+    argv = [bwrap,
+            "--ro-bind", "/", "/",       # everything readable, read-only by default
+            "--dev", "/dev",             # fresh writable devtmpfs (/dev/null etc.)
+            "--proc", "/proc",
+            "--die-with-parent"]         # child dies if 2B does
+    for r in roots:
+        argv += ["--bind-try", r, r]     # re-open the writable roots for writing
+    for p in ro_protected:
+        argv += ["--ro-bind-try", p, p]  # existing .git / 2B config: readable, unwritable
+    for p in tmpfs_protected:
+        argv += ["--tmpfs", p]           # missing protected path: uncreatable (throwaway)
+    if strict:
+        argv += ["--unshare-net"]        # network deny (parity with macOS strict)
+    argv += ["--", "/bin/sh", "-c", command]
+    return argv
+
+
+def _ensure_writable_roots_exist(roots: list[str]) -> None:
+    """Pre-create a missing writable root when its parent already exists (best-effort), so
+    bwrap can bind it read-write. Without this, `--bind-try` silently skips a not-yet-created
+    package cache (~/.cargo/registry, ~/.gradle/caches, …) and the first cargo/gradle/pub run
+    fails with EROFS — a regression vs the macOS backend, whose subpath rule matches a path
+    whether or not it exists. Guarded on parent-exists so we don't litter dirs for tools that
+    aren't installed."""
+    for r in roots:
+        if not os.path.exists(r) and os.path.isdir(os.path.dirname(r)):
+            try:
+                os.makedirs(r, exist_ok=True)
+            except OSError:
+                pass
+
+
 def wrap(command: str) -> tuple[list[str] | None, bool]:
-    """(argv, strict) for running `command` under the sandbox, or (None, False) when
+    """(argv, strict) for running `command` under the OS sandbox, or (None, False) when
     the sandbox is off/unavailable (caller runs the command directly). `strict` is
     surfaced so the caller can tailor a denial message (network was blocked)."""
     m = mode()
     if m == "off":
         return (None, False)
     strict = m == "strict"
-    return (build_argv(command, writable_roots(), protected_paths(), strict=strict), strict)
+    roots, protected = writable_roots(), protected_paths()
+    if sys.platform == "darwin":
+        return (build_argv(command, roots, protected, strict=strict), strict)
+    bwrap = _bwrap_path()
+    if bwrap is None:                    # defensive: mode() is 'off' when unavailable
+        return (None, False)
+    _ensure_writable_roots_exist(roots)
+    ro_protected = [p for p in protected if os.path.exists(p)]     # existing: readable+ro
+    tmpfs_protected = [p for p in protected if not os.path.exists(p)]  # missing: uncreatable
+    return (build_bwrap_argv(command, roots, ro_protected, tmpfs_protected, bwrap, strict=strict), strict)
 
 
 def looks_like_denial(returncode, output: str) -> bool:

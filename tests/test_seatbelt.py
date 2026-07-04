@@ -67,6 +67,7 @@ class Pure(unittest.TestCase):
         self.assertFalse(seatbelt.looks_like_denial(0, "Operation not permitted"))
         self.assertFalse(seatbelt.looks_like_denial(1, "syntax error near token"))
         self.assertTrue(seatbelt.looks_like_denial(1, "sh: f: Operation not permitted"))
+        self.assertTrue(seatbelt.looks_like_denial(1, "touch: /etc/x: Read-only file system"))  # bwrap
 
     def test_mode_env(self):
         with mock.patch.object(seatbelt, "is_available", return_value=True):
@@ -113,7 +114,95 @@ class DenyRerunWiring(unittest.TestCase):
         self.assertEqual(calls, [False, True])   # sandboxed then unsandboxed re-run
 
 
+class BwrapPure(unittest.TestCase):
+    def test_argv_structure(self):
+        argv = seatbelt.build_bwrap_argv("echo hi > f", ["/ws", "/tmp/x"], ["/ws/.git"], [], "/usr/bin/bwrap")
+        self.assertEqual(argv[0], "/usr/bin/bwrap")
+        self.assertEqual(argv[-3:], ["/bin/sh", "-c", "echo hi > f"])
+        # whole fs read-only, then writable roots rw, then protected re-locked ro
+        self.assertEqual(argv[1:4], ["--ro-bind", "/", "/"])
+        self.assertIn("--die-with-parent", argv)
+        joined = " ".join(argv)
+        self.assertIn("--bind-try /ws /ws", joined)
+        self.assertIn("--bind-try /tmp/x /tmp/x", joined)
+        self.assertIn("--ro-bind-try /ws/.git /ws/.git", joined)
+        # existing protected re-lock must come AFTER the writable-root binds
+        self.assertLess(joined.index("--bind-try /ws /ws"), joined.index("--ro-bind-try /ws/.git"))
+        self.assertNotIn("--unshare-net", argv)
+
+    def test_missing_protected_uses_tmpfs(self):
+        # a missing protected path (e.g. .git in a non-repo dir) is made uncreatable via tmpfs
+        argv = seatbelt.build_bwrap_argv("x", ["/ws"], [], ["/ws/.git"], "/usr/bin/bwrap")
+        self.assertIn("--tmpfs", argv)
+        self.assertIn("--tmpfs /ws/.git", " ".join(argv))
+        self.assertNotIn("--ro-bind-try /ws/.git", " ".join(argv))
+
+    def test_strict_unshares_net(self):
+        argv = seatbelt.build_bwrap_argv("x", ["/ws"], [], [], "/usr/bin/bwrap", strict=True)
+        self.assertIn("--unshare-net", argv)
+
+    def test_relative_root_rejected(self):
+        with self.assertRaises(ValueError):
+            seatbelt.build_bwrap_argv("x", ["rel/dir"], [], [], "/usr/bin/bwrap")
+
+    def test_root_slash_never_writable(self):
+        # degenerate cwd=="/" must not become a writable root (would defeat confinement)
+        import os as _os
+        cwd = _os.getcwd()
+        try:
+            _os.chdir("/")
+            self.assertNotIn("/", seatbelt.writable_roots())
+        finally:
+            _os.chdir(cwd)
+
+
 _CAN_SANDBOX = sys.platform == "darwin" and os.path.exists(seatbelt.SANDBOX_EXEC)
+_CAN_BWRAP = sys.platform.startswith("linux") and seatbelt._bwrap_path() is not None
+
+
+@unittest.skipUnless(_CAN_BWRAP, "requires Linux bubblewrap")
+class LinuxBwrapBehavior(unittest.TestCase):
+    def setUp(self):
+        self.ws = tempfile.mkdtemp()
+        os.mkdir(os.path.join(self.ws, ".git"))
+        self._cwd = os.getcwd()
+        os.chdir(self.ws)
+        self.addCleanup(os.chdir, self._cwd)
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def _run(self, command, strict=False):
+        roots = seatbelt.writable_roots()
+        seatbelt._ensure_writable_roots_exist(roots)
+        prot = seatbelt.protected_paths()
+        ro = [p for p in prot if os.path.exists(p)]
+        tm = [p for p in prot if not os.path.exists(p)]
+        argv = seatbelt.build_bwrap_argv(command, roots, ro, tm, seatbelt._bwrap_path(), strict=strict)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=30)
+
+    def test_write_inside_succeeds(self):
+        r = self._run("echo hi > inside.txt")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.ws, "inside.txt")))
+
+    def test_write_outside_denied(self):
+        r = self._run("echo hi > /etc/2b_bwrap_probe")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists("/etc/2b_bwrap_probe"))
+
+    def test_write_into_existing_git_denied(self):
+        # .git exists (created in setUp) → ro-bind → the real file is never written
+        self._run("echo hi > .git/probe")
+        self.assertFalse(os.path.exists(os.path.join(self.ws, ".git", "probe")))
+
+    def test_cannot_create_git_in_non_repo(self):
+        # .git absent → tmpfs → a write "succeeds" into the throwaway mount but nothing
+        # lands on the real fs (no planted backdoor)
+        shutil.rmtree(os.path.join(self.ws, ".git"))
+        self._run("mkdir -p .git/hooks && echo evil > .git/hooks/pre-commit")
+        self.assertFalse(os.path.exists(os.path.join(self.ws, ".git", "hooks", "pre-commit")))
+
+    def test_read_outside_allowed(self):
+        self.assertEqual(self._run("cat /etc/hostname >/dev/null").returncode, 0)
 
 
 @unittest.skipUnless(_CAN_SANDBOX, "requires macOS sandbox-exec")

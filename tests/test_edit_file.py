@@ -60,12 +60,24 @@ class EditFileMatching(unittest.TestCase):
         self.assertEqual(out, "a = 1\nb = 9\nc = 3\n")
 
     def test_crlf_file_lf_old_text(self):
-        # do_edit_file reads in universal-newline text mode, so a CRLF file is
-        # normalized to LF before matching — the model's LF old_text lands cleanly.
+        # A CRLF file is normalized to LF for matching so the model's LF old_text lands,
+        # and the file's CRLF ending is restored on write (no silent line-ending flip).
         result, out = self._edit("a = 1\r\nb = 2\r\n", "a = 1\nb = 2", "a = 1\nb = 5")
         self.assertTrue(result.startswith("edited "))
-        self.assertIn("b = 5", out)
-        self.assertNotIn("b = 2", out)
+        self.assertEqual(out, "a = 1\r\nb = 5\r\n")
+
+    def test_lf_file_stays_lf(self):
+        # An LF file must not gain any \r from the normalize/restore round-trip.
+        result, out = self._edit("a = 1\nb = 2\n", "b = 2", "b = 3")
+        self.assertNotIn("\r", out)
+        self.assertEqual(out, "a = 1\nb = 3\n")
+
+    def test_stray_crlf_does_not_flip_lf_file(self):
+        # One stray CRLF in an otherwise-LF file must NOT flip the whole file to CRLF
+        # (restoration requires uniform CRLF, not mere presence).
+        result, out = self._edit("a\r\nb\nc\nd\n", "c", "C")
+        self.assertTrue(result.startswith("edited "), result)
+        self.assertEqual(out, "a\nb\nC\nd\n")
 
     def test_indent_drift_reindents_new_text(self):
         # File nests the block one extra level deeper than the model's old_text.
@@ -100,8 +112,10 @@ class EditFileMatching(unittest.TestCase):
         content = "def run():\n    total = compute(x)\n    return total\n"
         result, out = self._edit(content, "    totl = compute(x)", "    total = compute(y)")
         self.assertIn("old_text not found", result)
-        self.assertIn("closest line in the file is line 2", result.lower())
-        self.assertIn("total = compute(x)", result)
+        # A numbered snippet of the closest region (best line ±3 lines) so the model
+        # can re-copy the exact text instead of re-guessing the same near-miss.
+        self.assertIn("closest match is around line 2", result.lower())
+        self.assertIn("2 |     total = compute(x)", result)
         self.assertEqual(out, content)   # file left unchanged on failure
 
     def test_missing_file(self):

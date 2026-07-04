@@ -483,10 +483,10 @@ def _resolve_edit(content: str, old_text: str):
 
 
 def _nearest_hint(content: str, old_text: str) -> str:
-    """When old_text didn't match even the tolerant tiers, point the model at the
-    closest real line so it can re-copy it exactly instead of re-guessing the same
-    near-miss (small models otherwise loop on 'not found'). Empty when nothing is
-    close enough."""
+    """When old_text didn't match even the tolerant tiers, show the closest real
+    region (the best-matching line ±3 lines, numbered) so the model can re-copy it
+    exactly instead of re-guessing the same near-miss (small models otherwise loop
+    on 'not found'). Empty when nothing is close enough."""
     old_lines = [ln for ln in old_text.splitlines() if ln.strip()]
     file_lines = content.splitlines()
     if not old_lines or not file_lines:
@@ -497,33 +497,49 @@ def _nearest_hint(content: str, old_text: str) -> str:
     if not match:
         return ""
     i = stripped.index(match[0])
-    return (f"\nThe closest line in the file is line {i + 1}: {file_lines[i]!r}. "
-            "Read the file again and copy old_text exactly from it (including indentation).")
+    lo, hi = max(0, i - 3), min(len(file_lines), i + 4)
+    width = len(str(hi))
+    snippet = "\n".join(f"{n + 1:>{width}} | {file_lines[n]}" for n in range(lo, hi))
+    return (f"\nThe closest match is around line {i + 1}. Lines {lo + 1}-{hi}:\n{snippet}\n"
+            "Read the file again and copy old_text exactly from there (including indentation).")
 
 
 def plan_edit(content: str, old_text: str, new_text: str):
     """Resolve where old_text applies in `content` and build the edited text. Pure —
     no file I/O — so the confirmation path (orchestrator.apply_edit) and the writer
     (do_edit_file) share one matching decision. Returns ('ok', new_content, note) or
-    ('error', message) with the frozen, model-facing error strings."""
-    resolved = _resolve_edit(content, old_text)
+    ('error', message) with the frozen, model-facing error strings.
+
+    Line endings are normalized to LF for matching so a small model's LF old_text
+    lands cleanly on a CRLF file; a *uniformly* CRLF file has its CRLF restored on
+    the result (no silent flip). Detection requires uniformity, not mere presence —
+    a lone stray CRLF in an otherwise-LF file must not flip the whole file to CRLF."""
+    crlf, lf = content.count("\r\n"), content.count("\n")
+    eol = "\r\n" if crlf and crlf == lf else "\n"   # every \n is part of a \r\n
+    norm = content.replace("\r\n", "\n")
+    norm_old = old_text.replace("\r\n", "\n")
+    norm_new = new_text.replace("\r\n", "\n")
+    resolved = _resolve_edit(norm, norm_old)
     if resolved is None:
         return ("error", "error: old_text not found in file — it must match exactly, including whitespace"
-                + _nearest_hint(content, old_text))
+                + _nearest_hint(norm, norm_old))
     if resolved[0] == "ambiguous":
         return ("error", f"error: old_text matches {resolved[1]} times — make it more specific so it matches exactly once")
     start, end, render, note = resolved
-    rendered = render(new_text)
+    rendered = render(norm_new)
     # Drift guard: old_text replaced whole line(s) (it ended in a newline) but new_text
     # dropped the trailing newline, and real content follows the match — so that next
     # line would merge onto new_text (e.g. "B\n"->"B2" turning "A\nB\nC" into "A\nB2C").
     # A small model almost always meant to replace the line, not join the next one, so
     # keep the boundary. Skipped when the next char is already a newline (no merge) or
     # nothing follows (would add a spurious trailing blank).
-    if (old_text.endswith(("\n", "\r")) and rendered and not rendered.endswith(("\n", "\r"))
-            and end < len(content) and content[end] not in ("\n", "\r")):
+    if (norm_old.endswith("\n") and rendered and not rendered.endswith("\n")
+            and end < len(norm) and norm[end] != "\n"):
         rendered += "\n"
-    return ("ok", content[:start] + rendered + content[end:], note)
+    result = norm[:start] + rendered + norm[end:]
+    if eol == "\r\n":
+        result = result.replace("\n", "\r\n")
+    return ("ok", result, note)
 
 
 def do_edit_file(path, old_text, new_text, auto_yes):
@@ -532,7 +548,9 @@ def do_edit_file(path, old_text, new_text, auto_yes):
         return "error: empty or invalid path"
     if not os.path.isfile(full):
         return f"error: no such file: {path}"
-    with open(full, "r", errors="replace") as f:
+    # newline="" keeps CRLF visible to plan_edit so it can detect the file's ending
+    # and preserve it; universal-newline mode would strip \r before we ever see it.
+    with open(full, "r", errors="replace", newline="") as f:
         content = f.read()
     status, *rest = plan_edit(content, old_text, new_text)
     if status == "error":
@@ -543,7 +561,7 @@ def do_edit_file(path, old_text, new_text, auto_yes):
     if not auto_yes:
         if input("Apply this edit? [y/N] ").strip().lower() != "y":
             return "edit rejected by user"
-    with open(full, "w") as f:
+    with open(full, "w", newline="") as f:                 # write bytes verbatim — no line-ending translation
         f.write(new_content)
     return f"edited {path}{note}"
 

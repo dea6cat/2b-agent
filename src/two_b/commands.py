@@ -418,7 +418,10 @@ def _revert_edit(path, pre, app) -> bool:
             os.remove(full)
             app.ui.print(f"Removed newly-created {path}.")
         else:
-            with open(full, "w") as f:
+            # newline="" restores the snapshot's exact bytes: apply_edit now records
+            # `pre` with real line endings, so a CRLF file reverts to CRLF (and text
+            # mode wouldn't double a \r\n on Windows).
+            with open(full, "w", newline="") as f:
                 f.write(pre)
             app.ui.print(f"Reverted {path} to its previous contents.")
         return True

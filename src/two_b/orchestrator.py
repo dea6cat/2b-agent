@@ -460,9 +460,11 @@ def _record_read(task: Task, path: str) -> None:
 
 def _stale_check(task: Task, path: str) -> str:
     """Error string if `path` was read earlier and has since changed on disk (edited
-    outside 2B), else ''. 2B does NOT force a read-before-write — a file it never read
-    is allowed through; this only stops it clobbering a file it's working from a stale
-    copy of. 2B's own writes refresh the recorded mtime, so they never trip this.
+    outside 2B), else ''. This check does not force a read-before-write — a file it
+    never read is allowed through; it only stops clobbering a file 2B is working from a
+    stale copy of. (A separate, narrow gate in apply_write does refuse a full overwrite
+    of an existing *unread* file; edit_file stays exempt.) 2B's own writes refresh the
+    recorded mtime, so they never trip this.
 
     Best-effort: mtime-only, so a change that keeps the same mtime (same-second write,
     an editor that restores mtime, a restore from an older backup) or that arrives via
@@ -492,6 +494,49 @@ def _refresh_mtime(task: Task, path: str) -> None:
             pass
 
 
+# --- file-tool safety: read dedup / read-loop breaker / recovery nudges ------
+
+# Appended to a rejected write/read guard: for cloud models that have run_command,
+# stop them "fixing" a refusal with a shell one-liner instead of the file tools.
+_NO_SHELL_WORKAROUND = ("Do not work around this with a shell command (sed, awk, a heredoc, "
+                        "or echo > file) — use edit_file / write_file.")
+READ_LOOP_LIMIT = 4   # consecutive identical unchanged reads before a hard, recoverable stop
+
+
+def _read_guard(task: Task, path: str) -> str:
+    """Short-circuit a wasteful repeated read: return an 'unchanged' stub for an
+    identical re-read this turn, or — after READ_LOOP_LIMIT of them with no other
+    action in between — a firm, recoverable error (a small model otherwise burns
+    the turn budget re-reading the same file). '' means read normally. Keys on the
+    exact `path` argument, so a different line-range of the same file is a fresh read.
+    The consecutive count is reset by any non-read tool call (see _dispatch_tool)."""
+    if path != task.last_read_arg:
+        return ""
+    full = tools.resolve_read_path(path)
+    if not (full and full in task.read_mtimes):
+        return ""
+    try:
+        if os.path.getmtime(full) > task.read_mtimes[full]:   # changed on disk → genuine re-read
+            return ""
+    except OSError:
+        return ""
+    # mtime-granularity, same as _stale_check: a change within the same clock tick as
+    # the recorded read isn't detected. The window here is tiny (an immediate re-read
+    # of the same arg with no action between), so the risk of masking a real change is
+    # negligible and not worth a content hash.
+    task.read_repeat += 1
+    if task.read_repeat >= READ_LOOP_LIMIT:
+        # Stable text (no interpolated count): if the model keeps ignoring it, the
+        # generic _LoopGuard sees an identical (name, args, result) and hard-stops the
+        # task — interpolating the rising count would make every message unique and
+        # slip past that net.
+        return (f"error: you keep re-reading {path} with no changes and no other action in between — "
+                "its contents are already in this conversation. Stop re-reading it: make an edit, run a "
+                f"check, or give your final answer. {_NO_SHELL_WORKAROUND}")
+    return (f"({path} is unchanged since you read it this turn — its contents are already above; "
+            "use them instead of reading it again)")
+
+
 # --- write/edit wrappers: snapshot for /undo, confirm via UI, then apply -----
 
 def apply_write(session: Session, task: Task, path: str, content: str) -> str:
@@ -499,6 +544,17 @@ def apply_write(session: Session, task: Task, path: str, content: str) -> str:
     if stale:
         return stale
     full = tools._safe_path(path)
+    # Read-before-overwrite gate: a full write_file over an EXISTING file 2B hasn't
+    # read this session is a blind clobber — it can't see what it's discarding, and
+    # in accept-edits/headless mode there's no confirmation to catch it. New files are
+    # always allowed; edit_file is exempt (its exact old_text already proves 2B saw the
+    # region). 2B's own prior writes refresh read_mtimes, so they don't trip this. (A
+    # section read counts as having read the file — a deliberate simplification of this
+    # narrow gate; normal mode still shows the full-overwrite confirmation regardless.)
+    if full and os.path.isfile(full) and full not in task.read_mtimes:
+        return (f"error: write_file would fully overwrite {path}, but you haven't read it this session. "
+                "Overwriting an unread file risks discarding content you can't see — read_file it first, "
+                f"then write_file; or use edit_file to change only the part you mean. {_NO_SHELL_WORKAROUND}")
     pre = None
     if full and os.path.isfile(full):
         with open(full, "r", errors="replace") as f:
@@ -527,7 +583,8 @@ def apply_edit(session: Session, task: Task, path: str, old_text: str, new_text:
     stale = _stale_check(task, path)
     if stale:
         return stale
-    with open(full, "r", errors="replace") as f:
+    # newline="" so plan_edit sees the file's real line endings (matches do_edit_file).
+    with open(full, "r", errors="replace", newline="") as f:
         pre = f.read()
     status, *rest = tools.plan_edit(pre, old_text, new_text)
     if status == "error":
@@ -686,6 +743,11 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
         need = ", ".join(_REQUIRED_ARGS[name])
         return (f"error: {name} call is missing required argument(s): {', '.join(missing)}. "
                 f"Call {name} again with all of: {need}.")
+    if name != "read_file":
+        # Any non-read action breaks a read streak, so the read-loop breaker only
+        # counts *consecutive* identical reads with nothing done in between.
+        task.last_read_arg = None
+        task.read_repeat = 0
     if session.read_only and name in ("edit_file", "write_file"):
         return ("error: plan mode is on — no changes are applied. Do not call edit_file or "
                 "write_file. Investigate with the read-only tools and present your proposed "
@@ -717,8 +779,13 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
         if name == "list_files":
             return tools.do_list_files(args.get("path", "."), max_chars=read_cap)
         if name == "read_file":
+            guard = _read_guard(task, args["path"])
+            if guard:
+                return guard
             out = tools.do_read_file(args["path"], max_chars=read_cap)
             _record_read(task, args["path"])
+            task.last_read_arg = args["path"]
+            task.read_repeat = 1
             return out
         if name == "search_files":
             return tools.do_search_files(args["query"], args.get("path", "."))

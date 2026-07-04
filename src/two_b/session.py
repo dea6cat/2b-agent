@@ -75,6 +75,8 @@ class Task:
     last_diff: str | None = None                     # for /diff
     edit_history: list = field(default_factory=list)  # stack of (path, pre_content_or_None) for multi-level /undo
     read_mtimes: dict = field(default_factory=dict)  # abspath -> mtime when last read, for stale-edit detection
+    last_read_arg: str | None = None                 # exact path arg of the last read_file, for read dedup/loop-guard
+    read_repeat: int = 0                             # consecutive identical unchanged reads (read-loop circuit breaker)
     pending: "PendingConfirmation | None" = None     # set when blocked on a backgrounded write
     error: str | None = None
     last_compact_tokens: int = 0                     # size floor after the last compaction (anti-thrash)

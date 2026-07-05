@@ -71,6 +71,34 @@ class Candidates(unittest.TestCase):
         self.assertEqual(rec, "small:4b")                  # opt-in default is rejected
 
 
+class Prune(unittest.TestCase):
+    def test_keeps_chosen_and_selected_removes_rest(self):
+        pulled = {"a:8b", "b:9b", "c:4b"}
+        # user selected b, chose b as default → a and c are the losers
+        self.assertEqual(setup.prunable_models(pulled, "b:9b", ["b:9b"]), ["a:8b", "c:4b"])
+
+    def test_multi_select_keeps_all_selected(self):
+        pulled = {"a:8b", "b:9b", "c:4b"}
+        self.assertEqual(setup.prunable_models(pulled, "a:8b", ["a:8b", "c:4b"]), ["b:9b"])
+
+    def test_nothing_pretested_is_noop(self):
+        self.assertEqual(setup.prunable_models(set(), "a:8b", ["a:8b"]), [])
+
+    def test_chosen_not_in_pretested_still_prunes_pretested(self):
+        # chosen came from an already-installed model; pretested losers still cleaned up
+        self.assertEqual(setup.prunable_models({"a:8b", "b:9b"}, "old:7b", []), ["a:8b", "b:9b"])
+
+    def test_remove_models_reports_failure_on_nonzero_exit(self):
+        import subprocess
+        msgs = []
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        fail = subprocess.CompletedProcess([], 1, "", "Error: model not found")
+        with mock.patch("subprocess.run", side_effect=[ok, fail]):
+            setup.remove_models(["a:8b", "b:9b"], msgs.append)
+        self.assertIn("removed a:8b", msgs)
+        self.assertTrue(any("could not remove b:9b" in m and "model not found" in m for m in msgs))
+
+
 class Selection(unittest.TestCase):
     TAGS = ["qwen3:4b", "qwen3:8b", "qwen3.5:9b"]
 

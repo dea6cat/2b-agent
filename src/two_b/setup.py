@@ -234,6 +234,25 @@ def pull(models: list[str], emit) -> None:
             emit(f"warning: pull of {m} failed — {e}")
 
 
+def prunable_models(pretest_pulled, chosen: str, selected: list[str]) -> list[str]:
+    """Pre-tested tags safe to delete: pulled by the pre-test, but not the chosen default
+    and not among the user's selection. (pretest_pulled already excludes pre-existing models.)"""
+    keep = set(selected) | {chosen}
+    return sorted(t for t in pretest_pulled if t not in keep)
+
+
+def remove_models(models: list[str], emit) -> None:
+    for m in models:
+        try:
+            r = subprocess.run(["ollama", "rm", m], capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                emit(f"removed {m}")
+            else:
+                emit(f"warning: could not remove {m} — {(r.stderr or '').strip() or f'exit {r.returncode}'}")
+        except Exception as e:
+            emit(f"warning: could not remove {m} — {e}")
+
+
 # --- self-test --------------------------------------------------------------
 
 def _toks(model: str) -> float:
@@ -399,6 +418,7 @@ def run(opts: dict | None = None) -> int:
 
     existing = installed_models() if _have("ollama") else []
     recommended, graded = DEFAULT_MODEL, {}     # graded: tag -> (ok, wall) from a pre-test
+    pretest_pulled: set[str] = set()            # tags WE pulled for the pre-test (candidates for cleanup)
     # existing-models reuse path
     if existing and not opts.get("models") and not _confirm(
             f"Found {len(existing)} installed model(s). Pull additional models?", False, opts):
@@ -426,6 +446,8 @@ def run(opts: dict | None = None) -> int:
                     for tag, _, _ in top:
                         pull([tag], emit)
                         if tag in installed_models():
+                            if tag not in existing:             # never a candidate to delete a pre-existing model
+                                pretest_pulled.add(tag)
                             perf[tag] = (_toks(tag), *_ps_mem_gpu(tag))
                             ct = correctness_test(tag)
                             if ct is not None:
@@ -489,6 +511,15 @@ def run(opts: dict | None = None) -> int:
         except Exception:
             pass
 
+    # offer to reclaim disk from pre-tested models the user didn't keep (never touches
+    # pre-existing models or anything selected/chosen). Interactive-only; --keep-tested opts out.
+    losers = prunable_models(pretest_pulled, chosen, selected)
+    if losers and not opts.get("keep_tested") and _interactive(opts):
+        gb = round(sum(_gb_est(t) for t in losers), 1)
+        if _confirm(f"Remove the {len(losers)} pre-tested model(s) you didn't keep "
+                    f"({', '.join(losers)})? Frees ~{gb}GB", True, opts):
+            remove_models(losers, emit)
+
     fix_path(opts, emit)
     emit("\n2B is ready. Start it from any project directory:")
     emit("    2b                                    # open the session")
@@ -518,6 +549,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-pretest", action="store_true",
                    help="Don't pull+test top candidates before the menu (choose from the estimated list)")
     p.add_argument("--candidates", type=int, help="How many top models to pre-test before the menu (default 3)")
+    p.add_argument("--keep-tested", action="store_true",
+                   help="Keep all pre-tested models on disk (don't offer to remove the ones you didn't pick)")
     p.add_argument("--no-discover", action="store_true",
                    help="Skip live discovery from ollama.com; use the bundled curated model list")
     p.add_argument("--fix-path", dest="fix_path", action="store_const", const="yes",
@@ -529,4 +562,5 @@ def main(argv: list[str] | None = None) -> int:
         "models": a.models.split() if a.models else None,
         "no_models": a.no_models, "no_benchmark": a.no_benchmark, "fix_path": a.fix_path,
         "no_pretest": a.no_pretest, "candidates": a.candidates, "no_discover": a.no_discover,
+        "keep_tested": a.keep_tested,
     })

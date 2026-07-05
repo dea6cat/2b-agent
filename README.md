@@ -5,9 +5,8 @@ native protocol, keeps them focused instead of hallucinating, and gives you a fu
 TUI — streaming replies, a live plan checklist, narrated tool actions — without ever routing
 your local model through a translation layer that would confuse it.
 
-I named it **2B**, after NieR: Automata. It's built to keep working when the power and the
-internet don't — I live somewhere the grid isn't a guarantee, and I wanted a coding agent that
-doesn't fall apart the moment I'm offline.
+I built **2B** to keep working when the power and the internet don't — I live somewhere the grid
+isn't a guarantee, and I wanted a coding agent that doesn't fall apart the moment I'm offline.
 
 > **macOS only.** 2B is built and tested for macOS — the installer is a shell script that leans on
 > Homebrew, and the clipboard integration uses `pbcopy`. It hasn't been tested elsewhere.
@@ -68,8 +67,9 @@ model has to understand.
 - **Native protocols, never a shim.** Local Ollama models get Ollama's own `/api/chat` with NDJSON
   streaming. Each cloud provider gets its own native format. Nothing is translated through a
   lowest-common-denominator layer.
-- **Streaming, full-screen TUI.** A scrolling conversation, a framed input box, a live status line
-  with a spinner, elapsed time, and — for local models — a RAM/GPU readout pulled from Ollama.
+- **Streaming, full-screen TUI.** A scrolling conversation, a framed input box, and a live status
+  line with a spinner, elapsed time, a context-window meter (`ctx N%`, amber as it fills), and — for
+  local models — a RAM/GPU readout pulled from Ollama.
 - **Narrated tool actions.** Instead of a wall of raw `read_file {...}`, you see what it's doing in
   plain language, tied together with a tree gutter and a ✓/✗ per step:
   ```
@@ -92,6 +92,15 @@ model has to understand.
 - **Runs things — split by model.** Local models get `run_git` (git only, never a raw shell — no
   chaining/injection); cloud models get a full `run_command` shell (tests, build, git). Read-only git
   runs freely; anything that mutates is confirmation-gated and refused in plan mode.
+- **Sandboxed, and wary of untrusted content.** On the cloud path, `run_command`'s *writes* are
+  confined to the workspace by a host sandbox (macOS `sandbox-exec`, Linux `bubblewrap`) — on by
+  default, `TWOB_NO_SEATBELT` to disable. Commands that reach the network or a known-secret path
+  (`~/.ssh`, `~/.aws`, `.env`) re-prompt even under an "allow-all" grant, and your ambient secrets
+  (`*_API_KEY`, `AWS_*`, …) are scrubbed from the environment 2B hands a command. Tool output — file
+  contents, command results — is fenced as *untrusted* so a poisoned file can't turn a read into an
+  instruction the model obeys. `TWOB_SEATBELT=strict` additionally denies network and confines reads
+  to the workspace, so a command can't read secrets elsewhere on disk. It's defense-in-depth for a
+  personal tool, not a hardened multi-tenant jail — but it's on by default.
 - **Delegates read-only exploration, and edits, to sub-agents (cloud).** On the cloud path the
   model can `delegate` one or more investigations to run in parallel, each in its own isolated
   context, and get back short findings — so a big search-and-read never bloats the main
@@ -128,7 +137,11 @@ model has to understand.
   even in Terminal.app (which ignores the escape sequence most TUIs rely on).
 - **Multiple tasks.** Queue tasks, background the running one with **Ctrl+B**, foreground it later
   with `/fg`. A backgrounded task pauses when it needs to write and waits for you.
-- **Undo.** `/undo` reverts the last write or edit — one level, but it's there.
+- **Undo.** `/undo` reverts the last write or edit; `/undo N` the last N, `/undo <path>` the most
+  recent edit to a given file.
+- **Sessions persist and resume.** Each task's conversation is saved to `~/.config/2b/history.db`
+  (stdlib SQLite, no deps; `TWOB_NO_HISTORY` to disable). `2b --continue` picks up your most recent
+  session, `2b --resume <id>` a specific one, and `/sessions` (or `2b --list-sessions`) lists them.
 
 ---
 
@@ -185,6 +198,8 @@ pipe with `... | sh -s -- --yes --models "qwen3.5:9b"`.
 2b                       # start in the current directory, autodetects a local model
 2b "add a docstring to lib/main.dart"   # run one task, then drop into the session
 2b --model qwen3.5:9b    # pin a model
+2b --continue            # resume your most recent session (--resume <id> for a specific one)
+2b --list-sessions       # list saved sessions
 2b --list-models         # what's available across configured providers
 2b --doctor              # diagnose PATH, Ollama, and the default model, then exit
 2b --update              # upgrade to the latest release (uv tool upgrade)
@@ -244,6 +259,7 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | `/help` | List commands |
 | `/model [name]` | Show or switch model — context is preserved |
 | `/models [filter]` | List available models, grouped by provider |
+| `/default [name]` | Show or set the persisted default model (used when no `--model` is given) |
 | `/connect [provider] [key]` | Connect a provider (hidden key prompt); bare shows status |
 | `/disconnect <provider>` | Remove a saved provider key |
 | `/init` | Scan the project → write `2B.md` (a compact map auto-loaded into context on new tasks) |
@@ -256,6 +272,9 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | `/task <desc>` | Queue a task |
 | `/tasks` | List tasks and their status |
 | `/fg <id>` | Foreground a backgrounded task |
+| `/sessions` | List saved sessions (resume with `2b --continue` / `--resume <id>`) |
+| `/tool <name> <args>` | Run a frozen tool directly, bypassing the model (e.g. `/tool read_file path=a.dart`) |
+| `/history search <q>` | Search the scrollback; then `n` / `N` jump between matches |
 | `/yes` | Toggle accept-edits mode |
 | `/undo` | Revert the last write/edit |
 | `/diff` | Re-show the last diff |
@@ -322,9 +341,12 @@ small as you keep it.
 
 ## Honest caveats
 
-- **It reads and writes wherever you point it.** 2B resolves absolute paths and paths outside the
-  working directory on purpose — it's a personal tool for your machine. Writes are still confirmed
-  in normal mode, and plan mode refuses them entirely.
+- **It reads and writes wherever you point it — with guardrails.** 2B resolves absolute paths and
+  paths outside the working directory on purpose; it's a personal tool for your machine. Writes are
+  still confirmed in normal mode, plan mode refuses them entirely, reads of known-secret paths
+  (`~/.ssh`, `~/.aws`, …) prompt first, and on the cloud path `run_command`'s writes are
+  sandbox-confined to the workspace by default (see the sandbox bullet above). The command classifier
+  is defense-in-depth, not an unbypassable boundary — the sandbox is the boundary.
 - **Switching to a stronger model mid-task hands it a tool-call history it didn't make.** For these
   five simple tools that's low-risk (the wire format is unambiguously the new provider's own; only
   the *choices* inside came from a weaker model), but you may see mild "why did I read that file"

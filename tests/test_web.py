@@ -154,7 +154,10 @@ class Fetch(unittest.TestCase):
         self.assertIsNone(web.fetch("file:///etc/passwd"))
 
     def test_returns_none_on_error(self):
-        with mock.patch("urllib.request.urlopen", side_effect=OSError("boom")):
+        # fetch uses build_opener(...).open — patch that (not the unused urlopen) so the
+        # error path is exercised hermetically, never touching the real network.
+        with mock.patch.object(web, "_host_is_public", return_value=True), \
+             mock.patch("urllib.request.OpenerDirector.open", side_effect=OSError("boom")):
             self.assertIsNone(web.fetch("https://example.com"))
 
     def test_decodes_body(self):

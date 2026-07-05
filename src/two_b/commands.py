@@ -8,7 +8,7 @@ import os
 import re
 import shlex
 
-from . import config, difffmt, mcp_client, orchestrator, registry, repomap, tools
+from . import config, difffmt, mcp_client, orchestrator, registry, repomap, tools, untrusted, web
 from .conversation import Conversation, Message
 from .session import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, MODE_LABELS, TaskState
 
@@ -664,6 +664,39 @@ def _add(rest, app):
         task.conversation = Conversation(system_prompt=orchestrator.SYSTEM_PROMPT)
     task.conversation.append(Message.user(f"[pre-loaded file: {rest.strip()}]\n{content}"))
     app.ui.print(f"Loaded {rest.strip()} into task context ({len(content)} bytes).")
+
+
+_FETCH_MAX_CHARS = 40_000   # cap page content folded into context (pages can be huge)
+
+
+@command("fetch")
+def _fetch(rest, app):
+    """Fetch a web page and pre-load its readable content into the current task's context:
+    /fetch <url>. Host-side (like /add) — the model gains no new tool, so it's safe for
+    local models too."""
+    url = rest.strip()
+    if not url:
+        app.ui.print("Usage: /fetch <url>")
+        return
+    task = _target_task(app)
+    if task is None:
+        app.ui.print("No task to add context to — start a task first.")
+        return
+    html = web.fetch(url)
+    if html is None:
+        app.ui.print(f"[red]Could not fetch {url} (offline, blocked, non-HTTPS, or a bad URL).[/red]")
+        return
+    content = web.extract_readable(html, as_markdown=True, max_chars=_FETCH_MAX_CHARS)
+    if not content.strip():
+        app.ui.print(f"[red]{url} had no readable text to extract (JS-only page?).[/red]")
+        return
+    if task.conversation is None:
+        task.conversation = Conversation(system_prompt=orchestrator.SYSTEM_PROMPT)
+    # Fence the page as untrusted — it's external content that may carry injected
+    # instructions; the system prompt tells the model fenced text is data, not commands.
+    fenced = untrusted.wrap(content, f"web:{url}")
+    task.conversation.append(Message.user(f"[pre-loaded web page: {url}]\n{fenced}"))
+    app.ui.print(f"Loaded {url} into task context ({len(content)} chars, {content.count(chr(10)) + 1} lines).")
 
 
 @command("theme")

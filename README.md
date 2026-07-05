@@ -279,6 +279,7 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | `/undo` | Revert the last write/edit |
 | `/diff` | Re-show the last diff |
 | `/add <file>` | Pre-load a file into the current task's context |
+| `/fetch <url>` | Fetch a web page and pre-load its readable content into the current task's context |
 | `/clear` | Reset the current task's history |
 | `/quit` | Exit |
 

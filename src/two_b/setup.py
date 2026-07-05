@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -18,8 +19,9 @@ import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
-from . import config
+from . import config, discover
 from .doctor import _bin_dir
 from .providers.ollama import _total_ram_bytes
 
@@ -48,13 +50,27 @@ class Model:
     note: str
 
 
-CATALOG = [
-    Model("qwen3:4b", "~2.6GB", 6, False, "small & fast — good for low-RAM machines"),
-    Model("qwen3:8b", "~5.2GB", 10, False, "solid all-rounder"),
-    Model("qwen3.5:9b", "~5.6GB", 11, False, "recommended — best balance in testing"),
-    Model("gemma4:12b-mlx", "~8GB", 14, True, "opt-in — some machines show a cold-reload slowdown"),
-    Model("qwen2.5-coder:14b", "~9GB", 16, True, "coder-focused — can slow on very large files"),
-]
+_BUNDLED = Path(__file__).with_name("models.json")   # curated offline fallback (ships in wheel)
+
+
+def bundled_catalog() -> tuple[list["Model"], str]:
+    """The curated fallback models + recommended tag, parsed from the bundled models.json.
+    Never raises — a missing/corrupt file yields a hardcoded minimal pair so setup still runs."""
+    try:
+        data = json.loads(_BUNDLED.read_text(encoding="utf-8"))
+        models = [Model(m["name"], m.get("size", ""), int(m["min_ram_gb"]),
+                        bool(m.get("opt_in", False)), m.get("note", ""))
+                  for m in data.get("models", []) if m.get("name")]
+        if models:
+            names = {m.name: m for m in models}
+            rec = data.get("recommended") or ""
+            if rec not in names or names[rec].opt_in:     # never default to an opt-in / unknown
+                non_opt = [m.name for m in models if not m.opt_in]
+                rec = non_opt[0] if non_opt else models[0].name
+            return models, rec
+    except Exception:
+        pass
+    return [Model(DEFAULT_MODEL, "", 11, False, "recommended")], DEFAULT_MODEL
 
 
 # --- pure logic (unit-tested) -----------------------------------------------
@@ -73,36 +89,37 @@ def fit_tag(min_ram_gb: int, ram_gb: int) -> str:
     return f"✗ needs {min_ram_gb}GB+"
 
 
-def default_index(ram_gb: int) -> int:
-    """Largest non-opt-in model whose min-RAM fits; falls back to the first (smallest)."""
-    best, idx = -1, 0
-    for i, m in enumerate(CATALOG):
-        if not m.opt_in and ram_gb >= m.min_ram_gb and m.min_ram_gb >= best:
-            best, idx = m.min_ram_gb, i
-    return idx
+def default_index(candidates: list[tuple[str, int, str]], recommended: str | None = None) -> int:
+    """Menu default: the recommended tag if it's in the (already popularity-ranked) list,
+    else the first entry (most popular / smallest-curated). `candidates` are (tag, est_ram, label)."""
+    if recommended:
+        for i, (tag, _ram, _label) in enumerate(candidates):
+            if tag == recommended:
+                return i
+    return 0
 
 
-def parse_selection(text: str, default_idx: int) -> list[str]:
-    """Empty → the default; 'all' → every model; otherwise 1-based indices (space/comma
-    separated), invalid tokens ignored."""
+def parse_selection(text: str, default_idx: int, tags: list[str]) -> list[str]:
+    """Empty → the default tag; 'all' → every tag; otherwise 1-based indices (space/comma
+    separated) into `tags`, invalid tokens ignored."""
     text = (text or "").strip()
     if not text:
-        return [CATALOG[default_idx].name]
+        return [tags[default_idx]] if tags else []
     if text.lower() == "all":
-        return [m.name for m in CATALOG]
+        return list(tags)
     out = []
     for tok in text.replace(",", " ").split():
-        if tok.isdigit() and 1 <= int(tok) <= len(CATALOG):
-            out.append(CATALOG[int(tok) - 1].name)
+        if tok.isdigit() and 1 <= int(tok) <= len(tags):
+            out.append(tags[int(tok) - 1])
     return out
 
 
-def default_model(selected: list[str], existing: list[str]) -> str:
-    """Prefer qwen3.5:9b if present, else first selected, else first existing, else the tag."""
+def default_model(selected: list[str], existing: list[str], recommended: str) -> str:
+    """Prefer the recommended tag if present, else first selected, else first existing, else it."""
     pool = list(selected) + list(existing)
-    if DEFAULT_MODEL in pool:
-        return DEFAULT_MODEL
-    return (selected or existing or [DEFAULT_MODEL])[0]
+    if recommended in pool:
+        return recommended
+    return (selected or existing or [recommended])[0]
 
 
 def grade_table(perf: dict, correctness: dict) -> tuple[list[str], str | None]:
@@ -333,9 +350,36 @@ def fix_path(opts: dict, emit) -> None:
 
 # --- driver -----------------------------------------------------------------
 
+def _pulls_label(pulls: int) -> str:
+    if pulls >= 1_000_000:
+        return f"{pulls / 1_000_000:.1f}M pulls"
+    if pulls >= 1_000:
+        return f"{pulls / 1_000:.0f}K pulls"
+    return f"{pulls:,} pulls" if pulls else ""
+
+
+def _gb_est(tag: str) -> float:
+    """Rough download size (GB) from a pull tag's parameter count (~0.7GB/B at Q4), for the
+    pre-test cost prompt. Best-effort; 0 when the tag carries no size."""
+    m = re.search(r":(\d+(?:\.\d+)?)b", tag)
+    return round(float(m.group(1)) * 0.7, 1) if m else 0.0
+
+
+def _candidates(ram_gb: int, opts: dict) -> tuple[list[tuple[str, int, str]], str, str]:
+    """Menu candidates as (tag, est_ram, label): live from ollama.com (tool-capable, fits,
+    popularity-ranked) if reachable, else the bundled curated list. Returns
+    (candidates, recommended_tag, source) where source is 'web' or 'bundled'."""
+    if not opts.get("no_discover"):
+        found = discover.discover(ram_gb)
+        if found:
+            return [(tag, ram, _pulls_label(pulls)) for tag, pulls, ram in found], found[0][0], "web"
+    cat, rec = bundled_catalog()
+    return [(m.name, m.min_ram_gb, m.note) for m in cat], rec, "bundled"
+
+
 def run(opts: dict | None = None) -> int:
-    """Ordered onboarding: clean → grade → select/reuse → ensure Ollama → pull →
-    self-test/grade → persist default → PATH. Returns an exit code."""
+    """Ordered onboarding: clean → discover/grade → (pre-test →) select/reuse → ensure
+    Ollama → pull → self-test/grade → persist default → PATH. Returns an exit code."""
     opts = opts or {}
     emit = print
 
@@ -354,34 +398,68 @@ def run(opts: dict | None = None) -> int:
          + (" · Apple Silicon (Metal GPU)" if apple else ""))
 
     existing = installed_models() if _have("ollama") else []
+    recommended, graded = DEFAULT_MODEL, {}     # graded: tag -> (ok, wall) from a pre-test
     # existing-models reuse path
     if existing and not opts.get("models") and not _confirm(
             f"Found {len(existing)} installed model(s). Pull additional models?", False, opts):
         selected: list[str] = []
+    elif opts.get("models"):
+        selected = list(opts["models"])
     else:
-        if opts.get("models"):
-            selected = list(opts["models"])
-        else:
-            di = default_index(ram_gb)
-            emit("Models — pick what fits (grade is based on your RAM):")
-            for i, m in enumerate(CATALOG, 1):
-                tag = fit_tag(m.min_ram_gb, ram_gb)
-                note = "already installed" if m.name in existing else m.note
-                star = "*" if i - 1 == di else " "
-                emit("  %s%d) %-20s %-8s  %-14s %s" % (star, i, m.name, m.size, tag, note))
-            selected = parse_selection(
-                _ask(f"Select by number (space-separated), 'all', or Enter for #{di + 1}: ",
-                     str(di + 1), opts), di)
+        candidates, recommended, source = _candidates(ram_gb, opts)
+        emit("Models — %s, tool-capable and fit to your %dGB RAM:"
+             % ("latest from ollama.com" if source == "web" else "offline, bundled list", ram_gb))
+        # Pre-test the most popular fitting candidates so the menu reflects what actually
+        # WORKS on this machine (the correctness check is the real fit signal, not just RAM).
+        # Cost-gated; skipped with --no-pretest, non-interactively, or on the bundled fallback.
+        want = opts.get("candidates")
+        want = 3 if want is None else int(want)          # --candidates 0 → skip pretest (like --no-pretest)
+        if source == "web" and not opts.get("no_pretest") and want > 0 and _interactive(opts):
+            n = max(1, min(want, len(candidates)))
+            top = candidates[:n]
+            gb = round(sum(_gb_est(t) for t, _, _ in top), 1)
+            if _confirm(f"Test the top {n} on your machine first? "
+                        f"~{gb}GB download + a speed/correctness check (~1-2 min each)", True, opts):
+                if ensure_ollama(emit) and ensure_server(emit):
+                    emit(f"Pre-testing {n} candidate(s) — pull + tok/s + a real edit through 2B…")
+                    perf = {}
+                    for tag, _, _ in top:
+                        pull([tag], emit)
+                        if tag in installed_models():
+                            perf[tag] = (_toks(tag), *_ps_mem_gpu(tag))
+                            ct = correctness_test(tag)
+                            if ct is not None:
+                                graded[tag] = ct
+                    if graded:
+                        rows, best = grade_table(perf, graded)
+                        for r in rows:
+                            emit(r)
+                        passers = [t for t, _, _ in candidates if graded.get(t, (False,))[0]]
+                        if passers:                     # narrow the menu to what actually passed
+                            candidates = [c for c in candidates if c[0] in passers]
+                            recommended = best or passers[0]
+                else:
+                    emit("Ollama unavailable — skipping the pre-test; choose from the list below.")
+        tags = [c[0] for c in candidates]
+        di = default_index(candidates, recommended)
+        for i, (tag, ram, label) in enumerate(candidates, 1):
+            vtag = ("✓ passed" if graded[tag][0] else "✗ failed") if tag in graded else ""
+            mark = "already installed" if tag in existing else label
+            star = "*" if i - 1 == di else " "
+            emit("  %s%d) %-24s %-14s %-9s %s" % (star, i, tag, fit_tag(ram, ram_gb), vtag, mark))
+        selected = parse_selection(
+            _ask(f"Select by number (space-separated), 'all', or Enter for #{di + 1}: ",
+                 str(di + 1), opts), di, tags)
 
     if selected:
         if not ensure_ollama(emit) or not ensure_server(emit):
             emit("Ollama isn't available — cannot pull models. Fix that and re-run 2b setup.")
             return 1
-        pull(selected, emit)
+        pull(selected, emit)                            # idempotent — pre-tested tags are already local
 
-    # self-test + correctness grade (unless --no-benchmark). When reusing existing
-    # models (nothing newly selected), grade one representative so reuse isn't ungraded.
-    bench_pool = selected if selected else existing[:1]
+    # self-test any selected model NOT already graded by the pre-test (unless --no-benchmark).
+    # Reusing existing models with nothing new selected → grade one representative.
+    bench_pool = [m for m in (selected or existing[:1]) if m not in graded]
     if bench_pool and not opts.get("no_benchmark"):
         bench = [m for m in bench_pool if m in installed_models()]
         if bench:
@@ -399,13 +477,17 @@ def run(opts: dict | None = None) -> int:
                 if best:
                     emit(f"\nsuggested default: {best}")
 
-    chosen = default_model(selected, existing)
-    try:
-        r = _prov_resolve(chosen)
-        if r is not None:
-            config.set_pref("default_model", f"{r[0].name}:{r[1]}")
-    except Exception:
-        pass
+    chosen = default_model(selected, existing, recommended)
+    if chosen in graded and not graded[chosen][0]:
+        emit(f"note: {chosen} failed the correctness check — not saving it as the default. "
+             "Pick one that passed, or set another later with /default.")
+    else:
+        try:
+            r = _prov_resolve(chosen)
+            if r is not None:
+                config.set_pref("default_model", f"{r[0].name}:{r[1]}")
+        except Exception:
+            pass
 
     fix_path(opts, emit)
     emit("\n2B is ready. Start it from any project directory:")
@@ -433,6 +515,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--models", help="Space-separated model tags to pull (skips the menu)")
     p.add_argument("--no-models", action="store_true", help="Skip local model setup")
     p.add_argument("--no-benchmark", action="store_true", help="Skip the tok/s + correctness self-test")
+    p.add_argument("--no-pretest", action="store_true",
+                   help="Don't pull+test top candidates before the menu (choose from the estimated list)")
+    p.add_argument("--candidates", type=int, help="How many top models to pre-test before the menu (default 3)")
+    p.add_argument("--no-discover", action="store_true",
+                   help="Skip live discovery from ollama.com; use the bundled curated model list")
     p.add_argument("--fix-path", dest="fix_path", action="store_const", const="yes",
                    help="Add uv's tool dir to PATH via 'uv tool update-shell'")
     p.add_argument("--no-fix-path", dest="fix_path", action="store_const", const="no")
@@ -441,4 +528,5 @@ def main(argv: list[str] | None = None) -> int:
         "yes": a.yes, "clean": a.clean,
         "models": a.models.split() if a.models else None,
         "no_models": a.no_models, "no_benchmark": a.no_benchmark, "fix_path": a.fix_path,
+        "no_pretest": a.no_pretest, "candidates": a.candidates, "no_discover": a.no_discover,
     })

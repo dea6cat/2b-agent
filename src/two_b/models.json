@@ -1,0 +1,11 @@
+{
+  "_comment": "Curated fallback for `2b setup` when live discovery from ollama.com is unavailable (offline / site changed). The live list is fetched by discover.py; this ships in the wheel as the offline fallback.",
+  "recommended": "qwen3.5:9b",
+  "models": [
+    {"name": "qwen3:4b",          "size": "~2.6GB", "min_ram_gb": 6,  "opt_in": false, "note": "small & fast — good for low-RAM machines"},
+    {"name": "qwen3:8b",          "size": "~5.2GB", "min_ram_gb": 10, "opt_in": false, "note": "solid all-rounder"},
+    {"name": "qwen3.5:9b",        "size": "~5.6GB", "min_ram_gb": 11, "opt_in": false, "note": "recommended — best balance in testing"},
+    {"name": "gemma4:12b-mlx",    "size": "~8GB",   "min_ram_gb": 14, "opt_in": true,  "note": "opt-in — some machines show a cold-reload slowdown"},
+    {"name": "qwen2.5-coder:14b", "size": "~9GB",   "min_ram_gb": 16, "opt_in": true,  "note": "coder-focused — can slow on very large files"}
+  ]
+}

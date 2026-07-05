@@ -5,6 +5,7 @@ logic where practical. Run: `python -m unittest tests.test_setup` from the repo 
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -22,27 +23,70 @@ class Grade(unittest.TestCase):
         self.assertEqual(setup.fit_tag(11, 9), "~ tight")          # within 3GB below
         self.assertEqual(setup.fit_tag(16, 8), "✗ needs 16GB+")
 
-    def test_default_index_scales_with_ram(self):
-        # low RAM → smallest (qwen3:4b, idx 0); high RAM → largest NON-opt-in (qwen3.5:9b, idx 2)
-        self.assertEqual(setup.default_index(4), 0)
-        self.assertEqual(setup.default_index(64), 2)               # never gemma4/coder (opt-in)
-        self.assertFalse(setup.CATALOG[setup.default_index(64)].opt_in)
+    def test_default_index_picks_recommended_else_first(self):
+        # candidates are (tag, est_ram, label), already popularity-ranked
+        cands = [("a:8b", 10, ""), ("b:9b", 11, ""), ("c:4b", 6, "")]
+        self.assertEqual(setup.default_index(cands, "b:9b"), 1)     # recommended present
+        self.assertEqual(setup.default_index(cands, "nope"), 0)     # else the top-ranked
+        self.assertEqual(setup.default_index([], "x"), 0)
+
+    def test_bundled_catalog_parses(self):
+        cat, rec = setup.bundled_catalog()
+        self.assertTrue(cat and all(m.name and m.min_ram_gb for m in cat))
+        self.assertIn(rec, [m.name for m in cat])                  # recommended is a listed model
+
+
+class Candidates(unittest.TestCase):
+    def test_gb_estimate(self):
+        self.assertEqual(setup._gb_est("qwen3:8b"), 5.6)
+        self.assertEqual(setup._gb_est("weird-tag-no-size"), 0.0)
+
+    def test_uses_discovery_when_available(self):
+        rows = [("a:8b", 16_900_000, 10), ("b:4b", 5_000, 6)]
+        with mock.patch.object(setup.discover, "discover", return_value=rows):
+            cands, rec, source = setup._candidates(64, {})
+        self.assertEqual(source, "web")
+        self.assertEqual([c[0] for c in cands], ["a:8b", "b:4b"])
+        self.assertEqual(rec, "a:8b")                          # top-ranked is the default
+        self.assertIn("16.9M pulls", cands[0][2])
+
+    def test_falls_back_to_bundled(self):
+        with mock.patch.object(setup.discover, "discover", return_value=[]):
+            cands, rec, source = setup._candidates(64, {})
+        self.assertEqual(source, "bundled")
+        self.assertIn(rec, [c[0] for c in cands])
+
+    def test_no_discover_forces_bundled(self):
+        with mock.patch.object(setup.discover, "discover", return_value=[("x:8b", 999, 10)]):
+            _, _, source = setup._candidates(64, {"no_discover": True})
+        self.assertEqual(source, "bundled")
+
+    def test_bundled_recommended_never_opt_in(self):
+        import json
+        js = json.dumps({"recommended": "big:12b", "models": [
+            {"name": "small:4b", "min_ram_gb": 6, "opt_in": False},
+            {"name": "big:12b", "min_ram_gb": 14, "opt_in": True}]})
+        with mock.patch("pathlib.Path.read_text", return_value=js):
+            _cat, rec = setup.bundled_catalog()
+        self.assertEqual(rec, "small:4b")                  # opt-in default is rejected
 
 
 class Selection(unittest.TestCase):
-    def test_empty_uses_default(self):
-        self.assertEqual(setup.parse_selection("", 2), ["qwen3.5:9b"])
-    def test_all(self):
-        self.assertEqual(setup.parse_selection("all", 0), [m.name for m in setup.CATALOG])
-    def test_numbers_and_commas(self):
-        self.assertEqual(setup.parse_selection("1, 3", 0), ["qwen3:4b", "qwen3.5:9b"])
-    def test_invalid_tokens_ignored(self):
-        self.assertEqual(setup.parse_selection("2 nope 99 0", 0), ["qwen3:8b"])
+    TAGS = ["qwen3:4b", "qwen3:8b", "qwen3.5:9b"]
 
-    def test_default_model_prefers_qwen35(self):
-        self.assertEqual(setup.default_model(["qwen3:8b", "qwen3.5:9b"], []), "qwen3.5:9b")
-        self.assertEqual(setup.default_model(["qwen3:8b"], []), "qwen3:8b")
-        self.assertEqual(setup.default_model([], ["llama3"]), "llama3")
+    def test_empty_uses_default(self):
+        self.assertEqual(setup.parse_selection("", 2, self.TAGS), ["qwen3.5:9b"])
+    def test_all(self):
+        self.assertEqual(setup.parse_selection("all", 0, self.TAGS), self.TAGS)
+    def test_numbers_and_commas(self):
+        self.assertEqual(setup.parse_selection("1, 3", 0, self.TAGS), ["qwen3:4b", "qwen3.5:9b"])
+    def test_invalid_tokens_ignored(self):
+        self.assertEqual(setup.parse_selection("2 nope 99 0", 0, self.TAGS), ["qwen3:8b"])
+
+    def test_default_model_prefers_recommended(self):
+        self.assertEqual(setup.default_model(["qwen3:8b", "qwen3.5:9b"], [], "qwen3.5:9b"), "qwen3.5:9b")
+        self.assertEqual(setup.default_model(["qwen3:8b"], [], "qwen3.5:9b"), "qwen3:8b")
+        self.assertEqual(setup.default_model([], ["llama3"], "qwen3.5:9b"), "llama3")
 
 
 class Verdict(unittest.TestCase):

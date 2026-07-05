@@ -202,6 +202,8 @@ pipe with `... | sh -s -- --yes --models "qwen3.5:9b"`.
 2b --list-sessions       # list saved sessions
 2b --list-models         # what's available across configured providers
 2b --doctor              # diagnose PATH, Ollama, and the default model, then exit
+2b --test                # grade your installed local models (tok/s + a real coding test)
+2b --test qwen3.5:9b     # grade just one model; 'auto' removes the ones that fail
 2b --update              # upgrade to the latest release (uv tool upgrade)
 2b --rm                  # uninstall 2B and delete its config (asks first); --rm --yes to skip
 ```

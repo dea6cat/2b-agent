@@ -280,6 +280,9 @@ def main() -> None:
                         help="Upgrade 2B to the latest release (uv tool upgrade) and exit")
     parser.add_argument("--setup", action="store_true",
                         help="Run first-time setup (Ollama, model download, PATH) and exit")
+    parser.add_argument("--test", metavar="MODEL", nargs="?", const="",
+                        help="Grade installed local models (tok/s + coding test) and exit. "
+                             "Pass a model to test just one, or 'auto' to remove failing models.")
     parser.add_argument("--continue", dest="cont", action="store_true",
                         help="Resume the most recent session in this directory")
     parser.add_argument("--resume", metavar="ID", help="Resume a saved session by id (see --list-sessions)")
@@ -331,6 +334,21 @@ def main() -> None:
     if args.setup:
         from . import setup
         raise SystemExit(setup.run({}))
+
+    if args.test is not None:
+        from . import testcmd
+
+        def _confirm(prompt: str) -> bool:
+            if not sys.stdin.isatty():        # never auto-delete without a TTY; require --yes
+                return False
+            try:
+                return input(f"{prompt} [Y/n] ").strip().lower() != "n"
+            except EOFError:
+                return False
+        auto = args.test == "auto"
+        target = "" if auto else args.test
+        raise SystemExit(testcmd.run(console.print, target=target, auto=auto,
+                                     confirm=_confirm, assume_yes=args.yes))
 
     if args.list_models:
         from . import registry

@@ -14,11 +14,15 @@ by the command-approval layer (cmdguard), not here. `strict` mode additionally d
 network for users who want that hard guarantee (at the cost of breaking npm/pip/fetch).
 
 Posture (resolved by mode()): **on by default** on macOS (sandbox-exec present) and Linux
-(bwrap present); `TWOB_NO_SEATBELT` disables it; `TWOB_SEATBELT=strict` adds a network deny
-(macOS: `(deny network*)`; Linux: `--unshare-net`). A platform without its sandbox binary
-degrades to off (we can't confine, so we don't pretend to). run_command is the only
-sandboxed tool — run_git is git-only and left unconfined. Both backends confine WRITES only
-and leave reads open (read-based exfil is handled by the command-approval layer, not here).
+(bwrap present) = WRITE-confinement, reads open; `TWOB_NO_SEATBELT` disables it;
+`TWOB_SEATBELT=strict` = maximum confinement: also **denies network** (macOS `(deny network*)`
+/ Linux `--unshare-net`) AND **confines reads** to the workspace/caches + a curated system-read
+allowlist (so $HOME secrets like ~/.ssh/~/.aws become unreadable). A platform without its
+sandbox binary degrades to off. run_command is the only sandboxed tool — run_git is git-only
+and left unconfined. (Default keeps reads open because read-confinement breaks any command
+that reads outside the workspace + system allowlist — notably $HOME-installed toolchains
+(~/.pyenv, ~/.nvm, ~/.rustup, ~/.cargo/bin, ~/.local/bin, asdf/direnv shims) and per-user
+config like ~/.gitconfig; strict is the opt-in hard-guarantee and expects such breakage.)
 
 Not an airtight jail (by design — it's a backstop, paired with cmdguard's command
 approval): the permissive base leaves mach-lookup/IPC open, so a command that asks a
@@ -57,6 +61,20 @@ _BWRAP_PREFERRED = "/usr/bin/bwrap"
 
 # Device writes many benign commands need even under (deny file-write*).
 _DEV_WRITES = ("/dev/null", "/dev/zero", "/dev/dtracehelper", "/dev/tty", "/dev/stdout", "/dev/stderr")
+
+# System dirs a process must READ to exec + load libraries + do basic lookups. Under
+# read-confinement (strict) reads are denied except the workspace/caches and these — so
+# $HOME's secrets (~/.ssh, ~/.aws, …) become unreadable while normal commands still run.
+# macOS: SBPL subpaths. Curated to cover the shell, common tool prefixes (Homebrew at
+# /opt/homebrew and /usr/local), the dyld cache, timezone/hosts/ssl, and /dev.
+_MACOS_SYS_READ = (
+    "/usr", "/bin", "/sbin", "/System", "/Library", "/opt", "/dev",
+    "/private/etc", "/private/var/db", "/private/var/folders", "/private/tmp",
+    "/private/var/select", "/Applications",
+)
+# Linux: dirs bind-mounted read-only under read-confinement (instead of all of /).
+# /run covers systemd-resolved's resolv.conf symlink target and D-Bus user sockets.
+_LINUX_SYS_READ = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/var", "/run")
 
 # A non-zero command whose output carries one of these — while sandboxed — is very
 # likely a sandbox denial rather than an ordinary failure (best-effort; feeds the
@@ -175,6 +193,13 @@ def build_policy(n_writable: int, n_protected: int, *, strict: bool = False) -> 
     dev = " ".join(f'(literal "{d}")' for d in _DEV_WRITES)
     lines.append(f"(allow file-write* {dev})")
     if strict:
+        # Read-confinement: deny reads, then re-allow the workspace/caches (the writable
+        # roots are readable too) and the system dirs needed to exec/load libs — so a
+        # command can't read secrets elsewhere in $HOME (~/.ssh, ~/.aws, …).
+        lines.append("(deny file-read*)")
+        read_roots = " ".join(f'(subpath (param "WRITABLE_ROOT_{i}"))' for i in range(n_writable))
+        sys_read = " ".join(f'(subpath "{p}")' for p in _MACOS_SYS_READ)
+        lines.append(f"(allow file-read* (literal \"/\") {read_roots} {sys_read})")
         lines.append("(deny network*)")
     return "\n".join(lines) + "\n"
 
@@ -198,30 +223,38 @@ def build_argv(command: str, roots: list[str], protected: list[str], *, strict: 
 
 def build_bwrap_argv(command: str, roots: list[str], ro_protected: list[str],
                      tmpfs_protected: list[str], bwrap: str, *, strict: bool = False) -> list[str]:
-    """Full argv for `bwrap … -- /bin/sh -c <command>` (Linux). Whole filesystem bound
-    read-only, then each writable root bound read-write over it, then protected dirs
-    locked on top (bwrap applies binds in ARG ORDER; later overrides earlier):
-      * `ro_protected` (EXISTING .git / 2B config) → `--ro-bind-try`: readable but not
-        writable, matching the macOS backend.
-      * `tmpfs_protected` (MISSING protected paths) → `--tmpfs`: an ephemeral empty dir so
-        the command can't CREATE them on the real fs (e.g. plant a .git/hooks backdoor in a
-        non-repo dir). A write "succeeds" into the throwaway tmpfs and is discarded. This is
-        the Linux stand-in for the macOS literal+subpath "uncreatable" guarantee.
+    """Full argv for `bwrap … -- /bin/sh -c <command>` (Linux). The filesystem is bound
+    read-only (whole `/` by default; under strict, only the system read dirs so $HOME's
+    secrets aren't readable), then each writable root is bound read-write over it, then
+    protected dirs are locked on top (bwrap applies binds in ARG ORDER; later overrides
+    earlier):
+      * `ro_protected` (EXISTING .git / 2B config) → `--ro-bind-try`: readable, unwritable.
+      * `tmpfs_protected` (MISSING protected paths) → `--tmpfs` + `--remount-ro`: an empty
+        READ-ONLY throwaway mount, so a write fails loudly (EROFS → a denial hint) rather
+        than silently succeeding, AND the path can't be created on the real fs (e.g. a
+        planted .git/hooks backdoor in a non-repo dir). The Linux stand-in for the macOS
+        literal+subpath "uncreatable" guarantee.
     Paths must be absolute (writable_roots/protected_paths guarantee this)."""
     for p in [*roots, *ro_protected, *tmpfs_protected]:
         if not os.path.isabs(p):
             raise ValueError(f"seatbelt root must be absolute: {p!r}")
-    argv = [bwrap,
-            "--ro-bind", "/", "/",       # everything readable, read-only by default
-            "--dev", "/dev",             # fresh writable devtmpfs (/dev/null etc.)
-            "--proc", "/proc",
-            "--die-with-parent"]         # child dies if 2B does
+    argv = [bwrap]
+    if strict:
+        # Read-confinement: bind only the system read dirs (not all of /), so $HOME
+        # (secrets) isn't readable. --ro-bind-try skips any that don't exist on this box.
+        for d in _LINUX_SYS_READ:
+            argv += ["--ro-bind-try", d, d]
+    else:
+        argv += ["--ro-bind", "/", "/"]  # everything readable, read-only by default
+    argv += ["--dev", "/dev",            # fresh writable devtmpfs (/dev/null etc.)
+             "--proc", "/proc",
+             "--die-with-parent"]        # child dies if 2B does
     for r in roots:
         argv += ["--bind-try", r, r]     # re-open the writable roots for writing
     for p in ro_protected:
         argv += ["--ro-bind-try", p, p]  # existing .git / 2B config: readable, unwritable
     for p in tmpfs_protected:
-        argv += ["--tmpfs", p]           # missing protected path: uncreatable (throwaway)
+        argv += ["--tmpfs", p, "--remount-ro", p]  # missing protected: uncreatable + read-only
     if strict:
         argv += ["--unshare-net"]        # network deny (parity with macOS strict)
     argv += ["--", "/bin/sh", "-c", command]

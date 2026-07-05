@@ -33,6 +33,14 @@ class Pure(unittest.TestCase):
     def test_strict_adds_network_deny(self):
         self.assertIn("(deny network*)", seatbelt.build_policy(1, 1, strict=True))
 
+    def test_strict_confines_reads(self):
+        p = seatbelt.build_policy(2, 1, strict=True)
+        self.assertIn("(deny file-read*)", p)
+        self.assertIn('(subpath (param "WRITABLE_ROOT_0"))', p.split("(deny file-read*)")[1])  # roots readable
+        self.assertIn('(subpath "/usr")', p)                                                   # system readable
+        # default (non-strict) leaves reads open
+        self.assertNotIn("(deny file-read*)", seatbelt.build_policy(2, 1))
+
     def test_argv_shape_and_param_passing(self):
         argv = seatbelt.build_argv("echo hi > f", ["/ws", "/tmp/x"], ["/ws/.git"])
         self.assertEqual(argv[0], seatbelt.SANDBOX_EXEC)   # hard-pinned, absolute
@@ -130,16 +138,27 @@ class BwrapPure(unittest.TestCase):
         self.assertLess(joined.index("--bind-try /ws /ws"), joined.index("--ro-bind-try /ws/.git"))
         self.assertNotIn("--unshare-net", argv)
 
-    def test_missing_protected_uses_tmpfs(self):
-        # a missing protected path (e.g. .git in a non-repo dir) is made uncreatable via tmpfs
-        argv = seatbelt.build_bwrap_argv("x", ["/ws"], [], ["/ws/.git"], "/usr/bin/bwrap")
-        self.assertIn("--tmpfs", argv)
-        self.assertIn("--tmpfs /ws/.git", " ".join(argv))
-        self.assertNotIn("--ro-bind-try /ws/.git", " ".join(argv))
+    def test_missing_protected_uses_readonly_tmpfs(self):
+        # a missing protected path (e.g. .git in a non-repo dir) is uncreatable AND writes
+        # fail loudly (read-only tmpfs) rather than silently succeeding
+        joined = " ".join(seatbelt.build_bwrap_argv("x", ["/ws"], [], ["/ws/.git"], "/usr/bin/bwrap"))
+        self.assertIn("--tmpfs /ws/.git --remount-ro /ws/.git", joined)
+        self.assertNotIn("--ro-bind-try /ws/.git", joined)
 
     def test_strict_unshares_net(self):
         argv = seatbelt.build_bwrap_argv("x", ["/ws"], [], [], "/usr/bin/bwrap", strict=True)
         self.assertIn("--unshare-net", argv)
+
+    def test_strict_confines_reads(self):
+        # strict binds only system read dirs (not all of /), so $HOME stays unreadable
+        argv = seatbelt.build_bwrap_argv("x", ["/ws"], [], [], "/usr/bin/bwrap", strict=True)
+        joined = " ".join(argv)
+        self.assertNotIn("--ro-bind / /", joined)
+        self.assertIn("--ro-bind-try /usr /usr", joined)
+        self.assertIn("--bind-try /ws /ws", joined)          # workspace still writable
+        # default (non-strict) binds the whole fs read-only
+        self.assertIn("--ro-bind / /", " ".join(
+            seatbelt.build_bwrap_argv("x", ["/ws"], [], [], "/usr/bin/bwrap")))
 
     def test_relative_root_rejected(self):
         with self.assertRaises(ValueError):
@@ -245,6 +264,49 @@ class DarwinBehavior(unittest.TestCase):
         code = "import socket; socket.create_connection(('10.255.255.1', 80), timeout=2)"
         r = self._run(f"{sys.executable} -c {code!r}", strict=True)
         self.assertNotEqual(r.returncode, 0)
+
+
+@unittest.skipUnless(_CAN_SANDBOX, "requires macOS sandbox-exec")
+class DarwinReadConfine(unittest.TestCase):
+    """strict mode confines reads: workspace + system readable, $HOME (secrets) not."""
+
+    def setUp(self):
+        self.ws = tempfile.mkdtemp()
+        with open(os.path.join(self.ws, "proj.txt"), "w") as f:
+            f.write("project content\n")
+        # a secret placed under $HOME (outside the readable roots + system allowlist)
+        self.home_dir = tempfile.mkdtemp(dir=os.path.expanduser("~"))
+        self.secret = os.path.join(self.home_dir, "secret.txt")
+        with open(self.secret, "w") as f:
+            f.write("TOP SECRET\n")
+        self._cwd = os.getcwd()
+        os.chdir(self.ws)
+        self.addCleanup(os.chdir, self._cwd)
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.home_dir, ignore_errors=True)
+
+    def _run(self, command):
+        argv = seatbelt.build_argv(command, seatbelt.writable_roots(), seatbelt.protected_paths(), strict=True)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=30)
+
+    def test_home_secret_read_denied(self):
+        r = self._run(f"cat {self.secret}")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("TOP SECRET", r.stdout)
+
+    def test_workspace_read_allowed(self):
+        r = self._run("cat proj.txt")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("project content", r.stdout)
+
+    def test_ordinary_command_still_runs(self):
+        r = self._run("echo hi")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("hi", r.stdout)
+
+    def test_write_outside_still_denied(self):
+        self.assertNotEqual(self._run("echo x > /etc/2b_strict_probe").returncode, 0)
+        self.assertFalse(os.path.exists("/etc/2b_strict_probe"))
 
 
 if __name__ == "__main__":

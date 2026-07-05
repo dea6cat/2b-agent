@@ -5,11 +5,21 @@ description = "A local-first coding agent that keeps small local models focused 
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+# Floors are the earliest releases that officially list Python 3.14 support
+# (rich 14.2, textual 6.3, mcp 1.28). prompt_toolkit is pure-Python with no
+# upper Python cap; 3.0.52 is the current release. All still support 3.11.
 dependencies = [
-    "rich>=13.0",
-    "prompt_toolkit>=3.0",
-    "textual>=0.60",
-    "mcp>=1.0",
+    "rich>=14.2",
+    "prompt_toolkit>=3.0.52",
+    "textual>=6.3",
+    "mcp>=1.28",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 [project.scripts]

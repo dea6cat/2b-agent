@@ -23,6 +23,7 @@ from pathlib import Path
 
 from . import config, discover
 from .doctor import _bin_dir
+from .update import _install_kind
 from .providers.ollama import _total_ram_bytes
 
 OLLAMA_HOST = (os.environ.get("OLLAMA_API_BASE") or os.environ.get("OLLAMA_HOST")
@@ -339,11 +340,35 @@ def clean_install(emit) -> None:
             shutil.rmtree(os.path.expanduser(d), ignore_errors=True)
 
 
+def _script_dir() -> str:
+    """Directory the running `2b` launcher lives in, per install method — the dir that must be
+    on PATH. uv → its tool-bin dir; pipx → PIPX_BIN_DIR or ~/.local/bin; plain pip → the
+    interpreter's scripts dir, but a `pip install --user` uses the *user* scheme (which on macOS
+    framework builds isn't ~/.local/bin), so detect a user-site install and use that scheme."""
+    kind = _install_kind()
+    if kind == "uv":
+        return _bin_dir()
+    if kind == "pipx":
+        return os.environ.get("PIPX_BIN_DIR") or os.path.expanduser("~/.local/bin")
+    import site
+    import sysconfig
+    try:
+        user_site = site.getusersitepackages()
+    except Exception:
+        user_site = ""
+    pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # …/site-packages
+    if user_site and (pkg == user_site or pkg.startswith(user_site + os.sep)):
+        d = sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user"))
+    else:
+        d = sysconfig.get_path("scripts")
+    return d or os.path.expanduser("~/.local/bin")
+
+
 def _path_needs_fix() -> bool:
-    """True if uv's tool-bin dir isn't on the PATH *future terminals* will see. install.sh
-    prepends the bin dir for its own run, so it passes the pre-prepend PATH via
-    `_2B_ORIG_PATH`; we check that when present, else the live PATH."""
-    bindir = _bin_dir()
+    """True if the dir holding the `2b` launcher isn't on the PATH *future terminals* will
+    see. install.sh prepends the bin dir for its own run, so it passes the pre-prepend PATH
+    via `_2B_ORIG_PATH`; we check that when present, else the live PATH."""
+    bindir = _script_dir()
     path = os.environ.get("_2B_ORIG_PATH") or os.environ.get("PATH", "")
     return bindir not in path.split(os.pathsep)
 
@@ -351,19 +376,23 @@ def _path_needs_fix() -> bool:
 def fix_path(opts: dict, emit) -> None:
     if not _path_needs_fix():
         return
-    bindir = _bin_dir()
+    bindir = _script_dir()
+    # uv and pipx ship a native shell-updater; plain pip has none (manual PATH edit).
+    updater = {"uv": ["uv", "tool", "update-shell"],
+               "pipx": ["pipx", "ensurepath"]}.get(_install_kind())
+    label = f"runs '{' '.join(updater)}'" if updater else f"adds {bindir} to your PATH"
     want = opts.get("fix_path")
-    do = want == "yes" or (want is None and _confirm(
-        "Put 2B on your PATH now (runs 'uv tool update-shell')?", True, opts))
-    if do and _have("uv"):
+    do = want == "yes" or (want is None and _confirm(f"Put 2B on your PATH now ({label})?", True, opts))
+    if do and updater and _have(updater[0]):
         try:
-            subprocess.run(["uv", "tool", "update-shell"], capture_output=True, text=True, timeout=30)
-            emit("Added uv's tool directory to your PATH — open a new terminal.")
+            subprocess.run(updater, capture_output=True, text=True, timeout=30)
+            emit(f"Updated your PATH via {updater[0]} — open a new terminal.")
             return
         except Exception:
             pass
     emit(f"'2b' may not resolve in new terminals. Add {bindir} to your PATH:")
-    emit("  uv tool update-shell")
+    if updater:
+        emit(f"  {' '.join(updater)}")
     emit(f'  or: echo \'export PATH="{bindir}:$PATH"\' >> ~/.zshrc')
 
 

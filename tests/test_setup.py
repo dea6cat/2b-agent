@@ -143,13 +143,13 @@ class GradeTable(unittest.TestCase):
 
 class PathFix(unittest.TestCase):
     def setUp(self):
-        self._orig_bin = setup._bin_dir
-        setup._bin_dir = lambda: "/opt/uvbin"
+        self._orig_bin = setup._script_dir
+        setup._script_dir = lambda: "/opt/uvbin"
         self._path = os.environ.get("PATH")
         self._orig = os.environ.get("_2B_ORIG_PATH")
 
     def tearDown(self):
-        setup._bin_dir = self._orig_bin
+        setup._script_dir = self._orig_bin
         if self._path is not None:
             os.environ["PATH"] = self._path
         os.environ.pop("_2B_ORIG_PATH", None)
@@ -169,6 +169,59 @@ class PathFix(unittest.TestCase):
     def test_persistent_has_bindir_no_fix(self):
         os.environ["_2B_ORIG_PATH"] = "/opt/uvbin:/usr/bin"
         self.assertFalse(setup._path_needs_fix())
+
+
+class InstallAwarePath(unittest.TestCase):
+    def test_script_dir_uv_uses_bin_dir(self):
+        with mock.patch.object(setup, "_install_kind", return_value="uv"), \
+             mock.patch.object(setup, "_bin_dir", return_value="/uv/bin"):
+            self.assertEqual(setup._script_dir(), "/uv/bin")
+
+    def test_script_dir_pipx_honors_pipx_bin_dir(self):
+        with mock.patch.object(setup, "_install_kind", return_value="pipx"), \
+             mock.patch.dict(os.environ, {"PIPX_BIN_DIR": "/pipx/bin"}):
+            self.assertEqual(setup._script_dir(), "/pipx/bin")
+
+    def test_script_dir_pip_venv_uses_default_scheme(self):
+        # not under user-site → plain venv/system scripts dir
+        import sysconfig
+        with mock.patch.object(setup, "_install_kind", return_value="pip"), \
+             mock.patch("site.getusersitepackages", return_value="/nowhere/near/pkg"):
+            self.assertEqual(setup._script_dir(),
+                             sysconfig.get_path("scripts") or os.path.expanduser("~/.local/bin"))
+
+    def test_script_dir_pip_user_install_uses_user_scheme(self):
+        # package located under the user-site → the user scripts scheme (handles macOS framework)
+        import sysconfig
+        pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(setup.__file__)))
+        with mock.patch.object(setup, "_install_kind", return_value="pip"), \
+             mock.patch("site.getusersitepackages", return_value=pkg_parent):
+            expected = sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user"))
+            self.assertEqual(setup._script_dir(), expected or os.path.expanduser("~/.local/bin"))
+
+    def _run_fix_path(self, kind, have=True):
+        calls, out = [], []
+        with mock.patch.object(setup, "_path_needs_fix", return_value=True), \
+             mock.patch.object(setup, "_install_kind", return_value=kind), \
+             mock.patch.object(setup, "_script_dir", return_value="/somewhere/bin"), \
+             mock.patch.object(setup, "_have", return_value=have), \
+             mock.patch.object(setup.subprocess, "run", side_effect=lambda a, **k: calls.append(a)):
+            setup.fix_path({"fix_path": "yes"}, out.append)
+        return calls, "\n".join(out)
+
+    def test_fix_path_pip_runs_nothing_and_never_suggests_uv(self):
+        calls, text = self._run_fix_path("pip")
+        self.assertEqual(calls, [])                       # plain pip has no shell-updater to run
+        self.assertNotIn("uv tool update-shell", text)    # and never tells a pip user to use uv
+        self.assertIn("/somewhere/bin", text)             # points at the real scripts dir instead
+
+    def test_fix_path_pipx_uses_ensurepath(self):
+        calls, _ = self._run_fix_path("pipx")
+        self.assertIn(["pipx", "ensurepath"], calls)
+
+    def test_fix_path_uv_uses_update_shell(self):
+        calls, _ = self._run_fix_path("uv")
+        self.assertIn(["uv", "tool", "update-shell"], calls)
 
 
 class NonInteractive(unittest.TestCase):

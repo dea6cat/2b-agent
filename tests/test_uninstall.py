@@ -35,7 +35,8 @@ class UninstallTest(unittest.TestCase):
             self.calls.append(argv)
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         self._patch(uninstall.subprocess, "run", _fake_run)
-        self._patch(uninstall.shutil, "which", lambda name: "/usr/bin/uv")
+        self._patch(uninstall.shutil, "which", lambda name: "/usr/bin/" + name)
+        self._patch(uninstall, "_install_kind", lambda: "uv")    # default; overridden per-test
 
     def test_confirm_yes_removes_config_and_uninstalls(self):
         out = []
@@ -43,8 +44,19 @@ class UninstallTest(unittest.TestCase):
         text = "\n".join(out)
         self.assertEqual(code, 0)
         self.assertFalse(self.cfg.exists())                      # config dir really gone
-        self.assertIn(["uv", "tool", "uninstall", "2b"], self.calls)
+        self.assertIn(["uv", "tool", "uninstall", "2b-agent"], self.calls)
         self.assertIn("Done. 2B has been removed.", text)
+
+    def test_pip_install_uses_pip_uninstall(self):
+        self._patch(uninstall, "_install_kind", lambda: "pip")
+        uninstall.run([].append, confirm=lambda p: True)
+        self.assertIn([sys.executable, "-m", "pip", "uninstall", "-y", "2b-agent"], self.calls)
+        self.assertFalse(self.cfg.exists())
+
+    def test_pipx_install_uses_pipx_uninstall(self):
+        self._patch(uninstall, "_install_kind", lambda: "pipx")
+        uninstall.run([].append, confirm=lambda p: True)
+        self.assertIn(["pipx", "uninstall", "2b-agent"], self.calls)
 
     def test_confirm_no_aborts_and_keeps_everything(self):
         out = []

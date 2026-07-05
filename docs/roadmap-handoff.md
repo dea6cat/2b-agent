@@ -1,19 +1,34 @@
 # Roadmap execution handoff
 
 Working state for resuming the `docs/performance-reliability-roadmap.md` execution in a
-fresh session. Last updated after the run_command safety release (P12 + S2) merged.
+fresh session. Last updated after the full security theme shipped and P18 was closed.
 
 ## Where things stand
 
-- **Branch/commit:** `main` at `a315a84` (`local == origin`). Working tree clean.
-- **Tests:** full suite **513 green** — `python -m unittest discover -s tests -p "test_*.py"`.
+- **Branch/commit:** `main` at `940f6bc` (`local == origin`). Working tree clean.
+- **Tests:** full suite **544 green** — `python -m unittest discover -s tests -p "test_*.py"`
+  (5 Linux-gated bwrap behavioral tests skip on macOS).
 - **Shipped on `main`:** P1–P11, P13–P17, P20, P22, P23, P25, P27 (perf/reliability roadmap),
-  **plus the security release: P12 (macOS seatbelt write-confinement) + its command-approval
-  layer, and S2 (subprocess env scrub + bounded output)** — see the two survey docs
-  `docs/sandbox-capabilities-roadmap.md` and `docs/security-hardening-roadmap.md`, and the
-  `2b-run-command-sandbox` memory. Each landed as one feature commit, reviewed and validated.
+  **plus the complete security theme: P12 (macOS seatbelt write-confinement) + command-approval,
+  S2 (subprocess env scrub + bounded output), prompt-injection fencing, Linux write-confinement
+  (bwrap), and the read-confinement tier** — see `docs/sandbox-capabilities-roadmap.md`,
+  `docs/security-hardening-roadmap.md`, and the `2b-run-command-sandbox` memory. Each landed as
+  one feature commit, adversarially reviewed (codeObserver) and validated.
 
 ### What each recent cluster added (one line each)
+- **Read-confinement tier** (`940f6bc`): `TWOB_SEATBELT=strict` now also confines READS (macOS SBPL
+  deny-read + allowlist; Linux bwrap binds only system dirs) so $HOME secrets are unreadable; +
+  read-only tmpfs for missing protected paths. macOS device-validated; Linux unit-tested (CI caveat).
+- **Linux write-confinement / bwrap** (`742083c`): `seatbelt.py` dispatches macOS `sandbox-exec` /
+  Linux `bwrap`; write-confinement parity, `strict`→`--unshare-net`. Unit-tested; needs Linux CI.
+- **Prompt-injection fencing** (`393d5ae`): `untrusted.py` fences env-derived tool output in
+  `<untrusted_data>` markers + system-prompt data-not-instructions rule + forge-escaping.
+- **S2** (`a315a84`): subprocess env scrub (`tools._child_env`) + bounded child output + `~/.config/2b`
+  sensitive.
+- **P12 + command-approval** (`c03b89e`): `seatbelt.py` macOS write-confinement; `cmdguard` folds
+  network/escalation/secrets-path into `is_high_risk`; file tools/`search_files`/`run_git` confirm on a
+  symlink-resolved secrets path.
+- **P19+P10+P11** (`527777c`): `/tool` direct tool invocation, `/history search` scrollback
 - **S2** (`a315a84`): subprocess env scrub (`tools._child_env` — denylist default / allowlist under
   `TWOB_SEATBELT=strict` / `TWOB_NO_ENV_SCRUB` opt-out; applies to run_command AND run_git) +
   bounded child output (~2MB reader-thread cap, OOM guard) + `~/.config/2b` as a sensitive path.
@@ -34,15 +49,23 @@ fresh session. Last updated after the run_command safety release (P12 + S2) merg
 
 ## Remaining work
 
-All optional/conditional; **get an explicit go-ahead before starting** — none is on the
-critical path. (P12 shipped; see above.)
+- **P18 — Scoped-prompt + bounded state: CLOSED (satisfied by design, not built).** Investigated
+  per the "check before proposing" note: `subagents.py` already embodies P18's core idea — each
+  explorer/worker runs in a **fresh `Conversation`** with only a short system prompt + the single
+  `goal` (never the parent's history), is **bounded** (≤8/≤12 turns, `MAX_PARALLEL=4`,
+  `DELEGATE_TIMEOUT=180s`), reads are `read_cap`-capped, the report folded back is truncated, and
+  delegate is **cloud-only** (big context). Both preconditions for P18's value are absent (no
+  full-history carry; no unbounded per-subagent growth), so a `state.py` ring-buffer would be
+  speculative complexity against the YAGNI thesis. Reopen only if delegate gains a local-model path
+  or long-lived stateful sub-runners.
+- **Linux CI behavioral validation** of the bwrap write- and read-confinement paths (the 5 gated
+  tests + a userns-enabled smoke check). The only outstanding item — needs a Linux environment;
+  everything else is validated on macOS. See the `2b-run-command-sandbox` memory for specifics.
 
-- **P18 — Scoped-prompt + bounded state** (roadmap line ~212). For `delegate`/sub-runner work:
-  assemble a fresh minimal prompt with a compact ring-buffered state object regenerated each
-  call instead of carrying full history. Files: `subagents.py` (delegate prompt assembly), a
-  small `state.py` dataclass; new `tests/test_scoped_state.py`. **Note:** only worth doing if
-  2B's subtask execution actually grows — otherwise defer. Check whether `subagents.py`/delegate
-  is exercised enough to justify it before proposing.
+The roadmap's phased backlog is otherwise complete. Optional future ideas live in
+`docs/sandbox-capabilities-roadmap.md` (TUI polish, per-model catalog extras) and
+`docs/security-hardening-roadmap.md` (path-scoped grants, the S1 read-side jail — deliberately
+deferred as it reverses point-anywhere).
 - **Security follow-ons** (`docs/security-hardening-roadmap.md`, §D). Mostly shipped via P12+S2.
   Still open: **S1 read-side workspace jail** — deliberately NOT done because it reverses 2B's
   documented "point-anywhere" file access; S7 (shipped) already confirms *secrets* reads, so a
@@ -100,8 +123,10 @@ There are also documented *reinforcements* folded into shipped phases (see the r
 
 ## To resume
 
-Read `docs/performance-reliability-roadmap.md` (full specs) + this file, confirm `main` is at
-`a315a84` and 513 tests pass, then ask the user which remaining item (if any) to take — P18, or
-the S1 read-side jail (needs the point-anywhere trade-off decision). Do not start without an
-explicit go-ahead. The `codeObserver` review loop is the highest-value QA step (it caught 10 real
-issues across the P12+S2 rounds, including a critical subprocess hang) — always run it on the diff.
+The phased roadmap is complete and P18 is closed — there is **no queued build work**. Confirm `main`
+is at `940f6bc` and 544 tests pass. The only outstanding item is **Linux CI behavioral validation**
+of the bwrap paths (needs a Linux box). Otherwise, take direction from the user; optional future
+ideas live in the two survey docs. If a new phase is taken, follow the per-phase process above and
+always run the `codeObserver` review on the staged diff — across the security theme it caught ~14
+real issues (three critical: a subprocess hang, an outline injection-bypass, a bwrap backdoor gap)
+that unit tests alone missed.

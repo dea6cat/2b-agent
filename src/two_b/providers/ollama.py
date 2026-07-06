@@ -12,6 +12,7 @@ import json as _json
 from typing import Callable
 
 from ..conversation import Conversation, Message, Role, ToolCall
+from ..tools import recover_toolcalls
 from ..toolspec import ToolSpec, to_openai
 from .base import Provider, ProviderResponse, get_json, post_json, post_stream
 
@@ -215,6 +216,9 @@ class OllamaProvider:
             args = _parse_args(fn["arguments"])
             calls.append(ToolCall.new(name=fn["name"], arguments=args))
         text = (msg.get("content") or "").strip()
+        if not calls and text:
+            recovered = recover_toolcalls(text, [t.name for t in tools])
+            calls = [ToolCall.new(name=n, arguments=a) for n, a in recovered]
         thinking = (msg.get("thinking") or "").strip()
         return ProviderResponse(
             message=Message.assistant(text=text or None, thinking=thinking or None, tool_calls=calls),
@@ -256,6 +260,9 @@ class OllamaProvider:
                 prompt_tokens = obj.get("prompt_eval_count")
                 break
         text = "".join(content).strip()
+        if not calls and text:
+            recovered = recover_toolcalls(text, [t.name for t in tools])
+            calls = [ToolCall.new(name=n, arguments=a) for n, a in recovered]
         think = "".join(thinking).strip()
         return ProviderResponse(
             message=Message.assistant(text=text or None, thinking=think or None, tool_calls=calls),

@@ -927,3 +927,71 @@ def coerce_tool_args(name: str, args, known: tuple[str, ...] = ()) -> tuple[str,
     if eff_name in _UNWRAP_TOOLS:
         return eff_name, inner
     return name, args
+
+
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+_PY_LITERALS = ((r"\bTrue\b", "true"), (r"\bFalse\b", "false"), (r"\bNone\b", "null"))
+# A ```json … ``` (or ```tool_call …```) fenced block wrapping a JSON object/array.
+_FENCE_RE = re.compile(
+    r"```(?:json|tool_call|tool_calls)?\s*\n?(\{.*?\}|\[.*?\])\s*```",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def loads_tolerant(s: str):
+    """json.loads with a conservative repair pass (trailing commas, Python literals
+    True/False/None, one level of unclosed brace/bracket). Returns the parsed value or
+    None. Never raises. Repairs only apply after a strict parse fails, so valid JSON is
+    never altered. A cheap safety net for text-emitted tool-call blobs (see recover_toolcalls)."""
+    if not isinstance(s, str) or not s.strip():
+        return None
+    try:
+        return json.loads(s)
+    except (ValueError, TypeError):
+        pass
+    repaired = _TRAILING_COMMA_RE.sub(r"\1", s)
+    for pat, repl in _PY_LITERALS:
+        repaired = re.sub(pat, repl, repaired)
+    for _ in range(3):
+        try:
+            return json.loads(repaired)
+        except (ValueError, TypeError):
+            opens = repaired.count("{") - repaired.count("}")
+            brackets = repaired.count("[") - repaired.count("]")
+            if opens <= 0 and brackets <= 0:
+                return None
+            repaired = repaired + ("}" if opens > 0 else "]")
+    return None
+
+
+def recover_toolcalls(text: str, known) -> list[tuple[str, dict]]:
+    """Recover tool calls a model emitted as JSON in its message text instead of the native
+    tool_calls field (measured: qwen2.5-coder:14b does this for 100% of its calls). Returns a
+    list of (name, args) for each JSON object — in a fenced code block, or the whole message
+    body — whose tool name (outer, or wrapped via coerce_tool_args) is in `known`; [] if none.
+    Pure. Bare JSON embedded mid-prose is intentionally not scanned (too risky); it is still
+    recovered when the whole body is JSON."""
+    if not text or not any(k in text for k in known):
+        return []
+    calls: list[tuple[str, dict]] = []
+    blobs = [m.group(1) for m in _FENCE_RE.finditer(text)]
+    stripped = text.strip()
+    if stripped[:1] in "{[":
+        blobs.append(stripped)
+    for blob in blobs:
+        obj = loads_tolerant(blob)
+        if obj is None:
+            continue
+        for item in (obj if isinstance(obj, list) else [obj]):
+            if not isinstance(item, dict):
+                continue
+            name = ""
+            for nk in _NAME_KEYS:
+                v = item.get(nk)
+                if isinstance(v, str) and v.strip():
+                    name = v.strip()
+                    break
+            cname, cargs = coerce_tool_args(name, item, tuple(known))
+            if cname in known:
+                calls.append((cname, cargs))
+    return calls

@@ -338,12 +338,19 @@ _STALL_NUDGE = (
     "If you already have the answer, give it plainly without describing steps."
 )
 
+_STALL_RE = re.compile(
+    r"(i['’]?ll|i will|let me|going to|i need to|voy a|d[eé]jame)"
+    r"[^.!?]{0,40}?\b(explore|look|check|read|search|"
+    r"examine|find|list|investigate|start by|see what)",
+    re.IGNORECASE)
+
 
 def _stalled_without_acting(text: str) -> bool:
-    """True if a no-tool-call turn is forward-intent narration ('I'll…', 'let me explore…')
-    rather than a delivered answer. Caller gates this on zero tool calls made so far, so a
-    genuine done-report (which comes after real actions) is never flagged."""
-    return bool(text) and bool(_INTENT_RE.search(text))
+    """True if a no-tool-call turn narrates an intent to investigate/act ('let me first
+    explore…', 'I'll read…') rather than delivering an answer. Requires an intent opener
+    followed by an investigative verb, so ordinary sign-offs ('let me know if…') and
+    done-reports ('I can now confirm…') don't match. Caller gates on zero tool calls so far."""
+    return bool(text) and bool(_STALL_RE.search(text))
 
 
 def teardown_helpers() -> None:

@@ -2,7 +2,7 @@
 
 Removes the two things that are genuinely 2B's: the ~/.config/2b directory (API keys,
 prefs, MCP config) and the installed executable, uninstalled via whatever installed it —
-uv tool / pipx / pip (detected from where the files live). It deliberately
+uv tool / pipx / Homebrew / pip (detected from where the files live). It deliberately
 does NOT touch Ollama models (they're Ollama's — often large and shared) or your shell
 PATH line, and it can't chase down 2B.md files scattered across your projects — it tells
 you how to remove those yourself. Destructive: confirms unless `assume_yes`.
@@ -32,6 +32,8 @@ def run(emit, confirm, assume_yes: bool = False) -> int:
         tool, argv, shown = "uv", ["uv", "tool", "uninstall", PKG], f"uv tool uninstall {PKG}"
     elif kind == "pipx":
         tool, argv, shown = "pipx", ["pipx", "uninstall", PKG], f"pipx uninstall {PKG}"
+    elif kind == "brew":
+        tool, argv, shown = "brew", ["brew", "uninstall", PKG], f"brew uninstall {PKG}"
     else:
         tool, argv, shown = "pip", [sys.executable, "-m", "pip", "uninstall", "-y", PKG], f"pip uninstall {PKG}"
 

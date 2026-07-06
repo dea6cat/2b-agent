@@ -182,6 +182,12 @@ class InstallAwarePath(unittest.TestCase):
              mock.patch.dict(os.environ, {"PIPX_BIN_DIR": "/pipx/bin"}):
             self.assertEqual(setup._script_dir(), "/pipx/bin")
 
+    def test_script_dir_brew_derives_prefix_bin_from_cellar(self):
+        # brew links the launcher into <prefix>/bin; derive it from the Cellar venv path
+        with mock.patch.object(setup, "_install_kind", return_value="brew"), \
+             mock.patch.object(setup.sys, "prefix", "/opt/homebrew/Cellar/2b-agent/1.1.1/libexec"):
+            self.assertEqual(setup._script_dir(), "/opt/homebrew/bin")
+
     def test_script_dir_pip_venv_uses_default_scheme(self):
         # not under user-site → plain venv/system scripts dir
         import sysconfig

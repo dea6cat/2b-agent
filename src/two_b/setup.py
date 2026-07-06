@@ -350,6 +350,14 @@ def _script_dir() -> str:
         return _bin_dir()
     if kind == "pipx":
         return os.environ.get("PIPX_BIN_DIR") or os.path.expanduser("~/.local/bin")
+    if kind == "brew":
+        # brew links the launcher into <prefix>/bin (already on PATH). Derive <prefix> from
+        # the Cellar path (works for /opt/homebrew and /usr/local); else HOMEBREW_PREFIX.
+        low = sys.prefix.lower()
+        if "/cellar/" in low:
+            return sys.prefix[:low.index("/cellar/")] + "/bin"
+        hp = os.environ.get("HOMEBREW_PREFIX")
+        return (hp + "/bin") if hp else "/opt/homebrew/bin"
     import site
     import sysconfig
     try:

@@ -68,6 +68,8 @@ class InstallKind(unittest.TestCase):
     def test_kind_from_path(self):
         self.assertEqual(update._kind_from("/home/u/.local/share/uv/tools/2b-agent/lib"), "uv")
         self.assertEqual(update._kind_from("/home/u/.local/pipx/venvs/2b-agent"), "pipx")
+        self.assertEqual(update._kind_from("/opt/homebrew/Cellar/2b-agent/1.1.1/libexec"), "brew")
+        self.assertEqual(update._kind_from("/usr/local/Cellar/2b-agent/1.1.1/libexec"), "brew")
         self.assertEqual(update._kind_from("/usr/lib/python3.12/site-packages"), "pip")
 
 
@@ -101,8 +103,18 @@ class RunUpgrade(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(calls[0][1:], ["-m", "pip", "install", "-U", "2b-agent"])   # sys.executable -m pip …
 
+    def test_brew_install_uses_brew_upgrade(self):
+        code, calls = self._capture("brew")
+        self.assertEqual(code, 0)
+        self.assertIn(["brew", "upgrade", "2b-agent"], calls)
+
     def test_uv_absent_returns_1(self):
         code, calls = self._capture("uv", which_ok=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [])
+
+    def test_brew_absent_returns_1(self):
+        code, calls = self._capture("brew", which_ok=False)
         self.assertEqual(code, 1)
         self.assertEqual(calls, [])
 

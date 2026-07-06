@@ -58,6 +58,12 @@ class UninstallTest(unittest.TestCase):
         uninstall.run([].append, confirm=lambda p: True)
         self.assertIn(["pipx", "uninstall", "2b-agent"], self.calls)
 
+    def test_brew_install_uses_brew_uninstall(self):
+        self._patch(uninstall, "_install_kind", lambda: "brew")
+        uninstall.run([].append, confirm=lambda p: True)
+        self.assertIn(["brew", "uninstall", "2b-agent"], self.calls)
+        self.assertFalse(self.cfg.exists())
+
     def test_confirm_no_aborts_and_keeps_everything(self):
         out = []
         code = uninstall.run(out.append, confirm=lambda p: False)

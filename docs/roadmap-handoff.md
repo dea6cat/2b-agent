@@ -1,132 +1,108 @@
-# Roadmap execution handoff
+# 2B — status & handoff
 
-Working state for resuming the `docs/performance-reliability-roadmap.md` execution in a
-fresh session. Last updated after the full security theme shipped and P18 was closed.
+Single source of truth for where the project stands and how to work on it. This replaces the
+earlier per-theme roadmap docs (capabilities / performance-reliability / sandbox / security-
+hardening), which are folded into the "Shipped" and "Open follow-ups" sections below.
 
 ## Where things stand
 
-- **Branch/commit:** `main` at `940f6bc` (`local == origin`). Working tree clean.
-- **Tests:** full suite **544 green** — `python -m unittest discover -s tests -p "test_*.py"`
-  (5 Linux-gated bwrap behavioral tests skip on macOS).
-- **Shipped on `main`:** P1–P11, P13–P17, P20, P22, P23, P25, P27 (perf/reliability roadmap),
-  **plus the complete security theme: P12 (macOS seatbelt write-confinement) + command-approval,
-  S2 (subprocess env scrub + bounded output), prompt-injection fencing, Linux write-confinement
-  (bwrap), and the read-confinement tier** — see `docs/sandbox-capabilities-roadmap.md`,
-  `docs/security-hardening-roadmap.md`, and the `2b-run-command-sandbox` memory. Each landed as
-  one feature commit, adversarially reviewed (codeObserver) and validated.
+- **Branch/commit:** `main` at `28ac8ba` (`local == origin`). Working tree clean.
+- **Tests:** full suite **616 green** — `python -m unittest discover -s tests -p "test_*.py"`
+  (5 Linux-gated bwrap behavioral tests skip on macOS). Verified on **Python 3.13 and 3.14.6**.
+- **Distribution:** published on PyPI as `2b-agent`; installable via the `curl … | sh` installer,
+  `uv tool`, `pipx`, plain `pip`, and a Homebrew formula (`packaging/homebrew/`).
 
-### What each recent cluster added (one line each)
-- **Read-confinement tier** (`940f6bc`): `TWOB_SEATBELT=strict` now also confines READS (macOS SBPL
-  deny-read + allowlist; Linux bwrap binds only system dirs) so $HOME secrets are unreadable; +
-  read-only tmpfs for missing protected paths. macOS device-validated; Linux unit-tested (CI caveat).
-- **Linux write-confinement / bwrap** (`742083c`): `seatbelt.py` dispatches macOS `sandbox-exec` /
-  Linux `bwrap`; write-confinement parity, `strict`→`--unshare-net`. Unit-tested; needs Linux CI.
-- **Prompt-injection fencing** (`393d5ae`): `untrusted.py` fences env-derived tool output in
-  `<untrusted_data>` markers + system-prompt data-not-instructions rule + forge-escaping.
-- **S2** (`a315a84`): subprocess env scrub (`tools._child_env`) + bounded child output + `~/.config/2b`
-  sensitive.
-- **P12 + command-approval** (`c03b89e`): `seatbelt.py` macOS write-confinement; `cmdguard` folds
-  network/escalation/secrets-path into `is_high_risk`; file tools/`search_files`/`run_git` confirm on a
-  symlink-resolved secrets path.
-- **P19+P10+P11** (`527777c`): `/tool` direct tool invocation, `/history search` scrollback
-- **S2** (`a315a84`): subprocess env scrub (`tools._child_env` — denylist default / allowlist under
-  `TWOB_SEATBELT=strict` / `TWOB_NO_ENV_SCRUB` opt-out; applies to run_command AND run_git) +
-  bounded child output (~2MB reader-thread cap, OOM guard) + `~/.config/2b` as a sensitive path.
-- **P12 + command-approval** (`c03b89e`, docs `d1b2646`): `seatbelt.py` macOS `sandbox-exec`
-  write-confinement for run_command (permissive-base + deny-writes, on by default,
-  `TWOB_NO_SEATBELT`/`TWOB_SEATBELT=strict`, deny→ask-to-re-run); `cmdguard` folds network/
-  escalation/secrets-path into `is_high_risk`; file tools + `search_files` + `run_git` confirm on
-  a symlink-resolved secrets path (`orchestrator._is_sensitive`).
-- **P19+P10+P11** (`527777c`): `/tool` direct tool invocation, `/history search` scrollback
-  nav, risk-class label on confirmations; `2b trace replay <id>` prompt-drift detection
-  (salted prefix hash per session + `driftreplay.py`); TUI Esc-snap-to-bottom + double-Ctrl-C.
-- **P8+P9** (`d791ee0`): project-instructions injection (CLAUDE.md/AGENTS.md → system prompt);
-  eval rigor — `evalstats.py` (exact-match scorer, seeded bootstrap CIs, McNemar, multi-seed
-  variance, dirty-tree publish guard), harness multi-seed + trace copy-out + `TWOB_EVAL_CLI`.
-- **P17** (`89f2b1c`): searchable compaction archive behind lossy compaction + dangling-ref recall.
-- **P5/P6/P22/P27** (`19cc21d`): prefix stability + keep-alive, token calibration, structured
-  compaction summary.
+## Shipped
 
-## Remaining work
+All landed as single feature commits, each adversarially reviewed (`codeObserver`) and validated.
+The 5-tool schema stayed frozen throughout; all complexity is host-side.
 
-- **P18 — Scoped-prompt + bounded state: CLOSED (satisfied by design, not built).** Investigated
-  per the "check before proposing" note: `subagents.py` already embodies P18's core idea — each
-  explorer/worker runs in a **fresh `Conversation`** with only a short system prompt + the single
-  `goal` (never the parent's history), is **bounded** (≤8/≤12 turns, `MAX_PARALLEL=4`,
-  `DELEGATE_TIMEOUT=180s`), reads are `read_cap`-capped, the report folded back is truncated, and
-  delegate is **cloud-only** (big context). Both preconditions for P18's value are absent (no
-  full-history carry; no unbounded per-subagent growth), so a `state.py` ring-buffer would be
-  speculative complexity against the YAGNI thesis. Reopen only if delegate gains a local-model path
-  or long-lived stateful sub-runners.
-- **Linux CI behavioral validation** of the bwrap write- and read-confinement paths (the 5 gated
-  tests + a userns-enabled smoke check). The only outstanding item — needs a Linux environment;
-  everything else is validated on macOS. See the `2b-run-command-sandbox` memory for specifics.
+- **Core agent.** Frozen tool schema (`list_files, read_file, search_files, edit_file, write_file`
+  + `run_git`/`run_command` + `delegate`); tolerant edit matching + post-edit diagnostics; semantic
+  symbol resolution (LSP → MCP → regex floor); scrollback search; `2b trace replay` prompt-drift
+  detection; searchable compaction archive; project-instructions injection (CLAUDE.md/AGENTS.md);
+  eval rigor (`evalstats.py`: exact-match scorer, bootstrap CIs, McNemar, multi-seed, publish guard);
+  prefix stability + keep-alive + token calibration + structured compaction.
+- **Security.** Two-layer `run_command` safety: seatbelt write-confinement (macOS `sandbox-exec` /
+  Linux `bwrap`, on by default, `TWOB_NO_SEATBELT` / `TWOB_SEATBELT=strict`) + `cmdguard` command-
+  approval (network/escalation/secrets-path → confirm); `strict` also confines **reads** ($HOME
+  secrets unreadable); subprocess env scrub (`tools._child_env`) + bounded child output; prompt-
+  injection fencing (`untrusted.py`, `<untrusted_data>` markers + data-not-instructions rule);
+  SSRF-guarded web fetch. Model-aware exposure: local Ollama → `run_git` only; cloud → `run_command`
+  + `delegate`.
+- **Onboarding & distribution.** `2b setup` (machine grade → live model discovery from ollama.com,
+  tool-capable + RAM-fitting + popularity-ranked → cost-confirmed pre-test of the top-N → menu of
+  proven passers → pull → self-test → persist default → PATH); offers to `ollama rm` pre-tested
+  models you didn't keep (`--keep-tested`). `2b --test [<model>|auto]` re-grades installed models
+  (auto removes failures, never the default, TTY-gated). `--doctor`, `--rm`, `--update`, `--setup`.
+  `/fetch <url>` pulls readable web content into context (host-side, not a model tool). `2b setup`
+  installs Ollama if missing / uses it if present.
+- **Install-method awareness.** `update._install_kind()` classifies uv / pipx / brew / pip by file
+  path; `--update`, `--rm`, and `2b setup`'s PATH fix each dispatch on it (correct upgrade/uninstall
+  command per installer; correct scripts dir incl. pip `--user` scheme; no-op PATH fix for brew).
+- **Python 3.14.** Dependency floors raised to 3.14-supported releases (`rich>=14.2`,
+  `prompt_toolkit>=3.0.52`, `textual>=6.3`, `mcp>=1.28`); trove classifiers 3.11–3.14; the toolchain
+  runs on 3.14.6.
+- **Homebrew.** `packaging/homebrew/Formula/twob-agent.rb` — a `Language::Python::Virtualenv`
+  formula (named `twob-agent`, not `2b-agent`, because a leading-digit formula name yields an invalid
+  Ruby class; it installs the `2b` command). Verified locally: `brew style`/`audit` clean, source
+  build succeeds, `2b --version` runs on brew's Python 3.14. See `packaging/homebrew/README.md`.
 
-The roadmap's phased backlog is otherwise complete. Optional future ideas live in
-`docs/sandbox-capabilities-roadmap.md` (TUI polish, per-model catalog extras) and
-`docs/security-hardening-roadmap.md` (path-scoped grants, the S1 read-side jail — deliberately
-deferred as it reverses point-anywhere).
-- **Security follow-ons** (`docs/security-hardening-roadmap.md`, §D). Mostly shipped via P12+S2.
-  Still open: **S1 read-side workspace jail** — deliberately NOT done because it reverses 2B's
-  documented "point-anywhere" file access; S7 (shipped) already confirms *secrets* reads, so a
-  blanket read-jail needs an explicit `AskUserQuestion` before starting. Lower-priority items
-  (path-scoped grants, TUI polish from `docs/sandbox-capabilities-roadmap.md`) remain optional.
+## Open follow-ups
 
-There are also documented *reinforcements* folded into shipped phases (see the roadmap's
-"Reference implementations & reinforcements" section) — not separate phases.
+No queued build work; take direction from the user. Known items, most valuable first:
+
+1. **Make `mcp` an optional extra.** It's lazily imported, but as a hard dependency it drags in
+   `cryptography` / `pydantic-core` / `rpds-py` — a heavy native tree. Optional-izing it collapses
+   the Homebrew formula to three pure-Python resources (no Rust/LLVM toolchain, no ~4.5-min build)
+   and lightens `pip install` too. Highest-value cleanup; aligns with the minimal-deps thesis.
+2. **Publish the Homebrew tap.** The live tap is a separate GitHub repo `dea6cat/homebrew-2b`
+   (not yet pushed). Steps in `packaging/homebrew/README.md`. Formula already verified.
+3. **`brew` self-detection.** The `brew` case in `_install_kind` postdates PyPI `1.1.1`, so a
+   `1.1.1`-pinned formula self-classifies as `pip` at runtime (install + `2b` work regardless). Cut a
+   new release from `main` and bump the formula to make `--update`/`--rm` say `brew`.
+4. **Linux CI behavioral validation** of the bwrap write/read-confinement paths (the 5 gated tests +
+   a userns smoke check). Needs a Linux environment; everything else is validated on macOS.
+5. **S1 read-side workspace jail** — deliberately NOT done: it reverses 2B's documented
+   "point-anywhere" file access (S7 already confirms *secrets* reads). Needs an explicit
+   `AskUserQuestion` before starting. Lower-priority optional ideas (path-scoped grants, TUI polish,
+   per-model catalog extras) remain optional.
 
 ## The per-phase process (follow exactly — the user relies on it)
 
 1. **Branch off `main` first.** `git fetch origin && git checkout -b feat/<name> origin/main`.
-   NEVER commit phase work directly to `main` (a saved memory records an earlier slip).
-2. **Implement** host-side only. The 5-tool schema (`list_files, read_file, search_files,
-   edit_file, write_file` + `run_git`/`run_command` + `delegate`) is FROZEN — do not touch it.
-   Keep pure/testable logic in importable modules; keep TUI wiring thin (the codebase pattern:
-   `difffmt`, `toolline`, `cmdguard`, `evalstats`, `driftreplay` are pure and unit-tested; the
-   TUI is not pilot-tested in-suite).
-3. **Adversarial review:** dispatch the `codeObserver` subagent on the staged diff (write the
-   diff to a scratch file, pass its path). It has repeatedly caught real bugs unit tests and a
-   single-path pilot miss — take its CRITICAL/HIGH findings seriously; fix with regression tests.
-4. **Unit tests green**, then **real-project validation** (see harness below).
-5. **Commit as Alexander** via `git commit -F <file>` (backticks in `-m` get shell-executed).
-   NO `Co-Authored-By: Claude` trailer; neutral metadata (no competitor/comparison names in
-   messages, branches, filenames). Verify: `git log -1 --format='%an <%ae>%n%(trailers)'`.
+   NEVER commit phase work directly to `main`.
+2. **Implement** host-side only. The 5-tool schema is FROZEN — do not touch it. Keep pure/testable
+   logic in importable modules; keep TUI wiring thin (`difffmt`, `toolline`, `cmdguard`, `evalstats`,
+   `driftreplay` are pure and unit-tested).
+3. **Adversarial review:** dispatch the `codeObserver` subagent on the staged diff. Take its
+   CRITICAL/HIGH findings seriously; fix with regression tests. (Across the security theme it caught
+   ~14 real issues — three critical: a subprocess hang, an outline injection-bypass, a bwrap backdoor
+   gap — that unit tests alone missed.)
+4. **Unit tests green**, then **real-project validation** (harness below).
+5. **Commit as Alexander** via `git commit -F <file>` (backticks in `-m` get shell-executed). NO
+   `Co-Authored-By: Claude` trailer; neutral metadata (no competitor names in messages/branches/
+   filenames). Verify: `git log -1 --format='%an <%ae>%n%(trailers)'`.
 6. **Push branch → fast-forward merge to `main` → push `main`.** Verify `local == origin`.
 
-## Real-project validation harness (the installed `2b` is a published build, not dev code)
+## Real-project validation harness (the installed `2b` may be a published build, not dev code)
 
-- **Dev interpreter:** `/Users/do519-lap/.local/share/uv/tools/2b-agent/bin/python3`
-  with `PYTHONPATH=/Users/do519-lap/repo_apps/2B/src`. Invoke the CLI as
+- **Dev interpreter:** `/Users/do519-lap/.local/share/uv/tools/2b-agent/bin/python3` with
+  `PYTHONPATH=/Users/do519-lap/repo_apps/2B/src`; invoke as
   `"$VENV" -c "import sys; from two_b.cli import main; sys.exit(main())" <args>`.
-- **Local model:** `qwen3:8b` (fast). `qwen3.5:9b` was too slow.
-- **Test project:** rsync a copy of `/Users/do519-lap/repo_apps/a2_core_package` into a scratch
-  dir (a real Dart package: `lib/src/{config,tool,agent,engine}.dart`, `lib/a2_core.dart`).
-- **Useful envs:** `TWOB_HISTORY_DB` (temp sqlite), `TWOB_CONTEXT_TOKENS` (shrink window to force
-  compaction), `TWOB_TRACE` (JSONL trace), `TWOB_NO_HISTORY`, `TWOB_SAMPLING_SEED` (eval only),
-  `TWOB_EVAL_CLI` (point the eval harness at a dev build).
-- **TUI validation:** Textual `app.run_test()` pilot (headless) drives the real event loop —
-  see how the P19/P11 pilot exercised `/tool`, `/history`, risk labels, double-Ctrl-C. Textual
-  8.2.8: `Static` has no `.renderable`; use `w.render()` (returns a `Content`/`Text` with
-  `.plain`) or a stashed `_search_text`.
-- **macOS gotchas:** `sleep`/`timeout` unavailable in the harness shell; run long model calls in
-  the background. Use `$CLAUDE_JOB_DIR/tmp` (or the session scratchpad) for temp files.
+- **Local model:** `qwen3:8b` (fast). **Test project:** rsync a copy of
+  `/Users/do519-lap/repo_apps/a2_core_package` into a scratch dir.
+- **Useful envs:** `TWOB_HISTORY_DB`, `TWOB_CONTEXT_TOKENS`, `TWOB_TRACE`, `TWOB_NO_HISTORY`,
+  `TWOB_SAMPLING_SEED` (eval), `TWOB_EVAL_CLI`, `TWOB_NO_MODEL_FETCH` (force bundled model list).
+- **TUI validation:** Textual `app.run_test()` pilot (headless). Textual 8.2.8: `Static` has no
+  `.renderable`; use `w.render()`.
+- **macOS gotchas:** `sleep`/`timeout` unavailable in the harness shell; run long model calls in the
+  background; use the session scratchpad for temp files.
 
-## Design invariants (from the 2b design-philosophy memory)
+## Design invariants
 
-- Frozen schema; all complexity host-side; native Ollama `/api/chat`; stdlib-heavy; simplicity/
-  YAGNI; optimized for small-local-model reliability.
-- Model-aware tool exposure: local Ollama → `run_git` only; cloud → `run_command` + `delegate`.
+- Frozen schema; all complexity host-side; native Ollama `/api/chat`; stdlib-heavy; simplicity/YAGNI;
+  optimized for small-local-model reliability.
 - Improvements are almost all universal (benefit cloud too); only provider-specific bits are
-  local-only (Ollama sampling/keep-alive/done_reason/`TWOB_SAMPLING_SEED`, the Ollama-port kill
-  guard). Nothing shipped regresses cloud.
+  local-only. Nothing shipped regresses cloud.
 - Use `AskUserQuestion` when a design tension would reverse a documented deliberate choice.
-
-## To resume
-
-The phased roadmap is complete and P18 is closed — there is **no queued build work**. Confirm `main`
-is at `940f6bc` and 544 tests pass. The only outstanding item is **Linux CI behavioral validation**
-of the bwrap paths (needs a Linux box). Otherwise, take direction from the user; optional future
-ideas live in the two survey docs. If a new phase is taken, follow the per-phase process above and
-always run the `codeObserver` review on the staged diff — across the security theme it caught ~14
-real issues (three critical: a subprocess hang, an outline injection-bypass, a bwrap backdoor gap)
-that unit tests alone missed.

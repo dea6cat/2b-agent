@@ -43,6 +43,18 @@ The 5-tool schema stayed frozen throughout; all complexity is host-side.
 - **Python 3.14.** Dependency floors raised to 3.14-supported releases (`rich>=14.2`,
   `prompt_toolkit>=3.0.52`, `textual>=6.3`, `mcp>=1.28`); trove classifiers 3.11–3.14; the toolchain
   runs on 3.14.6.
+- **Local-model tool-call reliability.** Host-side recovery of tool calls a model emits as
+  text instead of the native `tool_calls` field: `tools.recover_toolcalls` promotes fenced
+  ```json`` / whole-body JSON (via `loads_tolerant`) into real calls in `providers/ollama`'s
+  `send`/`stream`, only when native calls are absent. Measured cause: `qwen2.5-coder:14b` emits
+  100% of calls as text and did *nothing* in 2B before this — after, it executes calls and lands
+  edits (0→47 calls on the 7-task real-project suite; qwen3:8b/qwen3.5:9b unchanged, 0 residual
+  uncaught calls). Plus a bounded intent-stall nudge (`_stalled_without_acting` / `_STALL_RE`):
+  a no-tool-call turn narrating intent + an investigative verb, gated on zero actions taken and
+  fired once, so a model that says "let me first explore…" and stops is nudged to act (ordinary
+  sign-offs like "let me know if…" are excluded). **Accepted trade-off:** a fenced ```json`` tool-call
+  *example* inside a no-native-call answer will execute — irreducible, since the target model
+  prepends prose to its real calls; gated to zero-native-call turns and bounded by the P12 seatbelt.
 - **Homebrew.** `packaging/homebrew/Formula/twob-agent.rb` — a `Language::Python::Virtualenv`
   formula (named `twob-agent`, not `2b-agent`, because a leading-digit formula name yields an invalid
   Ruby class; it installs the `2b` command). Verified locally: `brew style`/`audit` clean, source
@@ -51,6 +63,14 @@ The 5-tool schema stayed frozen throughout; all complexity is host-side.
 ## Open follow-ups
 
 No queued build work; take direction from the user. Known items, most valuable first:
+
+0. **Finish Spanish stall detection.** `_STALL_RE` includes Spanish intent openers (`voy a`,
+   `déjame`) but an English-only investigative-verb list, so a real Spanish stall
+   ("voy a explorar…") never matches. Add Spanish verbs (anchored to avoid `ver`→"very"-class
+   false positives) or drop the dead openers. Part of the broader "Spanish steering" optional item
+   (extend `_INTENT_RE`/`_DANGLING_RE` too). Deferred also: exec-tool arg unwrap for text-emitted
+   `run_git`/`run_command` (currently yields a recoverable error, not a wrong action); stream-buffering
+   so a suspected tool-call blob isn't shown before recovery strips it.
 
 1. **Make `mcp` an optional extra.** It's lazily imported, but as a hard dependency it drags in
    `cryptography` / `pydantic-core` / `rpds-py` — a heavy native tree. Optional-izing it collapses

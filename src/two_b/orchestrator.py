@@ -332,6 +332,20 @@ def _promised_tool_but_didnt(text: str) -> bool:
     return bool(_INTENT_RE.search(text))
 
 
+_STALL_NUDGE = (
+    "You described what you intend to do but didn't use any tool. Investigate or act with a "
+    "tool now (list_files, read_file, search_files, edit_file, …) — don't only narrate the plan. "
+    "If you already have the answer, give it plainly without describing steps."
+)
+
+
+def _stalled_without_acting(text: str) -> bool:
+    """True if a no-tool-call turn is forward-intent narration ('I'll…', 'let me explore…')
+    rather than a delivered answer. Caller gates this on zero tool calls made so far, so a
+    genuine done-report (which comes after real actions) is never flagged."""
+    return bool(text) and bool(_INTENT_RE.search(text))
+
+
 def teardown_helpers() -> None:
     """Hard-stop the long-lived helper servers on esc. Local subprocesses die via
     the cancel flag + process-group kill (see tools._run_cancellable); this tears
@@ -1356,6 +1370,8 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     first_turn = not any(m.role.value == "assistant" for m in conv.messages)
     loop_guard = _LoopGuard()
     promise_nudges = 0   # times we've nudged a "said it'd call a tool but didn't" turn
+    tool_calls_made = 0    # any tool calls dispatched this task (gates the intent-stall nudge)
+    stall_nudges = 0       # intent-only stall nudge fires at most once
     verify_nudged = False  # done-verify reminder fires at most once per task
     try:
         # The project's real check commands (test/lint), discovered once, to remind a model
@@ -1432,6 +1448,16 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                     conv.append(msg)
                     conv.append(Message.user(_PROMISE_NUDGE))
                     continue
+                # A no-tool-call turn that only narrates intent, with zero actions taken so far,
+                # is a stall (measured on qwen3.5:9b) — nudge once to actually use a tool. Bounded,
+                # and gated on tool_calls_made==0 so a real final answer is never nudged.
+                if (stall_nudges < 1 and tool_calls_made == 0
+                        and not _promised_tool_but_didnt(content)
+                        and _stalled_without_acting(content)):
+                    stall_nudges += 1
+                    conv.append(msg)
+                    conv.append(Message.user(_STALL_NUDGE))
+                    continue
                 # Done-verify (once): if the model made edits and can run commands, remind it
                 # to run the project's real checks before finishing — the deterministic
                 # counterpart to "declare done, then actually verify". Local models (run_git
@@ -1469,6 +1495,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             # the same coerced values that actually ran.
             for tc in calls:
                 tc.name, tc.arguments = tools.coerce_tool_args(tc.name, tc.arguments, known_tools)
+            tool_calls_made += len(calls)
             results = []
             nudge_pending = False
 

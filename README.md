@@ -180,6 +180,13 @@ pip install 2b-agent      # or: uv tool install 2b-agent
 2b setup                  # grades your machine, installs Ollama, pulls a model, self-tests, fixes PATH
 ```
 
+On macOS/Linux you can also use **Homebrew** (it puts `2b` on your PATH automatically):
+
+```bash
+brew install dea6cat/2b/twob-agent   # the formula is twob-agent; it installs the `2b` command
+2b setup
+```
+
 `2b setup` is the single source of truth for onboarding — the `curl … | sh` installer just installs
 uv + the `2b` command and then runs it, so you get the exact same setup either way. (On first launch
 with no model configured, `2b` offers to run it for you.)

@@ -1035,7 +1035,10 @@ class TwoBApp(App):
         others = [t for t in self.session.tasks if t.id != self.session.active_task_id
                   and t.state in (TaskState.QUEUED, TaskState.BACKGROUNDED)]
         extra = f"  ·  {len(others)} queued/bg" if others else ""
-        st.update(f"{left}    │    {model}{extra}{self._ctx_meter(task)}    ·  esc stop · ctrl+b bg · ctrl+d quit")
+        # A live continuity thread is registered only when continuity is effective, so its
+        # mere presence is a faithful "messages are connected" signal.
+        thread = "  ·  ⛓ thread" if self.session.thread is not None else ""
+        st.update(f"{left}    │    {model}{extra}{thread}{self._ctx_meter(task)}    ·  esc stop · ctrl+b bg · ctrl+d quit")
 
     def _ctx_meter(self, task) -> str:
         """Live context-window fill (small local windows fill fast — this is the point).

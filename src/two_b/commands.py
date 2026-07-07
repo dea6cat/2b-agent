@@ -766,6 +766,30 @@ def _new(rest, app):
     app.ui.print("Started a new thread — the next message won't carry the previous context.")
 
 
+@command("continuity")
+def _continuity(rest, app):
+    """Carry conversation context across messages: /continuity on|off (bare toggles)."""
+    session = app.session
+    resolved = registry.resolve(app.registry, session.default_model)
+    is_local = registry.is_local(resolved[0]) if resolved else False
+    arg = rest.strip().lower()
+    if arg in ("on", "yes", "true"):
+        session.continuity_override = True
+    elif arg in ("off", "no", "false"):
+        session.continuity_override = False
+    elif arg == "":                                   # bare: flip the current effective state
+        session.continuity_override = not orchestrator._continuity_effective(session, is_local)
+    else:
+        app.ui.print("Usage: [bold]/continuity on|off[/bold]")
+        return
+    if orchestrator._continuity_effective(session, is_local):
+        note = "  (small local window — leans on compaction; /new to reset)" if is_local else ""
+        app.ui.print(f"Continuity [bold]on[/bold] — messages continue the same thread.{note}")
+    else:
+        session.thread = None                         # detach cleanly so the next message is fresh
+        app.ui.print("Continuity [bold]off[/bold] — each message starts a fresh thread.")
+
+
 @command("quit", "q", "exit")
 def _quit(rest, app):
     """Exit 2B."""

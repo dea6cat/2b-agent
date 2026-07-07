@@ -403,9 +403,11 @@ def _persist_final(conv, msg) -> None:
 
 def _continuity_effective(session, is_local: bool) -> bool:
     """Whether the conversation thread carries across top-level messages for the current
-    model. Phase 1: the provider default only — cloud continues, local is detached (small
-    local windows fill fast). Phase 2 will layer a user override (session.continuity_override)
-    on top of this so /continuity can turn it on for local / off for cloud."""
+    model. A user override (`/continuity on|off`) wins; otherwise the provider default —
+    cloud continues, local is detached (small local windows fill fast)."""
+    override = getattr(session, "continuity_override", None)
+    if override is not None:
+        return override
     return not is_local
 
 

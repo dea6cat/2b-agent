@@ -81,6 +81,40 @@ class LocalStaysDetached(unittest.TestCase):
         self.assertNotIn("first question", second)            # no carry-over
 
 
+class OverrideRule(unittest.TestCase):
+    def test_default_follows_provider(self):
+        s = Session(default_model="x")
+        self.assertTrue(orchestrator._continuity_effective(s, is_local=False))   # cloud on
+        self.assertFalse(orchestrator._continuity_effective(s, is_local=True))   # local off
+
+    def test_override_wins_both_ways(self):
+        s = Session(default_model="x")
+        s.continuity_override = True
+        self.assertTrue(orchestrator._continuity_effective(s, is_local=True))    # local forced on
+        s.continuity_override = False
+        self.assertFalse(orchestrator._continuity_effective(s, is_local=False))  # cloud forced off
+
+
+class OverrideAdoption(unittest.TestCase):
+    def test_local_with_override_on_carries_thread(self):
+        session = Session(default_model="fake:m")
+        session.continuity_override = True
+        p = _RecordingProvider(name="ollama", api_key=None)   # local
+        t1 = _run(session, p, "first question")
+        t2 = _run(session, p, "second question")
+        self.assertIs(t1.conversation, t2.conversation)
+        self.assertIsNotNone(session.thread)
+
+    def test_cloud_with_override_off_detaches(self):
+        session = Session(default_model="fake:m")
+        session.continuity_override = False
+        p = _RecordingProvider(api_key="x")                   # cloud
+        t1 = _run(session, p, "first question")
+        t2 = _run(session, p, "second question")
+        self.assertIsNot(t1.conversation, t2.conversation)
+        self.assertIsNone(session.thread)
+
+
 class _FakeUI:
     def __init__(self): self.out = []
     def print(self, *a): self.out.append(" ".join(str(x) for x in a))
@@ -88,6 +122,41 @@ class _FakeUI:
 
 class _FakeApp:
     def __init__(self, session): self.session = session; self.ui = _FakeUI()
+
+
+class ContinuityCommand(unittest.TestCase):
+    def _app(self, provider):
+        s = Session(default_model="fake:m")
+        app = _FakeApp(s)
+        app.registry = {"fake": provider}
+        return s, app
+
+    def test_on_enables_for_local_with_compaction_note(self):
+        s, app = self._app(_RecordingProvider(name="ollama", api_key=None))
+        commands._continuity("on", app)
+        self.assertIs(s.continuity_override, True)
+        self.assertTrue(any("on" in line.lower() for line in app.ui.out))
+        self.assertTrue(any("compaction" in line for line in app.ui.out))
+
+    def test_off_detaches_cloud_and_clears_thread(self):
+        s, app = self._app(_RecordingProvider(api_key="x"))
+        s.thread = Conversation(system_prompt="s")
+        commands._continuity("off", app)
+        self.assertIs(s.continuity_override, False)
+        self.assertIsNone(s.thread)
+
+    def test_bare_toggles_from_effective_state(self):
+        s, app = self._app(_RecordingProvider(api_key="x"))   # cloud → effective on by default
+        commands._continuity("", app)
+        self.assertIs(s.continuity_override, False)            # toggled off
+        commands._continuity("", app)
+        self.assertIs(s.continuity_override, True)             # toggled back on
+
+    def test_bad_arg_prints_usage_and_changes_nothing(self):
+        s, app = self._app(_RecordingProvider(api_key="x"))
+        commands._continuity("maybe", app)
+        self.assertIsNone(s.continuity_override)
+        self.assertTrue(any("Usage" in line for line in app.ui.out))
 
 
 class ThreadResetCommands(unittest.TestCase):

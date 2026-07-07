@@ -27,3 +27,21 @@ class Retry(unittest.TestCase):
             def stream(self, c,m,t,on_text): raise ProviderError("x","HTTP 400: bad", retryable=False)
         with self.assertRaises(ProviderError):
             base.stream_with_retry(P(), Conversation(system_prompt="s"), "m", (), lambda _c: None, retries=3)
+
+    def test_exhausted_retries_annotates_message(self):
+        class P:
+            name="nvidia"
+            def stream(self, c,m,t,on_text): raise ProviderError("nvidia","HTTP 504: Gateway Timeout", retryable=True)
+        with self.assertRaises(ProviderError) as ctx:
+            base.stream_with_retry(P(), Conversation(system_prompt="s"), "m", (), lambda _c: None, retries=3)
+        # Provider prefix isn't duplicated, and the retry count is surfaced.
+        self.assertEqual(str(ctx.exception), "[nvidia] HTTP 504: Gateway Timeout — retried 3×, still failing")
+
+    def test_no_retries_left_is_not_annotated(self):
+        # retries=0 means we never actually retried, so no "retried N×" suffix.
+        class P:
+            name="x"
+            def stream(self, c,m,t,on_text): raise ProviderError("x","HTTP 503: down", retryable=True)
+        with self.assertRaises(ProviderError) as ctx:
+            base.stream_with_retry(P(), Conversation(system_prompt="s"), "m", (), lambda _c: None, retries=0)
+        self.assertEqual(str(ctx.exception), "[x] HTTP 503: down")

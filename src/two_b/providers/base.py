@@ -102,13 +102,22 @@ def post_stream(url: str, payload: dict, headers: dict | None = None, timeout: i
 
 def stream_with_retry(provider, conversation, model, tools, on_text, *, retries=3, cancel=None):
     """provider.stream with backoff on retryable ProviderError (429/5xx/conn). Honors a
-    cancel Event (re-raises immediately) and re-raises the last error after `retries`."""
+    cancel Event (re-raises immediately) and re-raises the last error after `retries`.
+    When a retryable error survives every retry, the surfaced message gets a
+    `— retried N×, still failing` suffix so the user sees it wasn't a single blip."""
     delay = 1.0
     for attempt in range(retries + 1):
         try:
             return provider.stream(conversation, model, tools, on_text)
         except ProviderError as e:
-            if not e.retryable or attempt == retries or (cancel is not None and cancel.is_set()):
+            cancelled = cancel is not None and cancel.is_set()
+            if not e.retryable or cancelled:
+                raise
+            if attempt == retries:                       # exhausted every retry
+                if attempt >= 1:
+                    raw = str(e).removeprefix(f"[{e.provider}] ")
+                    raise ProviderError(e.provider, f"{raw} — retried {attempt}×, still failing",
+                                        retryable=True) from e
                 raise
             waited = 0.0
             while waited < delay:

@@ -353,6 +353,41 @@ def _stalled_without_acting(text: str) -> bool:
     return bool(text) and bool(_STALL_RE.search(text))
 
 
+_CLARIFY_NUDGE = (
+    "Don't ask the user to clarify before you've looked. Use the read-only tools "
+    "(list_files, search_files, read_file) to answer your own questions from the code, then "
+    "act. Only ask the user if you're still genuinely blocked after investigating."
+)
+
+# A small model faced with an actionable request sometimes punts with a wall of
+# clarifying questions ("Could you specify which files… what should it accomplish?")
+# instead of just looking. We detect a no-tool-call turn that solicits clarification and
+# nudge it to investigate first. Requires a real '?' plus a clarification-request phrase,
+# so a genuine answer that ends with a courtesy offer ("want me to add tests?") is spared.
+_CLARIFY_RE = re.compile(
+    r"("
+    r"need (?:a bit )?more (?:detail|info|information|context|clarit|specific)"
+    r"|(?:could|can) you (?:please )?(?:specify|clarify|provide|share|tell me|elaborate|confirm|describe|let me know)"
+    r"|please (?:specify|clarify|confirm|describe|elaborate|let me know|provide)"
+    r"|to know (?:exactly )?what you"
+    r"|what (?:would|do) you (?:want|like|mean|expect|have in mind)"
+    r"|which (?:file|files|function|method|class|module|component|directory|folder|part of)"
+    r"|necesito m[aá]s (?:detalle|informaci[oó]n|contexto)"
+    r"|podr[ií]as (?:especificar|aclarar|indicar|decirme|proporcionar)"
+    r")",
+    re.IGNORECASE)
+
+
+def _asked_instead_of_acting(text: str) -> bool:
+    """True if a no-tool-call turn asks the user to clarify the task ('could you specify
+    which files…', 'I need more detail…') instead of investigating first. Requires an
+    actual question mark plus a clarification-request phrase, so a plain answer that ends
+    with a courtesy offer ('want me to add tests?') isn't flagged. Caller gates on zero
+    tool calls so far — the fix is to look with the read-only tools, then ask only if
+    still genuinely blocked."""
+    return bool(text) and "?" in text and bool(_CLARIFY_RE.search(text))
+
+
 def teardown_helpers() -> None:
     """Hard-stop the long-lived helper servers on esc. Local subprocesses die via
     the cancel flag + process-group kill (see tools._run_cancellable); this tears
@@ -1379,6 +1414,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     promise_nudges = 0   # times we've nudged a "said it'd call a tool but didn't" turn
     tool_calls_made = 0    # any tool calls dispatched this task (gates the intent-stall nudge)
     stall_nudges = 0       # intent-only stall nudge fires at most once
+    clarify_nudges = 0     # "asked instead of acting" nudge fires at most once
     verify_nudged = False  # done-verify reminder fires at most once per task
     try:
         # The project's real check commands (test/lint), discovered once, to remind a model
@@ -1464,6 +1500,16 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                     stall_nudges += 1
                     conv.append(msg)
                     conv.append(Message.user(_STALL_NUDGE))
+                    continue
+                # Asked the user to clarify without looking first — a stall dressed as a
+                # question (seen on local models). Nudge once to investigate before asking.
+                if (clarify_nudges < 1 and tool_calls_made == 0
+                        and not _promised_tool_but_didnt(content)
+                        and not _stalled_without_acting(content)
+                        and _asked_instead_of_acting(content)):
+                    clarify_nudges += 1
+                    conv.append(msg)
+                    conv.append(Message.user(_CLARIFY_NUDGE))
                     continue
                 # Done-verify (once): if the model made edits and can run commands, remind it
                 # to run the project's real checks before finishing — the deterministic

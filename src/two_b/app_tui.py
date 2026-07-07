@@ -26,6 +26,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, TextArea
@@ -297,6 +298,10 @@ class TwoBApp(App):
         Binding("shift+tab", "cycle_mode", "cycle mode", priority=True, show=False),
         Binding("ctrl+b", "background", "background task", show=False),
         Binding("ctrl+y", "copy", "copy last reply", show=False),
+        Binding("shift+up", "log_scroll_line_up", "scroll up", priority=True, show=False),
+        Binding("shift+down", "log_scroll_line_down", "scroll down", priority=True, show=False),
+        Binding("pageup", "log_scroll_up", "scroll up", priority=True, show=False),
+        Binding("pagedown", "log_scroll_down", "scroll down", priority=True, show=False),
         Binding("escape", "interrupt", "interrupt", show=False),
         Binding("ctrl+c", "sigint", "interrupt / quit", show=False, priority=True),
         Binding("ctrl+d", "quit", "quit", show=False),
@@ -657,6 +662,20 @@ class TwoBApp(App):
             self.session.active_task_id = None
             self.log_write(Text(f"backgrounded [{t.id}] {t.title} — /fg {t.id} to resume", style="dim"))
 
+    def action_log_scroll_up(self) -> None:
+        # Keyboard scroll for the conversation log — reliable on every terminal (Terminal.app
+        # only forwards the mouse wheel in the any-event mode we disable to stop the flood).
+        self.query_one("#log", VerticalScroll).scroll_page_up()
+
+    def action_log_scroll_down(self) -> None:
+        self.query_one("#log", VerticalScroll).scroll_page_down()
+
+    def action_log_scroll_line_up(self) -> None:
+        self.query_one("#log", VerticalScroll).scroll_up()      # shift+↑ — one line
+
+    def action_log_scroll_line_down(self) -> None:
+        self.query_one("#log", VerticalScroll).scroll_down()    # shift+↓ — one line
+
     def action_interrupt(self, announce: bool = True) -> bool:
         """Esc handler. Returns True only if it actually aborted a running task (so the
         caller — e.g. double-Ctrl-C — can report honestly). If a scrollback search is open,
@@ -806,11 +825,16 @@ class TwoBApp(App):
 
     # ---- the periodic pump: drain events, render ----
     def _tick(self) -> None:
-        self._drain_events()
-        self._animate_running_tool()
-        self._render_plan()
-        self._render_mode()
-        self._render_status()
+        # The 12Hz timer can fire before compose finishes or after the DOM is torn down;
+        # a missing widget then is expected, so skip the frame instead of crashing.
+        try:
+            self._drain_events()
+            self._animate_running_tool()
+            self._render_plan()
+            self._render_mode()
+            self._render_status()
+        except NoMatches:
+            return
         self._maybe_start_next()
 
     def _tool_line(self, connector: str, glyph: str, gstyle: str, phrase: str, suffix: str = "") -> Text:

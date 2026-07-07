@@ -299,6 +299,24 @@ def verdict(content: str) -> bool:
             and "farewell" in content and "Bye, $name!" in content)
 
 
+def _save_tty():
+    """Snapshot the controlling terminal's mode, or None if stdin isn't a tty."""
+    try:
+        import termios
+        return termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        return None
+
+
+def _restore_tty(saved) -> None:
+    if saved is not None:
+        try:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
+        except Exception:
+            pass
+
+
 def correctness_test(model: str) -> tuple[bool, int] | None:
     """Drive the installed 2b headlessly on a two-change task; verify the fixture.
     Returns (ok, wall_seconds), or None if 2b isn't on PATH."""
@@ -309,12 +327,19 @@ def correctness_test(model: str) -> tuple[bool, int] | None:
     with open(path, "w") as f:
         f.write(_FIXTURE)
     start = time.time()
+    # stdin=DEVNULL keeps this truly headless: the child never inherits our terminal, so its
+    # REPL reads EOF and exits right after the task instead of blocking on input until the
+    # timeout kills it — which also left the terminal in raw/no-echo mode. Snapshot + restore
+    # the tty around it as a belt-and-suspenders guard.
+    saved = _save_tty()
     try:
         subprocess.run(["2b", "--classic", "--model", model, "--yes", _TASK], cwd=d,
-                       capture_output=True, text=True, timeout=150,
+                       capture_output=True, text=True, timeout=150, stdin=subprocess.DEVNULL,
                        env={**os.environ, "OLLAMA_API_BASE": OLLAMA_HOST})
     except Exception:
         pass
+    finally:
+        _restore_tty(saved)
     wall = int(time.time() - start)
     content = ""
     try:

@@ -104,6 +104,7 @@ class AutoPullTest(unittest.TestCase):
         self.assertTrue(any("Pull" in p for p in r["prompts"]))     # asked before the download
         self.assertFalse(any("Remove" in p for p in r["prompts"]))  # removal is silent
         self.assertEqual(r["pulled"], ["qwen2.5-coder:14b"])
+        self.assertIn("Coding-testing qwen2.5-coder:14b", r["txt"])   # progress shown before the test
         self.assertIn("passed the coding test", r["txt"])
 
     def test_declining_the_download_skips_the_pull(self):

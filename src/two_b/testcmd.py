@@ -118,7 +118,8 @@ def run(emit, target: str = "", auto: bool = False,
     emit(f"Testing {len(models)} model(s) — tok/s + a real two-change edit through 2B "
          "(up to ~2 min each)…")
     perf, correctness = {}, {}
-    for m in models:
+    for i, m in enumerate(models, 1):
+        emit(f"  · [{i}/{len(models)}] {m}…")        # per-model progress (each test can take ~2 min)
         perf[m] = (setup._toks(m), *setup._ps_mem_gpu(m))
         ct = setup.correctness_test(m)
         if ct is not None:
@@ -165,6 +166,7 @@ def run(emit, target: str = "", auto: bool = False,
             else:
                 emit(f"Pulling {tag} (~{ram}GB)…")
                 setup.pull([tag], emit)
+                emit(f"Coding-testing {tag} — a real two-change edit through 2B (up to ~2 min)…")
                 ct = setup.correctness_test(tag)
                 if ct is None:
                     emit("[red]Couldn't run the coding test — '2b' isn't on your PATH.[/red]")

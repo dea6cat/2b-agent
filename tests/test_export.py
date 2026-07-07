@@ -110,6 +110,38 @@ class Export(unittest.TestCase):
         self.assertEqual(os.listdir(self.dir), [])
         self.assertTrue(any("empty" in line for line in app.ui.out))
 
+    def test_task_error_is_included(self):
+        # A turn that failed before any assistant message (provider 4xx/5xx, tool crash)
+        # leaves only the user message in the conversation; the error lives on the task.
+        s = self._session()
+        c = Conversation(system_prompt="sys")
+        c.append(Message.user("verify the xlsx data landed in menu_icon_name.dart"))
+        t = s.add_task("verify")
+        t.conversation = c
+        t.error = "[openrouter] HTTP 404: No endpoints available matching your guardrail restrictions"
+        app = _FakeApp(s)
+        commands._export("out.md", app)
+        md = open(os.path.join(self.dir, "out.md"), encoding="utf-8").read()
+        self.assertIn("verify the xlsx data landed", md)
+        self.assertIn("⚠ task error:", md)
+        self.assertIn("HTTP 404", md)
+        self.assertIn("1 error(s)", md)
+        self.assertTrue(any("error(s)" in line for line in app.ui.out))
+
+    def test_error_before_any_conversation_still_exports(self):
+        # A model-resolve failure fails before a conversation is built; the error must
+        # still be captured rather than "nothing to export".
+        s = self._session()
+        t = s.add_task("bad model")
+        t.conversation = None
+        t.error = "could not resolve model 'foo' to a configured provider"
+        app = _FakeApp(s)
+        commands._export("out.md", app)
+        md = open(os.path.join(self.dir, "out.md"), encoding="utf-8").read()
+        self.assertIn("## Errors", md)
+        self.assertIn("could not resolve model", md)
+        self.assertFalse(any("empty" in line for line in app.ui.out))
+
     def test_bad_path_reports_error_not_crash(self):
         s = self._session()
         s.add_task("x").conversation = _conv_with_tool_call()

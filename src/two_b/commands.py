@@ -791,19 +791,24 @@ def _continuity(rest, app):
         app.ui.print("Continuity [bold]off[/bold] — each message starts a fresh thread.")
 
 
-def _session_conversations(session) -> list[tuple[str, "Conversation"]]:
+def _session_conversations(session) -> list[dict]:
     """Every conversation in the session, in task order, deduped by object identity — so a
-    shared continuity thread is returned once, while detached tasks each contribute their own.
-    Paired with a title for the export divider."""
-    seen: set[int] = set()
-    out: list[tuple[str, Conversation]] = []
+    shared continuity thread appears once, while detached tasks each contribute their own.
+    Each entry is {title, conv, errors}; `errors` collects the failures of every task that
+    used that conversation (a stream/tool error lives on the task, not in the messages)."""
+    order: list[int] = []
+    by_id: dict[int, dict] = {}
     for t in session.tasks:
         conv = t.conversation
-        if conv is None or id(conv) in seen:
+        if conv is None:
             continue
-        seen.add(id(conv))
-        out.append((t.title or t.description or "conversation", conv))
-    return out
+        k = id(conv)
+        if k not in by_id:
+            by_id[k] = {"title": t.title or t.description or "conversation", "conv": conv, "errors": []}
+            order.append(k)
+        if t.error:
+            by_id[k]["errors"].append(t.error)
+    return [by_id[k] for k in order]
 
 
 def _render_message_md(m, lines: list[str]) -> None:
@@ -829,28 +834,38 @@ def _render_message_md(m, lines: list[str]) -> None:
         lines += ["", f"**⚙ {c.name}**", "```json", json.dumps(c.arguments, ensure_ascii=False), "```"]
 
 
-def _render_session_md(session) -> tuple[str, int]:
-    """Render the whole session to Markdown; returns (text, message_count)."""
+def _render_session_md(session) -> tuple[str, int, int]:
+    """Render the whole session to Markdown; returns (text, message_count, error_count).
+    Task errors (a failed turn that produced no assistant message — a provider 4xx/5xx, a
+    tool crash) are rendered after their conversation so the export shows why it ended."""
     convs = _session_conversations(session)
-    total = sum(len(c.messages) for _, c in convs)
+    orphan = [t.error for t in session.tasks if t.error and t.conversation is None]  # failed pre-conversation
+    total = sum(len(e["conv"].messages) for e in convs)
+    errs = sum(len(e["errors"]) for e in convs) + len(orphan)
+    head = f"- {len(convs)} conversation(s) · {total} messages" + (f" · {errs} error(s)" if errs else "")
     lines = ["# 2B session export", "",
              f"- Model: {session.default_model or '(unset)'}",
-             f"- Exported: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-             f"- {len(convs)} conversation(s) · {total} messages"]
-    for idx, (title, conv) in enumerate(convs):
+             f"- Exported: {time.strftime('%Y-%m-%d %H:%M:%S')}", head]
+    for idx, e in enumerate(convs):
         lines += ["", "---"]
         if len(convs) > 1:
-            lines += ["", f"## — conversation {idx + 1}: {title} —"]
-        for m in conv.messages:
+            lines += ["", f"## — conversation {idx + 1}: {e['title']} —"]
+        for m in e["conv"].messages:
             _render_message_md(m, lines)
-    return "\n".join(lines) + "\n", total
+        for err in e["errors"]:
+            lines += ["", f"**⚠ task error:** {err}"]
+    if orphan:
+        lines += ["", "---", "", "## Errors"]
+        for err in orphan:
+            lines += ["", f"**⚠ task error:** {err}"]
+    return "\n".join(lines) + "\n", total, errs
 
 
 @command("export")
 def _export(rest, app):
     """Export the whole session, tool calls included, to a Markdown file: /export [path]."""
-    md, total = _render_session_md(app.session)
-    if total == 0:
+    md, total, errs = _render_session_md(app.session)
+    if total == 0 and errs == 0:
         app.ui.print("Nothing to export yet — the session is empty.")
         return
     arg = rest.strip()
@@ -866,7 +881,8 @@ def _export(rest, app):
     except OSError as e:
         app.ui.print(f"[red]Export failed:[/red] {e}")
         return
-    app.ui.print(f"Exported {total} messages to [bold]{path}[/bold]")
+    suffix = f" ({errs} error(s))" if errs else ""
+    app.ui.print(f"Exported {total} messages{suffix} to [bold]{path}[/bold]")
 
 
 @command("quit", "q", "exit")

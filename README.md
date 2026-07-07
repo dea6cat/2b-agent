@@ -168,15 +168,29 @@ pipe with `... | sh -s -- --yes --models "qwen3.5:9b"`.
 2b --list-sessions       # list saved sessions
 2b --list-models         # what's available across configured providers
 2b --doctor              # diagnose PATH, Ollama, and the default model, then exit
-2b --test                # grade installed models (tok/s + a real coding test) and compare
-                         #   them to the latest coding models on ollama.com
-2b --test auto           # also remove failing models, then pull + coding-test the best new
-                         #   candidate and recommend it only if it passes
+2b --test                # grade installed models + compare them to the latest coding models
+2b --test auto           # auto-clean: remove failures, then pull/coding-test the best new one
 2b --update              # upgrade to the latest release (uv tool upgrade)
 2b --rm                  # uninstall 2B and delete its config (asks first); --rm --yes to skip
 ```
 
 Then just type what you want done. Type `/` to see the commands.
+
+### Testing your models
+
+`2b --test` grades each installed model — tok/s, GPU residency, and a **real two-change edit run
+through 2B** (`✓`/`✗`, up to ~2 min each) — then prints a KEEP/REMOVE table with a suggested
+default. It also **compares your models to the latest tool-capable coding models on ollama.com**
+that fit your RAM, surfacing families you don't have and larger variants worth upgrading to. Plain
+`--test` only reports — it changes nothing (`2b --test <model>` grades just one).
+
+`2b --test auto` is the hands-off cleanup:
+
+- **Removes the failing models automatically** — no prompt (that's the point of `auto`); your
+  current default is never removed.
+- Then **offers to pull + coding-test the best new candidate**. It asks once before the multi-GB
+  **download** (skip that with `--yes`), keeps the model only if it **passes** the coding test, and
+  removes it if it fails — remembering a failed one so it isn't re-downloaded on the next run.
 
 ### Updating
 

@@ -1069,16 +1069,29 @@ class TwoBApp(App):
 
     def _flush_leftover_steer(self, task_id: str) -> None:
         """Steer typed on a task's very last turn has no tool boundary left to land on.
-        Rather than silently drop the user's words, resubmit them as a fresh task once the
-        run has ended."""
+        Rather than drop it — or restart from scratch — re-attach it to a continuation
+        task that adopts the finished task's conversation (and undo stack), so the model
+        resumes with the full context of what it was just doing. Falls back to a plain new
+        task when there's no conversation to carry (e.g. the run failed before building one)."""
         task = self.session.find(task_id)
         if task is None:
             return
         leftover = task.take_steer()
-        if leftover:
-            self.log_write(Text(f"  ⤷ steer arrived after the turn ended — running it as a new task",
+        if not leftover:
+            return
+        if task.conversation is None:
+            self.log_write(Text("  ⤷ steer arrived after the turn ended — running it as a new task",
                                 style=self.c("dim")))
             self._start_task(leftover)
+            return
+        self.log_write(Text("  ⤷ steer arrived after the turn ended — continuing this task with it",
+                            style=self.c("dim")))
+        cont = self.session.add_task(leftover)
+        cont.conversation = task.conversation          # carry the context forward
+        cont.edit_history = list(task.edit_history)     # keep the undo stack continuous
+        cont.model_override = task.model_override       # stay on the same model
+        cont.chars_per_token = task.chars_per_token     # keep the ctx meter calibrated
+        self._run(cont)
 
     def _notify_finished(self, task_id: str, ok: bool) -> None:
         """Desktop-notify that a task finished — but only when the terminal isn't

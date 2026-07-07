@@ -13,7 +13,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from two_b import orchestrator  # noqa: E402
-from two_b.conversation import Message, ToolCall  # noqa: E402
+from two_b.conversation import Message, Role, ToolCall  # noqa: E402
 from two_b.orchestrator import EventType, _classify_exc, _finish_failed  # noqa: E402
 from two_b.providers.base import ProviderError, ProviderResponse  # noqa: E402
 from two_b.session import Session, Task  # noqa: E402
@@ -125,6 +125,52 @@ class NeverThrows(unittest.TestCase):
         deltas = [e.payload["chunk"] for e in events if e.type == EventType.ASSISTANT_DELTA]
         self.assertEqual(len(deltas), 1)
         self.assertIn("cut off", deltas[0])
+
+
+class PersistsFinalAnswer(unittest.TestCase):
+    """Phase 0 of continuity: the closing assistant answer must land in the conversation
+    so a thread carried forward (continuity / steer re-attach) actually contains it."""
+
+    def test_final_answer_is_appended_to_conversation(self):
+        task, _ = _run(_FinalText())
+        msgs = task.conversation.messages
+        self.assertEqual(msgs[-1].role, Role.ASSISTANT)
+        self.assertEqual(msgs[-1].text, "all done")
+
+    def test_empty_answer_is_not_appended(self):
+        # A length-truncated / empty final turn must not pollute history with a blank turn.
+        task, _ = _run(_EmptyLength())
+        self.assertFalse(any(m.role == Role.ASSISTANT for m in task.conversation.messages))
+
+    def test_thinking_only_answer_is_persisted_as_text(self):
+        # A reasoning model may put its answer in `thinking` with empty text; history
+        # should carry what the UI showed (the thinking fallback) as a clean text turn.
+        class _ThinkingOnly(_FakeProvider):
+            def stream(self, conv, model, tools, on_text):
+                return ProviderResponse(message=Message.assistant(thinking="the answer is 42"), raw={})
+
+        task, _ = _run(_ThinkingOnly())
+        msgs = task.conversation.messages
+        self.assertEqual(msgs[-1].role, Role.ASSISTANT)
+        self.assertEqual(msgs[-1].text, "the answer is 42")
+
+    def test_answer_after_a_tool_call_is_the_last_message(self):
+        # Turn 1 calls a tool, turn 2 answers; the answer (not the tool results) must be
+        # the last thing in the thread, so the next message continues from it.
+        class _ToolThenAnswer(_FakeProvider):
+            def __init__(self): self.i = 0
+            def stream(self, conv, model, tools, on_text):
+                self.i += 1
+                if self.i == 1:
+                    return ProviderResponse(message=Message.assistant(
+                        tool_calls=[ToolCall.new("list_files", {"path": "."})]), raw={})
+                on_text("here is the summary")
+                return ProviderResponse(message=Message.assistant(text="here is the summary"), raw={})
+
+        task, _ = _run(_ToolThenAnswer())
+        msgs = task.conversation.messages
+        self.assertEqual(msgs[-1].role, Role.ASSISTANT)
+        self.assertEqual(msgs[-1].text, "here is the summary")
 
 
 class Classify(unittest.TestCase):

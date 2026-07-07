@@ -401,6 +401,14 @@ def _persist_final(conv, msg) -> None:
         conv.append(Message.assistant(text=answer))
 
 
+def _continuity_effective(session, is_local: bool) -> bool:
+    """Whether the conversation thread carries across top-level messages for the current
+    model. Phase 1: the provider default only — cloud continues, local is detached (small
+    local windows fill fast). Phase 2 will layer a user override (session.continuity_override)
+    on top of this so /continuity can turn it on for local / off for cloud."""
+    return not is_local
+
+
 def teardown_helpers() -> None:
     """Hard-stop the long-lived helper servers on esc. Local subprocesses die via
     the cancel flag + process-group kill (see tools._run_cancellable); this tears
@@ -1409,10 +1417,20 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     sub_provider, sub_model = _resolve_subagent_model(reg, provider, model)
 
     if task.conversation is None:
+        # Continuity: continue the session's live thread when one exists and continuity is
+        # effective for this model (Phase 1: cloud yes, local no); otherwise start fresh.
         # Explicit cwd so the recorded prefix (P10 drift replay) is rebuilt against the same
         # directory even if the process cwd ever diverges from the session's.
-        task.conversation = Conversation(system_prompt=assemble_system_prompt(cwd=session.cwd))
+        if _continuity_effective(session, is_local) and session.thread is not None:
+            task.conversation = session.thread
+        else:
+            task.conversation = Conversation(system_prompt=assemble_system_prompt(cwd=session.cwd))
     conv = task.conversation
+    # Register this conversation as the session's live thread so the next top-level message
+    # continues it. Ephemeral /tool carriers never reach run_task, so they can't hijack it;
+    # detached local runs leave session.thread untouched (each stays its own conversation).
+    if _continuity_effective(session, is_local):
+        session.thread = conv
     desc = task.description
     if session.read_only:
         desc += ("\n\n(Plan mode is on: do NOT edit or write files. Use the read-only tools to "

@@ -747,10 +747,23 @@ def _clear(rest, app):
         return
     app.session.tasks.clear()
     app.session.active_task_id = None
+    app.session.thread = None       # drop the continuity thread too
     if hasattr(app, "clear_screen"):
         app.clear_screen()          # TUI: wipe the log back to the intro
     else:
         app.ui.print("Cleared.")
+
+
+@command("new")
+def _new(rest, app):
+    """Start a new conversation thread, keeping the scrollback on screen."""
+    active = app.session.active_task
+    if active is not None and active.state == TaskState.ACTIVE:
+        app.ui.print("A task is still running — stop it first ([bold]esc[/bold]), then /new.")
+        return
+    app.session.thread = None       # next message starts a fresh conversation
+    app.session.active_task_id = None
+    app.ui.print("Started a new thread — the next message won't carry the previous context.")
 
 
 @command("quit", "q", "exit")

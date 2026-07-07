@@ -21,6 +21,8 @@ _OPENAI_COMPAT = [
     ("mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", True,
      ["mistral-large-latest", "devstral-small-latest", "codestral-latest"], {}),
     ("nvidia", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", True, [], {}),
+    ("deepseek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", True,
+     ["deepseek-chat", "deepseek-reasoner"], {}),
 ]
 
 

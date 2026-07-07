@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import time
 
 from . import config, difffmt, mcp_client, orchestrator, registry, repomap, tools, untrusted, web
 from .conversation import Conversation, Message
@@ -788,6 +789,84 @@ def _continuity(rest, app):
     else:
         session.thread = None                         # detach cleanly so the next message is fresh
         app.ui.print("Continuity [bold]off[/bold] — each message starts a fresh thread.")
+
+
+def _session_conversations(session) -> list[tuple[str, "Conversation"]]:
+    """Every conversation in the session, in task order, deduped by object identity — so a
+    shared continuity thread is returned once, while detached tasks each contribute their own.
+    Paired with a title for the export divider."""
+    seen: set[int] = set()
+    out: list[tuple[str, Conversation]] = []
+    for t in session.tasks:
+        conv = t.conversation
+        if conv is None or id(conv) in seen:
+            continue
+        seen.add(id(conv))
+        out.append((t.title or t.description or "conversation", conv))
+    return out
+
+
+def _render_message_md(m, lines: list[str]) -> None:
+    """Append one message's Markdown to `lines`. Tool calls render as name + a JSON args
+    block; results (a user-role turn carrying them) as fenced content, flagged on error."""
+    role = m.role.value
+    if role == "system":
+        return                                        # boilerplate, not part of the conversation
+    if m.tool_results:
+        for r in m.tool_results:
+            lines += ["", "⚠ error:" if r.is_error else "→ result:", "````", r.content or "", "````"]
+        return
+    if role == "user":
+        lines += ["", "## You", "", m.text or ""]
+        return
+    lines += ["", "## Assistant"]                     # assistant turn
+    if m.thinking and m.thinking.strip():
+        lines += ["", "> _thinking:_"]
+        lines += [f"> {tl}" for tl in m.thinking.strip().splitlines()]
+    if m.text and m.text.strip():
+        lines += ["", m.text.strip()]
+    for c in m.tool_calls:
+        lines += ["", f"**⚙ {c.name}**", "```json", json.dumps(c.arguments, ensure_ascii=False), "```"]
+
+
+def _render_session_md(session) -> tuple[str, int]:
+    """Render the whole session to Markdown; returns (text, message_count)."""
+    convs = _session_conversations(session)
+    total = sum(len(c.messages) for _, c in convs)
+    lines = ["# 2B session export", "",
+             f"- Model: {session.default_model or '(unset)'}",
+             f"- Exported: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+             f"- {len(convs)} conversation(s) · {total} messages"]
+    for idx, (title, conv) in enumerate(convs):
+        lines += ["", "---"]
+        if len(convs) > 1:
+            lines += ["", f"## — conversation {idx + 1}: {title} —"]
+        for m in conv.messages:
+            _render_message_md(m, lines)
+    return "\n".join(lines) + "\n", total
+
+
+@command("export")
+def _export(rest, app):
+    """Export the whole session, tool calls included, to a Markdown file: /export [path]."""
+    md, total = _render_session_md(app.session)
+    if total == 0:
+        app.ui.print("Nothing to export yet — the session is empty.")
+        return
+    arg = rest.strip()
+    if arg:
+        path = os.path.expanduser(arg)
+        if not os.path.isabs(path):
+            path = os.path.join(app.session.cwd, path)
+    else:
+        path = os.path.join(app.session.cwd, f"2b-session-{time.strftime('%Y%m%d-%H%M%S')}.md")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(md)
+    except OSError as e:
+        app.ui.print(f"[red]Export failed:[/red] {e}")
+        return
+    app.ui.print(f"Exported {total} messages to [bold]{path}[/bold]")
 
 
 @command("quit", "q", "exit")

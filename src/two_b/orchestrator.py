@@ -1272,12 +1272,12 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
                 "write_file. Investigate with the read-only tools and present your proposed "
                 "changes as a concrete, numbered plan in your final answer instead.")
     if name == "run_git":
-        return _run_git(session, task, args.get("args", ""), read_cap)
+        return _run_git(session, task, tools.command_arg_str(args.get("args", "")), read_cap)
     if name == "run_command":                       # cloud-only shell tool
         if session.read_only:
             return ("error: plan mode is on — not running shell commands. Investigate read-only and "
                     "present a plan in your final answer.")
-        cmd = (args.get("command") or "").strip()
+        cmd = tools.command_arg_str(args.get("command")).strip()
         if not cmd:
             return "error: no command given"
         verdict, reason = cmdguard.classify_command(cmd)

@@ -49,6 +49,15 @@ _DIFF_DEL_BG = "on #3a1519"   # dark red   — removed lines
 _GRANT_LABEL = {"edit_file": "edits", "write_file": "writes",
                 "run_git": "git", "run_command": "commands"}
 
+# Display names for provider prefixes in the banner; falls back to a capitalized key so a
+# provider not listed here still renders sensibly.
+_PROVIDER_NAMES = {"ollama": "Ollama", "ollama-cloud": "Ollama Cloud", "google": "Google",
+                   "anthropic": "Anthropic", "openai": "OpenAI", "nvidia": "NVIDIA"}
+
+
+def _provider_display(name: str) -> str:
+    return _PROVIDER_NAMES.get(name) or (name.capitalize() if name else "")
+
 
 class TaskInput(TextArea):
     """A multiline task field where Enter submits and Shift+Enter (or Ctrl+J, a
@@ -264,6 +273,7 @@ class TwoBApp(App):
         self._tool_widgets: list = []             # this task's tool-action rows [w,glyph,gstyle,phrase,suffix]
         self._last_reply = ""                     # most-recent model reply, for /copy
         self._ctx_label = ""                      # "13k ctx" for the banner (filled async)
+        self._provider_label = "local  ·  Ollama"  # "local · Ollama" / "cloud · Google" (refreshed async)
         self._ctx_budget = 0                      # token window for the live context meter (filled async)
         self._ctx_cache = (None, ("", ))          # ((conv id, msg count) -> rendered meter segment)
         self._sigint_armed_at: float | None = None  # P11: first ctrl+c arms a ~1.5s "again to quit" window
@@ -326,15 +336,18 @@ class TwoBApp(App):
             # Budget for the live context meter — works for local (pinned num_ctx) and
             # cloud (per-provider budget). Resolved once here, off the render path.
             self._ctx_budget = orchestrator.context_budget(provider, model)
-            is_local = getattr(provider, "name", "") == "ollama" and getattr(provider, "api_key", None) is None
-            if not is_local:
-                return   # banner "Nk ctx" label is only meaningful for the num_ctx 2B pins locally
-            win = self._ctx_budget
+            is_local = registry.is_local(provider)
+            kind = "local" if is_local else "cloud"
+            self._provider_label = f"{kind}  ·  {_provider_display(provider.name)}"
+            # The "Nk ctx" window label is only meaningful for the num_ctx 2B pins locally;
+            # a cloud budget is a per-provider heuristic, so no window number is shown there.
+            win = self._ctx_budget if is_local else 0
+            self._ctx_label = (f"{win // 1000}k ctx" if win >= 1000 else f"{win} ctx") if win else ""
         except Exception:
             return
-        if win:
-            self._ctx_label = f"{win // 1000}k ctx" if win >= 1000 else f"{win} ctx"
-            self.call_from_thread(lambda: self.query_one("#header", Static).update(self._banner_header()))
+        # Refresh the banner for both local and cloud, so a /model switch to a cloud model
+        # no longer leaves it showing the startup model / "local · Ollama".
+        self.call_from_thread(lambda: self.query_one("#header", Static).update(self._banner_header()))
 
     # ---- helpers exposed to commands.py (duck interface) ----
     def request_quit(self) -> None:
@@ -1117,7 +1130,7 @@ class TwoBApp(App):
         t.append(self.session.default_model, style=self.c("accent"))
         if self._ctx_label:
             t.append(f"  ·  {self._ctx_label}", style=self.c("dim"))
-        t.append("  ·  local  ·  Ollama\n", style=self.c("dim"))
+        t.append(f"  ·  {self._provider_label}\n", style=self.c("dim"))
         t.append(path, style=self.c("dim"))
         return t
 

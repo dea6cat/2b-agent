@@ -65,10 +65,13 @@ class OpenAICompatProvider:
             return self._cache[1]
         try:
             data = get_json(f"{self.base_url}/models", headers=self._headers(), provider=self.name)
-            ids = [m.get("id", "") for m in data.get("data", [])]
-            models = sorted(i for i in ids if i and _is_chat_model(i)) or list(self._static_models)
         except Exception:
-            models = list(self._static_models)
+            # Can't reach the provider (down, or blocked, or a bad/absent key). Surface nothing
+            # rather than a stale guess — a fabricated list would hide the real failure. Don't
+            # cache it, so the next call retries once the provider is reachable again.
+            return []
+        ids = [m.get("id", "") for m in data.get("data", [])]
+        models = sorted(i for i in ids if i and _is_chat_model(i))
         self._cache = (time.monotonic(), models)
         return models
 

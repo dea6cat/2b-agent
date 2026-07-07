@@ -67,6 +67,7 @@ class Grading(unittest.TestCase):
             mock.patch.object(testcmd.setup, "_toks", side_effect=lambda m: 20.0),
             mock.patch.object(testcmd.setup, "_ps_mem_gpu", return_value=("5 GB", "yes")),
             mock.patch.object(testcmd.setup, "correctness_test", side_effect=lambda m: correctness[m]),
+            mock.patch.object(testcmd.discover, "discover", return_value=[]),   # no network / coding pull
         ]
 
     def test_grades_all_and_suggests_best(self):
@@ -97,7 +98,8 @@ class Auto(unittest.TestCase):
              mock.patch.object(testcmd.setup, "_ps_mem_gpu", return_value=("5 GB", "yes")), \
              mock.patch.object(testcmd.setup, "_gb_est", side_effect=lambda m: 5.0), \
              mock.patch.object(testcmd.setup, "correctness_test", side_effect=lambda m: correctness[m]), \
-             mock.patch.object(testcmd.setup, "remove_models", side_effect=lambda ms, e: removed.extend(ms)):
+             mock.patch.object(testcmd.setup, "remove_models", side_effect=lambda ms, e: removed.extend(ms)), \
+             mock.patch.object(testcmd.discover, "discover", return_value=[]):   # no network / coding pull
             rc = testcmd.run(emit, auto=True, confirm=confirm, assume_yes=assume_yes)
         return rc, out, removed
 
@@ -107,11 +109,14 @@ class Auto(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(removed, ["bad:9b"])
 
-    def test_declined_removes_nothing(self):
+    def test_auto_never_prompts(self):
+        # auto is fully automatic — it must remove failures without ever calling confirm.
         cs = {"good:8b": (True, 12), "bad:9b": (False, 90)}
-        rc, out, removed = self._run_auto(cs, {}, confirm=lambda p: False)
-        self.assertEqual(removed, [])
-        self.assertTrue(any("nothing removed" in m.lower() for m in out))
+
+        def _must_not_ask(_p):
+            raise AssertionError("--test auto must not prompt")
+        rc, out, removed = self._run_auto(cs, {}, confirm=_must_not_ask)
+        self.assertEqual(removed, ["bad:9b"])
 
     def test_protects_default_even_if_it_failed(self):
         cs = {"bad:9b": (False, 90)}
@@ -129,7 +134,7 @@ class Auto(unittest.TestCase):
         cs = {"good:8b": (True, 12)}
         rc, out, removed = self._run_auto(cs, {}, confirm=lambda p: True)
         self.assertEqual(removed, [])
-        self.assertTrue(any("Nothing to remove" in m for m in out))
+        self.assertTrue(any("No failing models to remove" in m for m in out))
 
 
 if __name__ == "__main__":

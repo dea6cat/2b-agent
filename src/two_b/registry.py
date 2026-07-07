@@ -13,14 +13,16 @@ from .providers import ollama
 from .providers.base import Provider
 from .providers.openai_compat import OpenAICompatProvider
 
-# name, base_url, key_env, dynamic_models, static fallback models, extra headers
+# name, base_url, key_env, dynamic_models, static models (only for dynamic_models=False —
+# a dynamic provider lists live via /models and never falls back to a hardcoded guess), extra headers
 _OPENAI_COMPAT = [
     ("openai", "https://api.openai.com/v1", "OPENAI_API_KEY", True, [], {}),
     ("openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", True, [],
      {"HTTP-Referer": "https://github.com/dea6cat/2b-agent", "X-Title": "2B Agent"}),
-    ("mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", True,
-     ["mistral-large-latest", "devstral-small-latest", "codestral-latest"], {}),
+    ("mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", True, [], {}),
     ("nvidia", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", True, [], {}),
+    ("deepseek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", True, [], {}),
+    ("cerebras", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", True, [], {}),
 ]
 
 

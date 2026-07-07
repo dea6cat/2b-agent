@@ -99,6 +99,26 @@ class Prune(unittest.TestCase):
         self.assertTrue(any("could not remove b:9b" in m and "model not found" in m for m in msgs))
 
 
+class CorrectnessTest(unittest.TestCase):
+    def test_runs_headless_with_devnull_stdin(self):
+        # Must not inherit the terminal — otherwise the child's REPL blocks on our stdin until
+        # the timeout kills it, leaving the terminal in raw/no-echo mode for the next prompt.
+        import subprocess as sp
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"], captured["kw"] = cmd, kw
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        with mock.patch.object(setup, "_have", return_value=True), \
+             mock.patch("subprocess.run", side_effect=fake_run):
+            result = setup.correctness_test("qwen3:8b")
+
+        self.assertEqual(captured["kw"].get("stdin"), sp.DEVNULL)   # truly headless
+        self.assertIn("--classic", captured["cmd"])
+        self.assertIsNotNone(result)                               # (ok, wall_seconds)
+
+
 class Selection(unittest.TestCase):
     TAGS = ["qwen3:4b", "qwen3:8b", "qwen3.5:9b"]
 

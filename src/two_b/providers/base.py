@@ -13,8 +13,14 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Protocol
 
+from .. import __version__
 from ..conversation import Conversation, Message
 from ..toolspec import ToolSpec
+
+# Identify ourselves. urllib's default "Python-urllib/x" User-Agent is blocked by some
+# providers' bot filters (e.g. Cerebras's Cloudflare returns 403 "error code: 1010"), so
+# every request carries a real UA instead.
+_USER_AGENT = f"2b-agent/{__version__}"
 
 
 @dataclass(slots=True)
@@ -57,7 +63,7 @@ def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int
               provider: str = "http") -> dict:
     """POST JSON, return parsed JSON. Raises ProviderError with a useful message."""
     data = json.dumps(payload).encode()
-    hdrs = {"Content-Type": "application/json"}
+    hdrs = {"Content-Type": "application/json", "User-Agent": _USER_AGENT}
     if headers:
         hdrs.update(headers)
     req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
@@ -80,7 +86,7 @@ def post_stream(url: str, payload: dict, headers: dict | None = None, timeout: i
     """POST JSON and yield decoded response lines as they arrive (for streaming
     NDJSON / SSE). Raises ProviderError on connection/HTTP failure."""
     data = json.dumps(payload).encode()
-    hdrs = {"Content-Type": "application/json"}
+    hdrs = {"Content-Type": "application/json", "User-Agent": _USER_AGENT}
     if headers:
         hdrs.update(headers)
     req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
@@ -128,7 +134,10 @@ def stream_with_retry(provider, conversation, model, tools, on_text, *, retries=
 
 
 def get_json(url: str, headers: dict | None = None, timeout: int = 15, provider: str = "http") -> dict:
-    req = urllib.request.Request(url, headers=headers or {}, method="GET")
+    hdrs = {"User-Agent": _USER_AGENT}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, headers=hdrs, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())

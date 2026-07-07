@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import threading
 import time
 
@@ -25,6 +26,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, TextArea
@@ -57,6 +59,20 @@ _PROVIDER_NAMES = {"ollama": "Ollama", "ollama-cloud": "Ollama Cloud", "google":
 
 def _provider_display(name: str) -> str:
     return _PROVIDER_NAMES.get(name) or (name.capitalize() if name else "")
+
+
+# ANSI/terminal escape sequences (CSI — incl. SGR mouse reports like "\x1b[<35;77;29M" —
+# OSC, and any bare ESC+char), plus stray control chars. A burst of mouse-motion reports
+# can reach the app as a Paste; without this they'd be inserted into the input verbatim.
+_ESC_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.")
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")   # controls except tab/newline/CR
+
+
+def _sanitize_pasted(text: str) -> str:
+    """Strip terminal escape sequences and stray control chars from pasted text, keeping
+    real text, tabs, and newlines. Guards the task input against mouse-report / escape
+    bursts a terminal may deliver as a paste."""
+    return _CTRL_RE.sub("", _ESC_SEQ_RE.sub("", text or ""))
 
 
 class TaskInput(TextArea):
@@ -95,6 +111,12 @@ class TaskInput(TextArea):
             self.insert("\n")
             return
         await super()._on_key(event)
+
+    async def _on_paste(self, event: events.Paste) -> None:
+        # Sanitize before insert: a terminal can deliver a burst of mouse-motion reports
+        # as a paste, which TextArea would otherwise dump into the field verbatim.
+        event.text = _sanitize_pasted(event.text)
+        await super()._on_paste(event)
 
 
 def render_diff(diff: str) -> Text:
@@ -242,6 +264,10 @@ class TwoBApp(App):
         Binding("shift+tab", "cycle_mode", "cycle mode", priority=True, show=False),
         Binding("ctrl+b", "background", "background task", show=False),
         Binding("ctrl+y", "copy", "copy last reply", show=False),
+        Binding("shift+up", "log_scroll_line_up", "scroll up", priority=True, show=False),
+        Binding("shift+down", "log_scroll_line_down", "scroll down", priority=True, show=False),
+        Binding("pageup", "log_scroll_up", "scroll up", priority=True, show=False),
+        Binding("pagedown", "log_scroll_down", "scroll down", priority=True, show=False),
         Binding("escape", "interrupt", "interrupt", show=False),
         Binding("ctrl+c", "sigint", "interrupt / quit", show=False, priority=True),
         Binding("ctrl+d", "quit", "quit", show=False),
@@ -602,6 +628,20 @@ class TwoBApp(App):
             self.session.active_task_id = None
             self.log_write(Text(f"backgrounded [{t.id}] {t.title} — /fg {t.id} to resume", style="dim"))
 
+    def action_log_scroll_up(self) -> None:
+        # Keyboard scroll for the conversation log — reliable on every terminal (Terminal.app
+        # only forwards the mouse wheel in the any-event mode we disable to stop the flood).
+        self.query_one("#log", VerticalScroll).scroll_page_up()
+
+    def action_log_scroll_down(self) -> None:
+        self.query_one("#log", VerticalScroll).scroll_page_down()
+
+    def action_log_scroll_line_up(self) -> None:
+        self.query_one("#log", VerticalScroll).scroll_up()      # shift+↑ — one line
+
+    def action_log_scroll_line_down(self) -> None:
+        self.query_one("#log", VerticalScroll).scroll_down()    # shift+↓ — one line
+
     def action_interrupt(self, announce: bool = True) -> bool:
         """Esc handler. Returns True only if it actually aborted a running task (so the
         caller — e.g. double-Ctrl-C — can report honestly). If a scrollback search is open,
@@ -751,11 +791,16 @@ class TwoBApp(App):
 
     # ---- the periodic pump: drain events, render ----
     def _tick(self) -> None:
-        self._drain_events()
-        self._animate_running_tool()
-        self._render_plan()
-        self._render_mode()
-        self._render_status()
+        # The 12Hz timer can fire before compose finishes or after the DOM is torn down;
+        # a missing widget then is expected, so skip the frame instead of crashing.
+        try:
+            self._drain_events()
+            self._animate_running_tool()
+            self._render_plan()
+            self._render_mode()
+            self._render_status()
+        except NoMatches:
+            return
         self._maybe_start_next()
 
     def _tool_line(self, connector: str, glyph: str, gstyle: str, phrase: str, suffix: str = "") -> Text:

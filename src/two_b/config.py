@@ -21,6 +21,8 @@ PROVIDER_KEY_ENV = {
     "openrouter": "OPENROUTER_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
     "ollama": "OLLAMA_API_KEY",
 }
 

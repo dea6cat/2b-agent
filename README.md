@@ -43,105 +43,64 @@ model has to understand.
 
 ## What it does
 
-- **Five tools, and only five.** `list_files`, `read_file`, `search_files`, `edit_file`,
-  `write_file`. That small, concrete surface is exactly what keeps a small model reliable. It
-  explores before it edits — searching for where something lives instead of guessing paths — and
-  prefers exact-snippet edits over rewriting whole files.
-- **Edits that survive small-model drift.** `edit_file` resolves the target host-side in tiers —
-  exact, then whitespace-tolerant, then indentation-agnostic (re-indenting your snippet to the
-  file) — so a model that gets the whitespace slightly wrong still lands the edit instead of
-  bouncing off an exact-match error. It never applies on an ambiguous match, and the tool the model
-  sees is unchanged — all the tolerance lives on the host.
-- **Catches its own mistakes.** After a successful edit, 2B runs the file's checker host-side
-  (`dart analyze`, `ruff` or `py_compile`, …) and folds any new errors straight into the tool
-  result — so a model that just broke the build sees it on the same turn, with no new tool to learn.
-  Bounded so it can't flood a small window, skipped silently when there's no checker, and off with
-  `TWOB_NO_DIAGNOSTICS`.
-- **Finds definitions, not just matches.** `search_files` marks which hit is the *definition* of a
-  symbol and floats it to the top, and `read_file` appends a compact symbol outline with line
-  anchors — so "where is X defined?" is answered by the tools the model already calls, with no
-  navigation tool to learn. When a language server is installed (`dart language-server`, `pyright`,
-  `gopls`, …) it resolves symbols semantically over LSP, spoken as raw stdlib JSON-RPC; a curated MCP
-  resolver is used if one's enabled; with neither, it falls back to a dependency-free regex map.
-  Host-side, schema unchanged; off with `TWOB_NO_LSP`.
-- **Native protocols, never a shim.** Local Ollama models get Ollama's own `/api/chat` with NDJSON
-  streaming. Each cloud provider gets its own native format. Nothing is translated through a
-  lowest-common-denominator layer.
-- **Streaming, full-screen TUI.** A scrolling conversation, a framed input box, and a live status
-  line with a spinner, elapsed time, a context-window meter (`ctx N%`, amber as it fills), and — for
-  local models — a RAM/GPU readout pulled from Ollama.
-- **Narrated tool actions.** Instead of a wall of raw `read_file {...}`, you see what it's doing in
-  plain language, tied together with a tree gutter and a ✓/✗ per step:
+**The one idea that makes it work:** the model only ever sees **five tools** — `list_files`,
+`read_file`, `search_files`, `edit_file`, `write_file` — over its provider's **native** wire
+format, never a generic `/v1` shim. Every feature below is something 2B renders *around* that
+tiny loop, so a small model's world stays dead simple while you get a full-screen coding agent.
+
+**Reliable with small models — the host does the hard part:**
+
+- **Edits that survive drift.** `edit_file` matches in tiers (exact → whitespace-tolerant →
+  indentation-agnostic), so a near-miss still lands — never on an ambiguous match. The tool the
+  model sees is unchanged; the tolerance is all host-side.
+- **Catches its own mistakes.** After an edit, 2B runs the file's checker (`dart analyze`, `ruff`, …)
+  and folds new errors into the *same* tool result — the model sees the break it just caused, no new
+  tool to learn.
+- **Finds definitions, not just matches.** `search_files` floats a symbol's *definition* to the top
+  and `read_file` appends a symbol outline — resolved semantically over a language server (LSP) when
+  one's installed, with a dependency-free regex fallback otherwise.
+- **Rescues weak tool-calls.** Recovers calls a small model emits as plain text, and nudges one that
+  narrates a plan but forgets to act — so weak models actually finish the job.
+
+**A full-screen experience, not a log dump:**
+
+- **Streaming TUI** with a live **plan checklist** (`□ ■ ✓`) and a status line showing a context
+  meter (`ctx N%`) plus, for local models, a live RAM/GPU readout.
+- **Narrated actions** — plain-language steps with a ✓/✗ tree, not raw `read_file {...}`:
   ```
   ├ ✓ Searching for "MemoryScopeLevel" in lib
-  ├ ✓ Reading lib/memory/memory_store.dart
   └ ✓ Editing lib/memory/memory_store.dart
   ```
-- **A live plan checklist.** The model writes a short numbered plan before its first tool call; 2B
-  parses it and renders it as a checklist that advances (`□` pending, `■` active, `✓` done) as the
-  work progresses. Purely cosmetic — a wrong guess never breaks anything.
-- **Many providers, one conversation.** Ollama (local and cloud), OpenAI, OpenRouter, Mistral,
-  NVIDIA, Anthropic, and Google Gemini. 2B keeps history in a provider-agnostic form and
-  re-serializes it fresh for whoever's active — so you can switch models *mid-task* with `/model`
-  and keep every bit of context. Start a task on a local Qwen, hand it to Claude when it gets hard,
-  keep going.
-- **Knows the project.** `/init` scans the repo and writes a compact `2B.md` — stack, layout, and a
-  ranked symbol map — that's auto-loaded into context, so the model starts knowing where things are
-  instead of hunting for files. `/map` shows a budget-bounded outline on demand. All bounded, so it
-  never floods a small local window.
-- **Runs things — split by model.** Local models get `run_git` (git only, never a raw shell — no
-  chaining/injection); cloud models get a full `run_command` shell (tests, build, git). Read-only git
-  runs freely; anything that mutates is confirmation-gated and refused in plan mode.
-- **Sandboxed, and wary of untrusted content.** On the cloud path, `run_command`'s *writes* are
-  confined to the workspace by a host sandbox (macOS `sandbox-exec`, Linux `bubblewrap`) — on by
-  default, `TWOB_NO_SEATBELT` to disable. Commands that reach the network or a known-secret path
-  (`~/.ssh`, `~/.aws`, `.env`) re-prompt even under an "allow-all" grant, and your ambient secrets
-  (`*_API_KEY`, `AWS_*`, …) are scrubbed from the environment 2B hands a command. Tool output — file
-  contents, command results — is fenced as *untrusted* so a poisoned file can't turn a read into an
-  instruction the model obeys. `TWOB_SEATBELT=strict` additionally denies network and confines reads
-  to the workspace, so a command can't read secrets elsewhere on disk. It's defense-in-depth for a
-  personal tool, not a hardened multi-tenant jail — but it's on by default.
-- **Delegates read-only exploration, and edits, to sub-agents (cloud).** On the cloud path the
-  model can `delegate` one or more investigations to run in parallel, each in its own isolated
-  context, and get back short findings — so a big search-and-read never bloats the main
-  conversation. Each sub-agent can only `list_files`, `read_file`, and `search_files`. It can also
-  delegate `work` sub-tasks that propose file edits in their own isolated context; the parent
-  reviews the whole batch once and applies it (accept-edits auto-applies, plan mode keeps it
-  read-only), and if two workers touch the same file that's refused as a conflict rather than
-  applied. Workers can't run commands and the parent is still the only one that writes; local
-  models keep their frozen five tools untouched, and delegation is cloud-only for now.
-- **Cheaper multi-turn cloud sessions.** Anthropic requests mark the system prompt and tool
-  definitions as cacheable, so a long conversation pays full price for that stable prefix once
-  instead of on every turn.
-- **Leaner, sturdier cloud sessions.** Old, bulky tool outputs are trimmed out of each request
-  before it's sent — the stored conversation is untouched, and it's off with `TWOB_NO_TRIM` —
-  transient provider errors (HTTP 429 / 5xx) are retried with backoff instead of killing the task,
-  and `TWOB_SUBAGENT_MODEL` runs delegated sub-agents on a cheaper model than the parent.
-- **MCP tools, curated.** Pull in tools from MCP servers (dart, mempalace, …) — but **per tool**, not
-  wholesale, because flooding a small model with tools is exactly what breaks it. You enable a server
-  and pick which of its tools the model sees (`/mcp`); local models are capped to a few so their
-  context stays lean. See [MCP servers](#mcp-servers-extra-tools).
-- **Operating modes**, cycled with **Shift+Tab** or set with `/mode`:
-  - **normal** — every write/edit asks first.
-  - **accept edits** — writes apply automatically.
-  - **plan mode** — read-only; `edit_file`/`write_file` *and* MCP tools are refused (they may change
-    state), so the model investigates and returns a plan instead of touching anything.
-- **Auto-compaction.** When a conversation nears the model's context window — which happens fast on
-  small local windows — 2B folds the older turns into a summary and keeps going uninterrupted,
-  instead of hitting the wall. It cuts on a safe boundary so nothing breaks, and shows you
-  "Compacting conversation…" while it does it.
-- **Themes.** `/theme system` (default — transparent, uses your terminal's own background),
-  `/theme light` (a warm parchment palette), `/theme dark` (a dimmed version). Switches live.
-- **Copy that actually works.** Drag to select any text and press **Ctrl+C**, or **Ctrl+Y** / `/copy`
-  to grab the whole last reply. On macOS this goes through `pbcopy`, so it lands on your clipboard
-  even in Terminal.app (which ignores the escape sequence most TUIs rely on).
-- **Multiple tasks.** Queue tasks, background the running one with **Ctrl+B**, foreground it later
-  with `/fg`. A backgrounded task pauses when it needs to write and waits for you.
-- **Undo.** `/undo` reverts the last write or edit; `/undo N` the last N, `/undo <path>` the most
-  recent edit to a given file.
-- **Sessions persist and resume.** Each task's conversation is saved to `~/.config/2b/history.db`
-  (stdlib SQLite, no deps; `TWOB_NO_HISTORY` to disable). `2b --continue` picks up your most recent
-  session, `2b --resume <id>` a specific one, and `/sessions` (or `2b --list-sessions`) lists them.
+- **Themes** (`/theme`), **copy that works** (Ctrl+Y, or drag + Ctrl+C via `pbcopy`), **keyboard
+  scroll** (Shift+↑/↓), and **queued/background tasks** (Ctrl+B, `/fg`).
+
+**Any model, one conversation.** Ollama (local + cloud), OpenAI, OpenRouter, Mistral, NVIDIA,
+DeepSeek, Cerebras, Anthropic, and Google Gemini — each over its own native format, all streaming.
+History is provider-agnostic, so you **switch models mid-task** with `/model` and keep every bit of
+context: start on a local Qwen, hand it to Claude when it gets hard.
+
+**Keeps the thread — or doesn't, your call.** Cloud sessions carry context across messages by
+default; local models stay lean until you opt in with `/continuity`. `/new` starts a fresh thread,
+and `/export` dumps the whole session — **tool calls included** — to a Markdown file.
+
+**Knows your project.** `/init` writes a compact `2B.md` (stack, layout, ranked symbol map) that's
+auto-loaded into context; `/map` shows an outline on demand — all bounded so it never floods a small
+window.
+
+**Runs things, safely.** Local models get `run_git` (git only — no raw shell); cloud models get a
+full `run_command` whose **writes are sandbox-confined to the workspace** (macOS `sandbox-exec` /
+Linux `bubblewrap`). Network and secret-path commands re-prompt even under "allow-all," your ambient
+secrets (`*_API_KEY`, `AWS_*`) are scrubbed from the child env, and tool output is fenced as
+*untrusted* so a poisoned file can't hijack the model.
+
+**Scales without bloating the model.** Cloud models can `delegate` read-only investigations (and
+isolated edit sub-tasks) in parallel so a big search never bloats the main thread; **MCP tools** are
+opt-in *per tool*; **auto-compaction** folds old turns into a summary near the window limit; and
+**sessions persist** to SQLite (`2b --continue` / `--resume`, `/sessions`). `/undo` reverts the last
+write or edit.
+
+**Three modes** (Shift+Tab): **normal** (confirm writes) · **accept edits** (auto-apply) · **plan**
+(read-only — investigate and return a plan, touching nothing).
 
 ---
 
@@ -209,13 +168,29 @@ pipe with `... | sh -s -- --yes --models "qwen3.5:9b"`.
 2b --list-sessions       # list saved sessions
 2b --list-models         # what's available across configured providers
 2b --doctor              # diagnose PATH, Ollama, and the default model, then exit
-2b --test                # grade your installed local models (tok/s + a real coding test)
-2b --test qwen3.5:9b     # grade just one model; 'auto' removes the ones that fail
+2b --test                # grade installed models + compare them to the latest coding models
+2b --test auto           # auto-clean: remove failures, then pull/coding-test the best new one
 2b --update              # upgrade to the latest release (uv tool upgrade)
 2b --rm                  # uninstall 2B and delete its config (asks first); --rm --yes to skip
 ```
 
 Then just type what you want done. Type `/` to see the commands.
+
+### Testing your models
+
+`2b --test` grades each installed model — tok/s, GPU residency, and a **real two-change edit run
+through 2B** (`✓`/`✗`, up to ~2 min each) — then prints a KEEP/REMOVE table with a suggested
+default. It also **compares your models to the latest tool-capable coding models on ollama.com**
+that fit your RAM, surfacing families you don't have and larger variants worth upgrading to. Plain
+`--test` only reports — it changes nothing (`2b --test <model>` grades just one).
+
+`2b --test auto` is the hands-off cleanup:
+
+- **Removes the failing models automatically** — no prompt (that's the point of `auto`); your
+  current default is never removed.
+- Then **offers to pull + coding-test the best new candidate**. It asks once before the multi-GB
+  **download** (skip that with `--yes`), keeps the model only if it **passes** the coding test, and
+  removes it if it fails — remembering a failed one so it isn't re-downloaded on the next run.
 
 ### Updating
 
@@ -250,6 +225,8 @@ up automatically in `/models`:
 | OpenRouter | `OPENROUTER_API_KEY`                        |
 | Mistral    | `MISTRAL_API_KEY`                           |
 | NVIDIA     | `NVIDIA_API_KEY`                            |
+| DeepSeek   | `DEEPSEEK_API_KEY`                          |
+| Cerebras   | `CEREBRAS_API_KEY`                          |
 | Anthropic  | `ANTHROPIC_API_KEY`                         |
 | Google     | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)      |
 
@@ -277,6 +254,9 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | `/mode [normal\|accept\|plan]` | Set operating mode (or **Shift+Tab** to cycle) |
 | `/theme [system\|light\|dark]` | Switch color theme |
 | `/context` | Show estimated context usage (auto-compacts near the limit) |
+| `/continuity [on\|off]` | Carry conversation context across messages — on by default for cloud, opt-in for local |
+| `/new` | Start a fresh conversation thread (keeps the scrollback on screen) |
+| `/export [path]` | Export the whole session — tool calls and errors included — to a Markdown file |
 | `/copy` | Copy the last reply to the clipboard (**Ctrl+Y**) |
 | `/task <desc>` | Queue a task |
 | `/tasks` | List tasks and their status |
@@ -297,6 +277,7 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | Key | Action |
 | --- | --- |
 | **Shift+Tab** | Cycle operating mode |
+| **Shift+↑ / ↓** | Scroll the conversation log (a line); **PageUp / PageDown** by a page |
 | **Ctrl+B** | Background the running task |
 | **Ctrl+Y** | Copy the last reply |
 | **Ctrl+C** | Copy the current mouse selection |
@@ -346,6 +327,13 @@ small as you keep it.
   a different, appropriate window (e.g. qwen3.5:9b ≈ 13k on 18 GB), never more than the model was
   trained for. That number drives auto-compaction (~75%) and the read-a-section threshold. Set
   `TWOB_CONTEXT_TOKENS` to override (higher if you want to spend more RAM, lower to save it).
+
+- **Environment toggles.** Everything on-by-default can be turned off:
+  `TWOB_CONTEXT_TOKENS` (override the local window) · `TWOB_NO_DIAGNOSTICS` (skip post-edit checks) ·
+  `TWOB_NO_LSP` (regex symbol map instead of a language server) · `TWOB_NO_SEATBELT` /
+  `TWOB_SEATBELT=strict` (relax / harden the `run_command` sandbox) · `TWOB_NO_TRIM` (keep bulky tool
+  output in each request) · `TWOB_NO_HISTORY` (don't persist sessions) · `TWOB_SUBAGENT_MODEL` (run
+  delegated sub-agents on a cheaper model) · `TWOB_NO_UPDATE_CHECK` (no background update check).
 
 ---
 

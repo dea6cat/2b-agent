@@ -82,6 +82,17 @@ class Discover(unittest.TestCase):
         pulls_seq = [p for _, p, _ in rows]
         self.assertEqual(pulls_seq, sorted(pulls_seq, reverse=True))          # popularity-ranked
 
+    def test_coding_url_is_used_when_passed(self):
+        seen = {}
+
+        def fake_fetch(url):
+            seen["url"] = url
+            return _html()
+        with mock.patch.object(discover.web, "fetch", fake_fetch):
+            discover.discover(64, discover.CODING_URL)
+        self.assertEqual(seen["url"], discover.CODING_URL)
+        self.assertIn("q=coding", discover.CODING_URL)
+
     def test_low_ram_models_are_subset_of_high_ram(self):
         # a model that fits at 6GB also fits at 64GB (possibly as a LARGER variant, so
         # compare model slugs, not exact tags)

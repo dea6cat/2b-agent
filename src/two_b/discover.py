@@ -10,6 +10,9 @@ import re
 from . import web
 
 SEARCH_URL = "https://ollama.com/search?c=tools"
+# Coding-focused query, still tool-capable (2B's local models need tool-calls). Used by
+# `2b --test` to compare the latest coding models against what you have installed.
+CODING_URL = "https://ollama.com/search?q=coding&c=tools"
 
 _BLOCK = re.compile(r"<li[^>]*x-test-model")          # split the page into per-model blocks
 _SLUG = re.compile(r'href="/library/([a-z0-9][a-z0-9._-]*)"', re.I)
@@ -64,14 +67,15 @@ def parse_search(html: str) -> list[dict]:
     return out
 
 
-def discover(ram_gb: int) -> list[tuple[str, int, int]]:
-    """Fetch + parse ollama.com/search?c=tools → [(pull_tag, pulls, est_ram)] for
+def discover(ram_gb: int, search_url: str = SEARCH_URL) -> list[tuple[str, int, int]]:
+    """Fetch + parse an ollama.com/search page → [(pull_tag, pulls, est_ram)] for
     tool-capable, locally-pullable models with a variant that fits `ram_gb`, ranked by
-    pulls (desc). Returns [] on any failure (→ setup uses the bundled fallback)."""
+    pulls (desc). `search_url` defaults to the tools listing; pass CODING_URL for the
+    coding-focused set. Returns [] on any failure (→ setup uses the bundled fallback)."""
     if os.environ.get("TWOB_NO_MODEL_FETCH"):        # offline override (tests / forced-bundled)
         return []
     try:
-        cands = parse_search(web.fetch(SEARCH_URL))
+        cands = parse_search(web.fetch(search_url))
         rows = []
         for c in cands:
             if "tools" not in c["caps"] or not c["sizes"]:   # need tool-use + a local variant

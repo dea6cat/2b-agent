@@ -15,7 +15,36 @@ testable on its own. All the grading machinery is reused from setup.py.
 """
 from __future__ import annotations
 
-from . import config, setup
+from . import config, discover, setup
+
+
+def _fmt_pulls(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}K"
+    return str(n)
+
+
+def _suggest_coding(emit, installed: list[str]) -> None:
+    """Compare against the latest: pull the popular tool-capable coding models from
+    ollama.com that fit this machine, and show the ones whose family you don't already
+    have. Best-effort — a short note (never a hard error) if ollama.com is unreachable."""
+    ram_gb, _ = setup.machine()
+    found = discover.discover(ram_gb, discover.CODING_URL)
+    if not found:
+        emit("\n[dim]Couldn't reach ollama.com to compare the latest coding models.[/dim]")
+        return
+    have = {t.split(":", 1)[0] for t in installed}          # model families already installed
+    fresh = [(tag, pulls, ram) for tag, pulls, ram in found if tag.split(":", 1)[0] not in have]
+    if not fresh:
+        emit("\n[dim]You already have the popular coding models that fit this machine.[/dim]")
+        return
+    emit("\n[bold]Latest coding models on ollama.com you don't have[/bold] "
+         "(tool-capable, fit your RAM):")
+    for tag, pulls, ram in fresh[:5]:
+        emit(f"  [cyan]{tag}[/cyan]  {_fmt_pulls(pulls)} pulls  ~{ram}GB")
+    emit("[dim]  pull one with: [/dim][cyan]ollama pull <tag>[/cyan][dim], then [/dim][cyan]2b --test[/cyan]")
 
 
 def _default_tag(prefs: dict) -> str:
@@ -68,6 +97,8 @@ def run(emit, target: str = "", auto: bool = False,
         emit(r)
     if best:
         emit(f"\nsuggested default: [bold]{best}[/bold]  (set it with [bold]/default {best}[/bold])")
+
+    _suggest_coding(emit, installed)   # compare installed to the latest coding models on ollama.com
 
     if auto:
         protected = _default_tag(config.get_prefs())

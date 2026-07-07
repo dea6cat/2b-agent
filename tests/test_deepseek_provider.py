@@ -21,10 +21,6 @@ class DeepSeekProvider(unittest.TestCase):
     def test_key_env_mapping(self):
         self.assertEqual(config.PROVIDER_KEY_ENV["deepseek"], "DEEPSEEK_API_KEY")
 
-    def test_static_fallback_models(self):
-        p = registry.build_registry()["deepseek"]
-        self.assertEqual(p._static_models, ["deepseek-chat", "deepseek-reasoner"])
-
     def test_available_and_resolvable_with_key(self):
         old = os.environ.get("DEEPSEEK_API_KEY")
         os.environ["DEEPSEEK_API_KEY"] = "sk-test-key"

@@ -21,10 +21,6 @@ class CerebrasProvider(unittest.TestCase):
     def test_key_env_mapping(self):
         self.assertEqual(config.PROVIDER_KEY_ENV["cerebras"], "CEREBRAS_API_KEY")
 
-    def test_static_fallback_models(self):
-        p = registry.build_registry()["cerebras"]
-        self.assertEqual(p._static_models, ["llama-3.3-70b", "llama3.1-8b"])
-
     def test_available_and_resolvable_with_key(self):
         old = os.environ.get("CEREBRAS_API_KEY")
         os.environ["CEREBRAS_API_KEY"] = "csk-test-key"

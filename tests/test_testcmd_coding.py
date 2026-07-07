@@ -70,14 +70,16 @@ class CodingReport(unittest.TestCase):
 
 
 class AutoPullTest(unittest.TestCase):
-    def _run_auto(self, candidate_passes: bool):
-        pulled, removed, prefs = [], [], []
+    def _run_auto(self, candidate_passes=True, download=True, assume_yes=False, confirm="record"):
+        pulled, removed, prefs, prompts = [], [], [], []
 
         def fake_ct(m):
             return ((candidate_passes, 1) if m == "qwen2.5-coder:14b" else (True, 1))
 
-        def _asserting_confirm(_p):
-            raise AssertionError("--test auto must not prompt")
+        def _recording_confirm(p):
+            prompts.append(p)
+            return download
+        conf = _recording_confirm if confirm == "record" else confirm
 
         with mock.patch.object(setup, "installed_models", return_value=["qwen3:8b"]), \
              mock.patch.object(setup, "ensure_server", return_value=True), \
@@ -93,23 +95,33 @@ class AutoPullTest(unittest.TestCase):
              mock.patch.object(config, "set_pref", side_effect=lambda k, v: prefs.append((k, v))), \
              mock.patch.object(discover, "discover", return_value=[("qwen2.5-coder:14b", 1_200_000, 16)]):
             out = []
-            code = testcmd.run(out.append, auto=True, confirm=_asserting_confirm)   # no assume_yes
-        return "\n".join(out), pulled, removed, prefs, code
+            code = testcmd.run(out.append, auto=True, confirm=conf, assume_yes=assume_yes)
+        return {"txt": "\n".join(out), "pulled": pulled, "removed": removed,
+                "prefs": prefs, "prompts": prompts, "code": code}
 
-    def test_auto_pulls_and_recommends_a_passing_candidate(self):
-        txt, pulled, removed, prefs, code = self._run_auto(candidate_passes=True)
-        self.assertEqual(pulled, ["qwen2.5-coder:14b"])       # pulled the top candidate (no prompt)
-        self.assertIn("passed the coding test", txt)
-        self.assertNotIn("qwen2.5-coder:14b", removed)        # kept (it passed)
-        self.assertEqual(prefs, [])                            # nothing recorded as failed
-        self.assertEqual(code, 0)
+    def test_asks_before_downloading_but_not_before_removing(self):
+        r = self._run_auto(candidate_passes=True, download=True)
+        self.assertTrue(any("Pull" in p for p in r["prompts"]))     # asked before the download
+        self.assertFalse(any("Remove" in p for p in r["prompts"]))  # removal is silent
+        self.assertEqual(r["pulled"], ["qwen2.5-coder:14b"])
+        self.assertIn("passed the coding test", r["txt"])
 
-    def test_auto_removes_and_remembers_a_failing_candidate(self):
-        txt, pulled, removed, prefs, code = self._run_auto(candidate_passes=False)
-        self.assertEqual(pulled, ["qwen2.5-coder:14b"])
-        self.assertIn("failed the coding test", txt)
-        self.assertIn("qwen2.5-coder:14b", removed)           # pulled dud removed
-        self.assertEqual(prefs, [("coding_failed", ["qwen2.5-coder:14b"])])   # ...and remembered
+    def test_declining_the_download_skips_the_pull(self):
+        r = self._run_auto(candidate_passes=True, download=False)
+        self.assertTrue(any("Pull" in p for p in r["prompts"]))
+        self.assertEqual(r["pulled"], [])                            # declined → no download
+        self.assertIn("Skipped", r["txt"])
+
+    def test_yes_skips_the_download_prompt(self):
+        def _must_not_ask(_p):
+            raise AssertionError("--yes should not prompt")
+        r = self._run_auto(candidate_passes=True, assume_yes=True, confirm=_must_not_ask)
+        self.assertEqual(r["pulled"], ["qwen2.5-coder:14b"])         # pulled without asking
+
+    def test_failing_candidate_is_removed_and_remembered(self):
+        r = self._run_auto(candidate_passes=False, download=True)
+        self.assertIn("qwen2.5-coder:14b", r["removed"])            # pulled dud removed
+        self.assertEqual(r["prefs"], [("coding_failed", ["qwen2.5-coder:14b"])])   # ...and remembered
 
 
 if __name__ == "__main__":

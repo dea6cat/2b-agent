@@ -140,9 +140,7 @@ def run(emit, target: str = "", auto: bool = False,
     coding = _coding_report(emit, installed)
 
     if auto:
-        # `auto` means fully automatic — no prompts. It cleans up and refreshes on its own; a
-        # user who wants to be asked runs plain `2b --test` instead. (confirm/assume_yes are
-        # unused here by design; they remain for the interactive path and API stability.)
+        # `auto` removes failing models silently — no prompt (that's the whole point of auto).
         protected = _default_tag(config.get_prefs())
         failed = [m for m, (ok, _) in correctness.items() if not ok]
         for m in (m for m in failed if m == protected):
@@ -156,23 +154,28 @@ def run(emit, target: str = "", auto: bool = False,
         else:
             emit("No failing models to remove (other than a protected default).")
 
-        # Recommend on more than RAM: pull the top coding candidate and run the real coding
-        # test — recommend it if it passes, remove the download if it doesn't (auto's ethos).
+        # The one thing auto still asks: the multi-GB DOWNLOAD of a new coding candidate (skip
+        # the prompt with --yes). Then coding-test it — recommend if it passes, remove + remember
+        # it if it fails so auto never re-pulls the same dud.
         if coding:
             tag, _pulls, ram, _up = coding[0]
-            emit(f"Pulling {tag} (~{ram}GB) to coding-test it against what you have…")
-            setup.pull([tag], emit)
-            ct = setup.correctness_test(tag)
-            if ct is None:
-                emit("[red]Couldn't run the coding test — '2b' isn't on your PATH.[/red]")
-            elif ct[0]:
-                emit(f"[green]✔ {tag} passed the coding test[/green] — "
-                     f"set it as default with [bold]/default {tag}[/bold]")
+            if not (assume_yes or (confirm is not None and confirm(
+                    f"Pull and coding-test {tag} (~{ram}GB download) to compare it to what you have?"))):
+                emit(f"[dim]Skipped — pull it yourself with [/dim][cyan]ollama pull {tag}[/cyan]")
             else:
-                emit(f"[yellow]✗ {tag} failed the coding test — removing it.[/yellow]")
-                setup.remove_models([tag], emit)
-                prior = config.get_prefs().get("coding_failed", [])
-                if tag not in prior:            # remember it so auto doesn't re-pull the dud next run
-                    config.set_pref("coding_failed", prior + [tag])
+                emit(f"Pulling {tag} (~{ram}GB)…")
+                setup.pull([tag], emit)
+                ct = setup.correctness_test(tag)
+                if ct is None:
+                    emit("[red]Couldn't run the coding test — '2b' isn't on your PATH.[/red]")
+                elif ct[0]:
+                    emit(f"[green]✔ {tag} passed the coding test[/green] — "
+                         f"set it as default with [bold]/default {tag}[/bold]")
+                else:
+                    emit(f"[yellow]✗ {tag} failed the coding test — removing it.[/yellow]")
+                    setup.remove_models([tag], emit)
+                    prior = config.get_prefs().get("coding_failed", [])
+                    if tag not in prior:        # remember it so auto doesn't re-pull the dud next run
+                        config.set_pref("coding_failed", prior + [tag])
 
     return 0

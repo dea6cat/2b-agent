@@ -23,6 +23,8 @@ _OPENAI_COMPAT = [
     ("nvidia", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", True, [], {}),
     ("deepseek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", True,
      ["deepseek-chat", "deepseek-reasoner"], {}),
+    ("cerebras", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", True,
+     ["llama-3.3-70b", "llama3.1-8b"], {}),
 ]
 
 

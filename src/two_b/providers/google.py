@@ -58,13 +58,15 @@ class GoogleProvider:
         return contents
 
     def send(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...]) -> ProviderResponse:
-        url = f"{BASE}/models/{model}:generateContent?key={self.api_key}"
+        # Send the key in the x-goog-api-key header (as the official SDK / Google guidance do)
+        # rather than a ?key= URL param, so the secret never lands in a URL (logs, tracing, export).
+        url = f"{BASE}/models/{model}:generateContent"
         payload = {
             "systemInstruction": {"parts": [{"text": conversation.system_prompt}]},
             "contents": self._contents(conversation),
             "tools": to_gemini(tools),
         }
-        raw = post_json(url, payload, provider=self.name)
+        raw = post_json(url, payload, headers={"x-goog-api-key": self.api_key}, provider=self.name)
         cand = (raw.get("candidates") or [{}])[0]
         parts = cand.get("content", {}).get("parts", []) or []
         text_parts, calls = [], []

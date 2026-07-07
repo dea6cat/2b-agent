@@ -32,9 +32,10 @@ class Helpers(unittest.TestCase):
 
 
 class CodingReport(unittest.TestCase):
-    def _report(self, installed, found, ram=32):
+    def _report(self, installed, found, ram=32, failed=None):
         out = []
         with mock.patch.object(setup, "machine", return_value=(ram, False)), \
+             mock.patch.object(config, "get_prefs", return_value={"coding_failed": failed or []}), \
              mock.patch.object(discover, "discover", return_value=found):
             cands = testcmd._coding_report(out.append, installed)
         return "\n".join(out), cands
@@ -62,13 +63,21 @@ class CodingReport(unittest.TestCase):
         self.assertEqual(cands, [])
         self.assertIn("Couldn't reach ollama.com", txt)
 
+    def test_previously_failed_candidate_is_skipped(self):
+        # a candidate auto already pulled + failed here is remembered and not re-suggested
+        _txt, cands = self._report(["qwen3:8b"], [("gemma4:12b", 100, 14)], failed=["gemma4:12b"])
+        self.assertEqual(cands, [])
+
 
 class AutoPullTest(unittest.TestCase):
     def _run_auto(self, candidate_passes: bool):
-        pulled, removed = [], []
+        pulled, removed, prefs = [], [], []
 
         def fake_ct(m):
             return ((candidate_passes, 1) if m == "qwen2.5-coder:14b" else (True, 1))
+
+        def _asserting_confirm(_p):
+            raise AssertionError("--test auto must not prompt")
 
         with mock.patch.object(setup, "installed_models", return_value=["qwen3:8b"]), \
              mock.patch.object(setup, "ensure_server", return_value=True), \
@@ -81,23 +90,26 @@ class AutoPullTest(unittest.TestCase):
              mock.patch.object(setup, "pull", side_effect=lambda models, emit: pulled.extend(models)), \
              mock.patch.object(setup, "remove_models", side_effect=lambda models, emit: removed.extend(models)), \
              mock.patch.object(config, "get_prefs", return_value={}), \
+             mock.patch.object(config, "set_pref", side_effect=lambda k, v: prefs.append((k, v))), \
              mock.patch.object(discover, "discover", return_value=[("qwen2.5-coder:14b", 1_200_000, 16)]):
             out = []
-            code = testcmd.run(out.append, auto=True, assume_yes=True)
-        return "\n".join(out), pulled, removed, code
+            code = testcmd.run(out.append, auto=True, confirm=_asserting_confirm)   # no assume_yes
+        return "\n".join(out), pulled, removed, prefs, code
 
     def test_auto_pulls_and_recommends_a_passing_candidate(self):
-        txt, pulled, removed, code = self._run_auto(candidate_passes=True)
-        self.assertEqual(pulled, ["qwen2.5-coder:14b"])       # pulled the top candidate
+        txt, pulled, removed, prefs, code = self._run_auto(candidate_passes=True)
+        self.assertEqual(pulled, ["qwen2.5-coder:14b"])       # pulled the top candidate (no prompt)
         self.assertIn("passed the coding test", txt)
         self.assertNotIn("qwen2.5-coder:14b", removed)        # kept (it passed)
+        self.assertEqual(prefs, [])                            # nothing recorded as failed
         self.assertEqual(code, 0)
 
-    def test_auto_removes_a_failing_candidate(self):
-        txt, pulled, removed, code = self._run_auto(candidate_passes=False)
+    def test_auto_removes_and_remembers_a_failing_candidate(self):
+        txt, pulled, removed, prefs, code = self._run_auto(candidate_passes=False)
         self.assertEqual(pulled, ["qwen2.5-coder:14b"])
         self.assertIn("failed the coding test", txt)
         self.assertIn("qwen2.5-coder:14b", removed)           # pulled dud removed
+        self.assertEqual(prefs, [("coding_failed", ["qwen2.5-coder:14b"])])   # ...and remembered
 
 
 if __name__ == "__main__":

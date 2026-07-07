@@ -64,8 +64,11 @@ def _coding_report(emit, installed: list[str]) -> list:
         emit("\n[dim]Couldn't reach ollama.com to compare the latest coding models.[/dim]")
         return []
     have = _family_sizes(installed)
+    skip = set(config.get_prefs().get("coding_failed", []))  # tags auto already pulled + failed here
     cands = []
     for tag, pulls, ram in found:
+        if tag in skip:                                      # don't re-suggest a known dud
+            continue
         fam, size = _tag_family_size(tag)
         if fam not in have:                                  # a family you don't have at all
             cands.append((tag, pulls, ram, None))
@@ -137,40 +140,39 @@ def run(emit, target: str = "", auto: bool = False,
     coding = _coding_report(emit, installed)
 
     if auto:
+        # `auto` means fully automatic — no prompts. It cleans up and refreshes on its own; a
+        # user who wants to be asked runs plain `2b --test` instead. (confirm/assume_yes are
+        # unused here by design; they remain for the interactive path and API stability.)
         protected = _default_tag(config.get_prefs())
         failed = [m for m, (ok, _) in correctness.items() if not ok]
-        kept_default = [m for m in failed if m == protected]
-        losers = [m for m in failed if m != protected]
-        for m in kept_default:
+        for m in (m for m in failed if m == protected):
             emit(f"[yellow]note:[/yellow] {m} failed but is your current default — keeping it. "
                  "Set another with [bold]/default[/bold], then re-run to remove it.")
+        losers = [m for m in failed if m != protected]
         if losers:
             gb = round(sum(setup._gb_est(m) for m in losers), 1)
-            do = assume_yes or (confirm is not None and confirm(
-                f"Remove {len(losers)} model(s) that failed the coding test "
-                f"({', '.join(losers)})? Frees ~{gb}GB"))
-            if do:
-                setup.remove_models(losers, emit)
-            else:
-                emit("Kept all models — nothing removed.")
+            emit(f"Removing {len(losers)} failing model(s) ({', '.join(losers)}) — frees ~{gb}GB…")
+            setup.remove_models(losers, emit)
         else:
-            emit("Nothing to remove — no failing models (other than a protected default).")
+            emit("No failing models to remove (other than a protected default).")
 
-        # Don't recommend on RAM alone: pull the top coding candidate and run the real coding
-        # test — recommend it only if it passes, remove it if it doesn't (auto's cleanup ethos).
+        # Recommend on more than RAM: pull the top coding candidate and run the real coding
+        # test — recommend it if it passes, remove the download if it doesn't (auto's ethos).
         if coding:
             tag, _pulls, ram, _up = coding[0]
-            if assume_yes or (confirm is not None and confirm(
-                    f"Pull and coding-test {tag} (~{ram}GB download) to compare it to what you have?")):
-                setup.pull([tag], emit)
-                ct = setup.correctness_test(tag)
-                if ct is None:
-                    emit("[red]Couldn't run the coding test — '2b' isn't on your PATH.[/red]")
-                elif ct[0]:
-                    emit(f"[green]✔ {tag} passed the coding test[/green] — "
-                         f"set it as default with [bold]/default {tag}[/bold]")
-                else:
-                    emit(f"[yellow]✗ {tag} failed the coding test — removing it.[/yellow]")
-                    setup.remove_models([tag], emit)
+            emit(f"Pulling {tag} (~{ram}GB) to coding-test it against what you have…")
+            setup.pull([tag], emit)
+            ct = setup.correctness_test(tag)
+            if ct is None:
+                emit("[red]Couldn't run the coding test — '2b' isn't on your PATH.[/red]")
+            elif ct[0]:
+                emit(f"[green]✔ {tag} passed the coding test[/green] — "
+                     f"set it as default with [bold]/default {tag}[/bold]")
+            else:
+                emit(f"[yellow]✗ {tag} failed the coding test — removing it.[/yellow]")
+                setup.remove_models([tag], emit)
+                prior = config.get_prefs().get("coding_failed", [])
+                if tag not in prior:            # remember it so auto doesn't re-pull the dud next run
+                    config.set_pref("coding_failed", prior + [tag])
 
     return 0

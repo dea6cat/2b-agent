@@ -109,11 +109,14 @@ class Auto(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(removed, ["bad:9b"])
 
-    def test_declined_removes_nothing(self):
+    def test_auto_never_prompts(self):
+        # auto is fully automatic — it must remove failures without ever calling confirm.
         cs = {"good:8b": (True, 12), "bad:9b": (False, 90)}
-        rc, out, removed = self._run_auto(cs, {}, confirm=lambda p: False)
-        self.assertEqual(removed, [])
-        self.assertTrue(any("nothing removed" in m.lower() for m in out))
+
+        def _must_not_ask(_p):
+            raise AssertionError("--test auto must not prompt")
+        rc, out, removed = self._run_auto(cs, {}, confirm=_must_not_ask)
+        self.assertEqual(removed, ["bad:9b"])
 
     def test_protects_default_even_if_it_failed(self):
         cs = {"bad:9b": (False, 90)}
@@ -131,7 +134,7 @@ class Auto(unittest.TestCase):
         cs = {"good:8b": (True, 12)}
         rc, out, removed = self._run_auto(cs, {}, confirm=lambda p: True)
         self.assertEqual(removed, [])
-        self.assertTrue(any("Nothing to remove" in m for m in out))
+        self.assertTrue(any("No failing models to remove" in m for m in out))
 
 
 if __name__ == "__main__":

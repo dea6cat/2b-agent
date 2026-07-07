@@ -21,11 +21,13 @@ import time
 
 from rich.markdown import Markdown
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Static, TextArea
 
 from . import commands, completion, config, difffmt, notify, orchestrator, registry, theme, toolline, tools
 from .commands import command_specs, dispatch_input
@@ -46,6 +48,44 @@ _DIFF_DEL_BG = "on #3a1519"   # dark red   — removed lines
 # Friendly words for the confirm's "allow all … this session" (keyed by grant_key).
 _GRANT_LABEL = {"edit_file": "edits", "write_file": "writes",
                 "run_git": "git", "run_command": "commands"}
+
+
+class TaskInput(TextArea):
+    """A multiline task field where Enter submits and Shift+Enter (or Ctrl+J, a
+    fallback for terminals that can't distinguish Shift+Enter from Enter) inserts a
+    newline. Unlike a plain TextArea, Enter posts `Submitted` instead of a newline,
+    so the surrounding app keeps its single-shot "type a task, press Enter" flow.
+    While the command palette is open, ↑/↓ drive the palette rather than moving the
+    text cursor."""
+
+    class Submitted(Message):
+        """Posted when the user presses Enter. `value` is the full text."""
+
+        def __init__(self, task_input: "TaskInput", value: str) -> None:
+            self.task_input = task_input
+            self.value = value
+            super().__init__()
+
+    async def _on_key(self, event: events.Key) -> None:
+        # Palette navigation wins over cursor movement while a menu is showing.
+        if getattr(self.app, "_pal", None):
+            if event.key == "down":
+                event.stop(); event.prevent_default()
+                self.app.action_pal_down()
+                return
+            if event.key == "up":
+                event.stop(); event.prevent_default()
+                self.app.action_pal_up()
+                return
+        if event.key == "enter":                       # submit, don't insert a newline
+            event.stop(); event.prevent_default()
+            self.post_message(self.Submitted(self, self.text))
+            return
+        if event.key in ("shift+enter", "ctrl+j"):     # the two newline shortcuts
+            event.stop(); event.prevent_default()
+            self.insert("\n")
+            return
+        await super()._on_key(event)
 
 
 def render_diff(diff: str) -> Text:
@@ -181,7 +221,7 @@ class TwoBApp(App):
     #log .toolresult { color: $tb-dim; }
     #plan { height: auto; padding: 0 2; background: $tb-ground; color: $tb-ink; }
     #palette { height: auto; padding: 0 2; background: $tb-ground; color: $tb-ink; }
-    #input { margin: 0 2; border: round $tb-accent; background: $tb-panelbg; color: $tb-ink; }
+    #input { margin: 0 2; height: auto; max-height: 12; border: round $tb-accent; background: $tb-panelbg; color: $tb-ink; }
     #input:focus { border: round $tb-accent; }
     #mode { height: 1; padding: 0 2; background: $tb-ground; color: $tb-faint; }
     #status { height: 1; padding: 0 2; background: $tb-panelbg; color: $tb-dim; }
@@ -214,7 +254,7 @@ class TwoBApp(App):
         self._stream_text = ""
         self._stream_widget = None                # the in-flow Static currently being streamed into
         self._pending_confirm = None              # PendingConfirmation shown inline (answered y/n in view)
-        self._default_placeholder = "Type a task, or / for commands"
+        self._default_placeholder = "Type a task, or / for commands  ·  ⇧⏎ or ^J = newline"
         self._pal: list[tuple[str, str]] = []     # current command-palette matches
         self._pal_index = 0                       # highlighted match (↑/↓ navigation)
         self._pal_mode = ""                       # "cmd" (slash) or "file" (@) — how to accept
@@ -259,14 +299,15 @@ class TwoBApp(App):
         yield VerticalScroll(id="log")
         yield Static("", id="plan")
         yield Static("", id="palette")
-        inp = Input(placeholder="Type a task, or / for commands", id="input")
+        inp = TaskInput(id="input", soft_wrap=True)
+        inp.placeholder = self._default_placeholder
         inp.border_title = "2B Agent"
         yield inp
         yield Static("", id="mode")
         yield Static("", id="status")
 
     def on_mount(self) -> None:
-        self.query_one("#input", Input).focus()
+        self.query_one("#input", TaskInput).focus()
         self.set_interval(1 / 12, self._tick)
         for line in self._intro_lines():
             self.log_write(line)
@@ -352,9 +393,9 @@ class TwoBApp(App):
             self.log_write(line)
 
     # ---- input + command palette ----
-    def on_input_changed(self, event: Input.Changed) -> None:
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
         self._pal_index = 0                        # a new filter resets the highlight
-        self._update_palette(event.value)
+        self._update_palette(event.text_area.text)
 
     def action_palette_accept(self) -> None:
         """Tab: fill the highlighted match into the input (no run)."""
@@ -387,24 +428,24 @@ class TwoBApp(App):
         sel = self._palette_selected()
         if sel is None:
             return
-        inp = self.query_one("#input", Input)
+        inp = self.query_one("#input", TaskInput)
         if self._pal_mode == "file":               # replace the trailing '@partial' with the path
-            text = inp.value
+            text = inp.text
             idx = text.rfind("@")
             if idx != -1:
-                inp.value = text[:idx] + sel + " "
-                inp.cursor_position = len(inp.value)
+                inp.text = text[:idx] + sel + " "
+                inp.move_cursor(inp.document.end)
             self._clear_palette()
             return
         # These open a second-stage menu (model / provider), so fill rather than run.
         opens_submenu = sel in ("/model", "/connect", "/login", "/disconnect")
         if run and not opens_submenu:
             self._clear_palette()
-            inp.value = ""
+            inp.text = ""
             self._submit(sel)
             return
-        inp.value = sel + " "                      # fill; on_input_changed recomputes the menu
-        inp.cursor_position = len(inp.value)
+        inp.text = sel + " "                       # fill; on_text_area_changed recomputes the menu
+        inp.move_cursor(inp.document.end)
 
     def _model_candidates(self) -> list[str]:
         out = []
@@ -486,12 +527,12 @@ class TwoBApp(App):
             lines.append(f"  [{faint}]↓ +{remaining} more[/{faint}]")
         pal.update("\n".join(lines))
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_task_input_submitted(self, event: TaskInput.Submitted) -> None:
         if self._pal:                              # menu open → Enter selects the highlight
             self._accept_palette(run=True)
             return
         raw = event.value.strip()
-        self.query_one("#input", Input).value = ""
+        self.query_one("#input", TaskInput).text = ""
         self._clear_palette()
         if not raw:
             return
@@ -640,7 +681,7 @@ class TwoBApp(App):
             return
         self._history = {"widgets": matches, "idx": 0, "query": query}
         self._jump_history(0)
-        inp = self.query_one("#input", Input)
+        inp = self.query_one("#input", TaskInput)
         inp.disabled = True
         inp.placeholder = f"{len(matches)} match(es) for “{query}” — n next · N prev · esc exit"
 
@@ -884,7 +925,7 @@ class TwoBApp(App):
         q.append("esc", style=self.c("dim"))
         q.append(" stop", style=self.c("dim"))
         self.log_write(q)
-        inp = self.query_one("#input", Input)
+        inp = self.query_one("#input", TaskInput)
         inp.placeholder = (f"y apply · a allow {label} this session · n skip · esc stop"
                            if label else "y apply · n skip · esc stop")
         inp.disabled = True
@@ -905,7 +946,7 @@ class TwoBApp(App):
         self._restore_input()
 
     def _restore_input(self) -> None:
-        inp = self.query_one("#input", Input)
+        inp = self.query_one("#input", TaskInput)
         inp.disabled = False
         inp.placeholder = self._default_placeholder
         inp.focus()

@@ -388,6 +388,19 @@ def _asked_instead_of_acting(text: str) -> bool:
     return bool(text) and "?" in text and bool(_CLARIFY_RE.search(text))
 
 
+def _persist_final(conv, msg) -> None:
+    """Append the closing assistant answer to the conversation (Phase 0 of continuity).
+    The turn loop only appends tool-call turns, never the final message, so any thread
+    carried forward — via /continuity or a re-attached steer — would omit the actual
+    answer. Stores a clean text-only turn (mirroring what the UI showed: text, else the
+    thinking fallback) so history never carries a dangling tool_call or a blank turn."""
+    if msg is None:
+        return
+    answer = (msg.text or "").strip() or (msg.thinking or "").strip()
+    if answer:
+        conv.append(Message.assistant(text=answer))
+
+
 def teardown_helpers() -> None:
     """Hard-stop the long-lived helper servers on esc. Local subprocesses die via
     the cancel flag + process-group kill (see tools._run_cancellable); this tears
@@ -1526,6 +1539,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 planparse.finalize_steps(task.plan_steps)
                 task.status_line = ""
                 task.state = TaskState.DONE
+                _persist_final(conv, msg)   # keep the final answer in the thread (continuity)
                 # If nothing streamed (e.g. answer landed in `thinking`), emit it now.
                 if streamed["n"] == 0:
                     fallback = content or (msg.thinking or "").strip()
@@ -1660,6 +1674,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             planparse.finalize_steps(task.plan_steps)
             task.status_line = ""
             task.state = TaskState.DONE
+            _persist_final(conv, resp.message)   # keep the final answer in the thread (continuity)
             if got["n"] == 0:
                 txt = (resp.message.text or resp.message.thinking or "").strip()
                 if not txt:

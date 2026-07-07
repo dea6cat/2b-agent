@@ -929,6 +929,19 @@ def coerce_tool_args(name: str, args, known: tuple[str, ...] = ()) -> tuple[str,
     return name, args
 
 
+def command_arg_str(value) -> str:
+    """The string form of a command tool's argument (run_git's 'args', run_command's
+    'command'). Models sometimes emit it as a list of parts (['status'],
+    ['commit', '-m', 'msg']); shlex.join reassembles it losslessly so do_run_git /
+    do_run_command re-split it correctly. None -> ''; any other type -> str(). Keeps a
+    list-valued arg from crashing a downstream .strip() and killing the whole task."""
+    if isinstance(value, (list, tuple)):
+        return shlex.join(str(v) for v in value)
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
+
+
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _PY_LITERALS = ((r"\bTrue\b", "true"), (r"\bFalse\b", "false"), (r"\bNone\b", "null"))
 # A ```json … ``` (or ```tool_call …```) fenced block wrapping a JSON object/array.

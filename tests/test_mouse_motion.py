@@ -1,6 +1,6 @@
-"""Importing app_tui disables Textual's any-event (motion) mouse tracking, so mouse
-movement no longer floods the app on terminals (e.g. Terminal.app) that mishandle 1003.
-Button + SGR tracking stay on. Guarded on textual (runtime-only dep).
+"""Importing app_tui disables Textual's mouse reporting entirely (2B is keyboard-driven —
+scroll is Shift+arrows / PageUp-Down), so mouse movement never floods the app on terminals
+(e.g. Terminal.app) that mishandle motion reporting. Guarded on textual (runtime-only dep).
 Run: `python -m unittest tests.test_mouse_motion`.
 """
 import os
@@ -31,25 +31,21 @@ class _FakeDriver:
 
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed (runtime-only dependency)")
-class MouseMotionDisabled(unittest.TestCase):
+class MouseDisabled(unittest.TestCase):
     def test_patch_is_installed(self):
-        self.assertTrue(getattr(LinuxDriver._enable_mouse_support, "_2b_no_motion", False))
+        self.assertTrue(getattr(LinuxDriver._enable_mouse_support, "_2b_no_mouse", False))
 
-    def test_downgraded_to_button_event_after_enable(self):
+    def test_no_mouse_modes_are_enabled(self):
         f = _FakeDriver(mouse=True)
         LinuxDriver._enable_mouse_support(f)
-        self.assertIn("\x1b[?1002h", f.written)          # button-event tracking (click/drag/wheel)
-        self.assertIn("\x1b[?1003l", f.written)          # any-event (free-hover) turned off
-        self.assertEqual(f.written[-1], "\x1b[?1003l")   # ...disabled last, after our 1002h
-        self.assertLess(f.written.index("\x1b[?1002h"),
-                        f.written.index("\x1b[?1003l"))
-        self.assertLess(f.written.index("\x1b[?1003h"),  # off comes after Textual's on
-                        f.written.index("\x1b[?1003l"))
+        for mode in ("1000", "1002", "1003", "1015", "1006"):
+            self.assertNotIn(f"\x1b[?{mode}h", f.written)   # nothing turned ON
 
-    def test_no_writes_when_mouse_off(self):
-        f = _FakeDriver(mouse=False)
+    def test_all_mouse_modes_are_turned_off(self):
+        f = _FakeDriver(mouse=True)
         LinuxDriver._enable_mouse_support(f)
-        self.assertEqual(f.written, [])                  # nothing enabled, nothing to disable
+        for mode in ("1000", "1002", "1003", "1006"):
+            self.assertIn(f"\x1b[?{mode}l", f.written)      # explicitly turned OFF
 
 
 if __name__ == "__main__":

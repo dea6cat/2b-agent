@@ -38,38 +38,34 @@ from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
 from .tui import VISIBLE_STEPS
 
 
-def _downgrade_mouse_tracking() -> None:
-    """Textual's driver enables any-event mouse tracking (\\x1b[?1003h), which reports on
-    every mouse *move* (even with no button). Terminal.app mishandles that mode and floods
-    the app with those reports — they leak into the input as text and drown keypresses, so a
-    running task's confirmation can't be answered (the app appears to lock up). 2B uses no
-    hover, so right after Textual enables mouse we downgrade to button-event tracking
-    (\\x1b[?1002h) and turn any-event off (\\x1b[?1003l): free-hover moves no longer report
-    (no flood), while clicks, drag, and — critically — wheel scroll still do. Idempotent;
-    POSIX driver only."""
+def _disable_mouse() -> None:
+    """2B is fully keyboard-driven — scroll is Shift+↑/↓ and PageUp/PageDown, and every
+    action is a key — so it wants no mouse at all. Textual's driver enables mouse reporting
+    (incl. any-event motion, \\x1b[?1003h), which Terminal.app mishandles: the reports leak
+    into the input as text and flood the event loop, drowning keypresses so a running task's
+    confirmation can't be answered. Replace the driver's mouse-enable with one that enables
+    nothing and explicitly turns every mouse mode off (in case a prior app/subprocess left
+    one on), so the terminal stops reporting entirely. Idempotent; POSIX driver only."""
     try:
         from textual.drivers.linux_driver import LinuxDriver
     except Exception:
         return
-    orig = LinuxDriver._enable_mouse_support
-    if getattr(orig, "_2b_no_motion", False):
+    if getattr(LinuxDriver._enable_mouse_support, "_2b_no_mouse", False):
         return
 
-    def _enable_without_motion(self) -> None:
-        orig(self)
-        if getattr(self, "_mouse", False):
-            try:
-                self.write("\x1b[?1002h")   # button-event: click/drag/wheel report, hover doesn't
-                self.write("\x1b[?1003l")   # any-event OFF — stop the free-hover flood
-                self.flush()
-            except Exception:
-                pass
+    def _no_mouse(self) -> None:
+        try:
+            for mode in ("1000", "1002", "1003", "1015", "1016", "1006"):
+                self.write(f"\x1b[?{mode}l")   # every mouse tracking/encoding mode OFF
+            self.flush()
+        except Exception:
+            pass
 
-    _enable_without_motion._2b_no_motion = True
-    LinuxDriver._enable_mouse_support = _enable_without_motion
+    _no_mouse._2b_no_mouse = True
+    LinuxDriver._enable_mouse_support = _no_mouse
 
 
-_downgrade_mouse_tracking()
+_disable_mouse()
 
 # Mode indicator glyph + accent color (fixed hues that read on every theme).
 _MODE_STYLE = {

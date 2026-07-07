@@ -37,13 +37,15 @@ from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
 from .tui import VISIBLE_STEPS
 
 
-def _disable_mouse_motion_tracking() -> None:
-    """Textual's driver enables any-event mouse tracking (\\x1b[?1003h), which emits a
-    report on every mouse *move*. Terminal.app mishandles that mode and floods the app with
-    those reports — they leak into the input as text and drown keypresses, so a running
-    task's confirmation can't be answered (the app appears to lock up). 2B is keyboard-driven
-    and uses no hover/drag, so turn motion tracking back off right after Textual enables
-    mouse; button clicks and wheel scroll (1000/1006) stay on. Idempotent; POSIX driver only."""
+def _downgrade_mouse_tracking() -> None:
+    """Textual's driver enables any-event mouse tracking (\\x1b[?1003h), which reports on
+    every mouse *move* (even with no button). Terminal.app mishandles that mode and floods
+    the app with those reports — they leak into the input as text and drown keypresses, so a
+    running task's confirmation can't be answered (the app appears to lock up). 2B uses no
+    hover, so right after Textual enables mouse we downgrade to button-event tracking
+    (\\x1b[?1002h) and turn any-event off (\\x1b[?1003l): free-hover moves no longer report
+    (no flood), while clicks, drag, and — critically — wheel scroll still do. Idempotent;
+    POSIX driver only."""
     try:
         from textual.drivers.linux_driver import LinuxDriver
     except Exception:
@@ -56,7 +58,8 @@ def _disable_mouse_motion_tracking() -> None:
         orig(self)
         if getattr(self, "_mouse", False):
             try:
-                self.write("\x1b[?1003l")   # SET_ANY_EVENT_MOUSE off — stop motion reports
+                self.write("\x1b[?1002h")   # button-event: click/drag/wheel report, hover doesn't
+                self.write("\x1b[?1003l")   # any-event OFF — stop the free-hover flood
                 self.flush()
             except Exception:
                 pass
@@ -65,7 +68,7 @@ def _disable_mouse_motion_tracking() -> None:
     LinuxDriver._enable_mouse_support = _enable_without_motion
 
 
-_disable_mouse_motion_tracking()
+_downgrade_mouse_tracking()
 
 # Mode indicator glyph + accent color (fixed hues that read on every theme).
 _MODE_STYLE = {

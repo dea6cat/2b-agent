@@ -35,12 +35,14 @@ class MouseMotionDisabled(unittest.TestCase):
     def test_patch_is_installed(self):
         self.assertTrue(getattr(LinuxDriver._enable_mouse_support, "_2b_no_motion", False))
 
-    def test_motion_turned_off_after_enable(self):
+    def test_downgraded_to_button_event_after_enable(self):
         f = _FakeDriver(mouse=True)
         LinuxDriver._enable_mouse_support(f)
-        self.assertIn("\x1b[?1000h", f.written)          # button tracking still enabled
-        self.assertIn("\x1b[?1003l", f.written)          # any-event motion turned back off
-        self.assertEqual(f.written[-1], "\x1b[?1003l")   # ...as the last thing written
+        self.assertIn("\x1b[?1002h", f.written)          # button-event tracking (click/drag/wheel)
+        self.assertIn("\x1b[?1003l", f.written)          # any-event (free-hover) turned off
+        self.assertEqual(f.written[-1], "\x1b[?1003l")   # ...disabled last, after our 1002h
+        self.assertLess(f.written.index("\x1b[?1002h"),
+                        f.written.index("\x1b[?1003l"))
         self.assertLess(f.written.index("\x1b[?1003h"),  # off comes after Textual's on
                         f.written.index("\x1b[?1003l"))
 

@@ -59,6 +59,18 @@ The 5-tool schema stayed frozen throughout; all complexity is host-side.
   formula (named `twob-agent`, not `2b-agent`, because a leading-digit formula name yields an invalid
   Ruby class; it installs the `2b` command). Verified locally: `brew style`/`audit` clean, source
   build succeeds, `2b --version` runs on brew's Python 3.14. See `packaging/homebrew/README.md`.
+- **Conversation continuity.** Cloud sessions carry one conversation thread across top-level
+  messages; local stays detached by default (small windows fill fast). `Session.thread` holds the
+  live foreground conversation; `run_task` adopts it when `_continuity_effective(session, is_local)`
+  is true and registers it back (ephemeral `/tool` carriers never reach `run_task`, so they can't
+  hijack it). A tri-state `session.continuity_override` (`None` = provider default, `True`/`False` =
+  explicit) drives `/continuity on|off` (bare toggles): opt local in, or detach cloud — off clears the
+  thread for a clean break. `/new` starts a fresh thread keeping the scrollback; `/clear` drops it and
+  wipes. Status bar shows `⛓ thread` whenever a thread is live. Prerequisite fix (`_persist_final`,
+  both finalize paths): the turn loop only appended tool-call turns, never the closing answer, so a
+  carried thread — via continuity or a re-attached steer — would omit it; now a clean text-only final
+  turn is persisted. Long local threads are managed by the existing compaction (`_maybe_compact`, 75%).
+  Host-side; 5-tool schema frozen.
 
 ## Open follow-ups
 

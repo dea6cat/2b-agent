@@ -67,6 +67,7 @@ class Grading(unittest.TestCase):
             mock.patch.object(testcmd.setup, "_toks", side_effect=lambda m: 20.0),
             mock.patch.object(testcmd.setup, "_ps_mem_gpu", return_value=("5 GB", "yes")),
             mock.patch.object(testcmd.setup, "correctness_test", side_effect=lambda m: correctness[m]),
+            mock.patch.object(testcmd.discover, "discover", return_value=[]),   # no network / coding pull
         ]
 
     def test_grades_all_and_suggests_best(self):
@@ -97,7 +98,8 @@ class Auto(unittest.TestCase):
              mock.patch.object(testcmd.setup, "_ps_mem_gpu", return_value=("5 GB", "yes")), \
              mock.patch.object(testcmd.setup, "_gb_est", side_effect=lambda m: 5.0), \
              mock.patch.object(testcmd.setup, "correctness_test", side_effect=lambda m: correctness[m]), \
-             mock.patch.object(testcmd.setup, "remove_models", side_effect=lambda ms, e: removed.extend(ms)):
+             mock.patch.object(testcmd.setup, "remove_models", side_effect=lambda ms, e: removed.extend(ms)), \
+             mock.patch.object(testcmd.discover, "discover", return_value=[]):   # no network / coding pull
             rc = testcmd.run(emit, auto=True, confirm=confirm, assume_yes=assume_yes)
         return rc, out, removed
 

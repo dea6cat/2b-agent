@@ -15,7 +15,12 @@ testable on its own. All the grading machinery is reused from setup.py.
 """
 from __future__ import annotations
 
+import re
+
 from . import config, discover, setup
+
+
+_SIZE_RE = re.compile(r":(\d+(?:\.\d+)?)b", re.IGNORECASE)
 
 
 def _fmt_pulls(n: int) -> str:
@@ -26,25 +31,54 @@ def _fmt_pulls(n: int) -> str:
     return str(n)
 
 
-def _suggest_coding(emit, installed: list[str]) -> None:
-    """Compare against the latest: pull the popular tool-capable coding models from
-    ollama.com that fit this machine, and show the ones whose family you don't already
-    have. Best-effort — a short note (never a hard error) if ollama.com is unreachable."""
+def _tag_family_size(tag: str) -> tuple[str, float | None]:
+    """(family, param-size) from a tag: 'qwen2.5-coder:14b' -> ('qwen2.5-coder', 14.0). Size
+    is None when the tag carries no parseable Nb (e.g. ':latest')."""
+    fam = tag.split(":", 1)[0]
+    m = _SIZE_RE.search(tag)
+    return fam, (float(m.group(1)) if m else None)
+
+
+def _family_sizes(installed: list[str]) -> dict:
+    """family -> largest installed param size (None if the family is present but unparseable)."""
+    out: dict = {}
+    for t in installed:
+        fam, size = _tag_family_size(t)
+        if fam not in out:
+            out[fam] = size
+        elif size is not None and (out[fam] is None or size > out[fam]):
+            out[fam] = size
+    return out
+
+
+def _coding_report(emit, installed: list[str]) -> list:
+    """Compare installed models to the latest tool-capable coding models on ollama.com that
+    fit this machine. Print the comparison and return the actionable candidates as
+    [(tag, pulls, ram, upgrade_from)] — a family you don't have (upgrade_from None) or a
+    larger variant of one you do (upgrade_from = your current size). Ranked by pulls; empty
+    if ollama.com is unreachable or you already run the best-fitting variants. Best-effort —
+    never raises."""
     ram_gb, _ = setup.machine()
-    found = discover.discover(ram_gb, discover.CODING_URL)
+    found = discover.discover(ram_gb, discover.CODING_URL)   # best-fitting variant per family, RAM-filtered
     if not found:
         emit("\n[dim]Couldn't reach ollama.com to compare the latest coding models.[/dim]")
-        return
-    have = {t.split(":", 1)[0] for t in installed}          # model families already installed
-    fresh = [(tag, pulls, ram) for tag, pulls, ram in found if tag.split(":", 1)[0] not in have]
-    if not fresh:
-        emit("\n[dim]You already have the popular coding models that fit this machine.[/dim]")
-        return
-    emit("\n[bold]Latest coding models on ollama.com you don't have[/bold] "
-         "(tool-capable, fit your RAM):")
-    for tag, pulls, ram in fresh[:5]:
-        emit(f"  [cyan]{tag}[/cyan]  {_fmt_pulls(pulls)} pulls  ~{ram}GB")
-    emit("[dim]  pull one with: [/dim][cyan]ollama pull <tag>[/cyan][dim], then [/dim][cyan]2b --test[/cyan]")
+        return []
+    have = _family_sizes(installed)
+    cands = []
+    for tag, pulls, ram in found:
+        fam, size = _tag_family_size(tag)
+        if fam not in have:                                  # a family you don't have at all
+            cands.append((tag, pulls, ram, None))
+        elif have[fam] is not None and size is not None and size > have[fam]:
+            cands.append((tag, pulls, ram, have[fam]))       # a bigger variant of yours that still fits
+    if not cands:
+        emit("\n[dim]You already have the best-fitting coding models for this machine.[/dim]")
+        return []
+    emit("\n[bold]Latest coding models on ollama.com[/bold] (tool-capable, fit your RAM):")
+    for tag, pulls, ram, up in cands[:5]:
+        tail = f"  [dim](upgrade from :{discover._fmt(up)}b)[/dim]" if up is not None else ""
+        emit(f"  [cyan]{tag}[/cyan]  {_fmt_pulls(pulls)} pulls  ~{ram}GB{tail}")
+    return cands
 
 
 def _default_tag(prefs: dict) -> str:
@@ -98,7 +132,9 @@ def run(emit, target: str = "", auto: bool = False,
     if best:
         emit(f"\nsuggested default: [bold]{best}[/bold]  (set it with [bold]/default {best}[/bold])")
 
-    _suggest_coding(emit, installed)   # compare installed to the latest coding models on ollama.com
+    # Compare installed models to the latest coding models on ollama.com (best-fitting family
+    # variant). `coding` is the actionable candidate list; in auto mode we pull+test the top one.
+    coding = _coding_report(emit, installed)
 
     if auto:
         protected = _default_tag(config.get_prefs())
@@ -108,16 +144,33 @@ def run(emit, target: str = "", auto: bool = False,
         for m in kept_default:
             emit(f"[yellow]note:[/yellow] {m} failed but is your current default — keeping it. "
                  "Set another with [bold]/default[/bold], then re-run to remove it.")
-        if not losers:
-            emit("Nothing to remove — no failing models (other than a protected default).")
-            return 0
-        gb = round(sum(setup._gb_est(m) for m in losers), 1)
-        do = assume_yes or (confirm is not None and confirm(
-            f"Remove {len(losers)} model(s) that failed the coding test "
-            f"({', '.join(losers)})? Frees ~{gb}GB"))
-        if do:
-            setup.remove_models(losers, emit)
+        if losers:
+            gb = round(sum(setup._gb_est(m) for m in losers), 1)
+            do = assume_yes or (confirm is not None and confirm(
+                f"Remove {len(losers)} model(s) that failed the coding test "
+                f"({', '.join(losers)})? Frees ~{gb}GB"))
+            if do:
+                setup.remove_models(losers, emit)
+            else:
+                emit("Kept all models — nothing removed.")
         else:
-            emit("Kept all models — nothing removed.")
+            emit("Nothing to remove — no failing models (other than a protected default).")
+
+        # Don't recommend on RAM alone: pull the top coding candidate and run the real coding
+        # test — recommend it only if it passes, remove it if it doesn't (auto's cleanup ethos).
+        if coding:
+            tag, _pulls, ram, _up = coding[0]
+            if assume_yes or (confirm is not None and confirm(
+                    f"Pull and coding-test {tag} (~{ram}GB download) to compare it to what you have?")):
+                setup.pull([tag], emit)
+                ct = setup.correctness_test(tag)
+                if ct is None:
+                    emit("[red]Couldn't run the coding test — '2b' isn't on your PATH.[/red]")
+                elif ct[0]:
+                    emit(f"[green]✔ {tag} passed the coding test[/green] — "
+                         f"set it as default with [bold]/default {tag}[/bold]")
+                else:
+                    emit(f"[yellow]✗ {tag} failed the coding test — removing it.[/yellow]")
+                    setup.remove_models([tag], emit)
 
     return 0

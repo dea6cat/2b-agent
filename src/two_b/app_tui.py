@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import threading
 import time
 
@@ -59,6 +60,20 @@ def _provider_display(name: str) -> str:
     return _PROVIDER_NAMES.get(name) or (name.capitalize() if name else "")
 
 
+# ANSI/terminal escape sequences (CSI — incl. SGR mouse reports like "\x1b[<35;77;29M" —
+# OSC, and any bare ESC+char), plus stray control chars. A burst of mouse-motion reports
+# can reach the app as a Paste; without this they'd be inserted into the input verbatim.
+_ESC_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.")
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")   # controls except tab/newline/CR
+
+
+def _sanitize_pasted(text: str) -> str:
+    """Strip terminal escape sequences and stray control chars from pasted text, keeping
+    real text, tabs, and newlines. Guards the task input against mouse-report / escape
+    bursts a terminal may deliver as a paste."""
+    return _CTRL_RE.sub("", _ESC_SEQ_RE.sub("", text or ""))
+
+
 class TaskInput(TextArea):
     """A multiline task field where Enter submits and Shift+Enter (or Ctrl+J, a
     fallback for terminals that can't distinguish Shift+Enter from Enter) inserts a
@@ -95,6 +110,12 @@ class TaskInput(TextArea):
             self.insert("\n")
             return
         await super()._on_key(event)
+
+    async def _on_paste(self, event: events.Paste) -> None:
+        # Sanitize before insert: a terminal can deliver a burst of mouse-motion reports
+        # as a paste, which TextArea would otherwise dump into the field verbatim.
+        event.text = _sanitize_pasted(event.text)
+        await super()._on_paste(event)
 
 
 def render_diff(diff: str) -> Text:

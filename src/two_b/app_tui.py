@@ -37,36 +37,6 @@ from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
 from .tui import VISIBLE_STEPS
 
-
-def _disable_mouse() -> None:
-    """2B is fully keyboard-driven — scroll is Shift+↑/↓ and PageUp/PageDown, and every
-    action is a key — so it wants no mouse at all. Textual's driver enables mouse reporting
-    (incl. any-event motion, \\x1b[?1003h), which Terminal.app mishandles: the reports leak
-    into the input as text and flood the event loop, drowning keypresses so a running task's
-    confirmation can't be answered. Replace the driver's mouse-enable with one that enables
-    nothing and explicitly turns every mouse mode off (in case a prior app/subprocess left
-    one on), so the terminal stops reporting entirely. Idempotent; POSIX driver only."""
-    try:
-        from textual.drivers.linux_driver import LinuxDriver
-    except Exception:
-        return
-    if getattr(LinuxDriver._enable_mouse_support, "_2b_no_mouse", False):
-        return
-
-    def _no_mouse(self) -> None:
-        try:
-            for mode in ("1000", "1002", "1003", "1015", "1016", "1006"):
-                self.write(f"\x1b[?{mode}l")   # every mouse tracking/encoding mode OFF
-            self.flush()
-        except Exception:
-            pass
-
-    _no_mouse._2b_no_mouse = True
-    LinuxDriver._enable_mouse_support = _no_mouse
-
-
-_disable_mouse()
-
 # Mode indicator glyph + accent color (fixed hues that read on every theme).
 _MODE_STYLE = {
     MODE_ACCEPT: ("▶▶", "#A78BD0"),   # accept edits — purple

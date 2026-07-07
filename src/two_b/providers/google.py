@@ -6,12 +6,13 @@ functionResponse by the tool's NAME, not an id, so we resolve each result's
 tool_call_id back to the name via the tool_calls seen earlier in the
 conversation.
 """
+import json
 import os
 from typing import Callable
 
 from ..conversation import Conversation, Message, Role, ToolCall
 from ..toolspec import ToolSpec, to_gemini
-from .base import ProviderResponse, post_json
+from .base import ProviderResponse, post_json, post_stream
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 _MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
@@ -57,35 +58,63 @@ class GoogleProvider:
                 contents.append({"role": "user", "parts": [{"text": m.text or ""}]})
         return contents
 
-    def send(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...]) -> ProviderResponse:
-        # Send the key in the x-goog-api-key header (as the official SDK / Google guidance do)
-        # rather than a ?key= URL param, so the secret never lands in a URL (logs, tracing, export).
-        url = f"{BASE}/models/{model}:generateContent"
-        payload = {
+    def _payload(self, conversation: Conversation, tools: tuple[ToolSpec, ...]) -> dict:
+        return {
             "systemInstruction": {"parts": [{"text": conversation.system_prompt}]},
             "contents": self._contents(conversation),
             "tools": to_gemini(tools),
         }
-        raw = post_json(url, payload, headers={"x-goog-api-key": self.api_key}, provider=self.name)
-        cand = (raw.get("candidates") or [{}])[0]
-        parts = cand.get("content", {}).get("parts", []) or []
-        text_parts, calls = [], []
-        for p in parts:
+
+    # The key rides in the x-goog-api-key header (as the official SDK / Google guidance do)
+    # rather than a ?key= URL param, so the secret never lands in a URL (logs, tracing, export).
+    def _headers(self) -> dict:
+        return {"x-goog-api-key": self.api_key}
+
+    @staticmethod
+    def _read_parts(cand: dict, text_parts: list, calls: list) -> str:
+        """Pull text + functionCall parts out of one candidate; append to the accumulators
+        and return the text this candidate contributed (for streaming emission)."""
+        chunk_text = []
+        for p in cand.get("content", {}).get("parts", []) or []:
             if "text" in p:
-                text_parts.append(p["text"])
+                chunk_text.append(p["text"])
             elif "functionCall" in p:
                 fc = p["functionCall"]
                 calls.append(ToolCall.new(name=fc.get("name", ""), arguments=fc.get("args", {})))
+        joined = "".join(chunk_text)
+        if joined:
+            text_parts.append(joined)
+        return joined
+
+    def send(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...]) -> ProviderResponse:
+        url = f"{BASE}/models/{model}:generateContent"
+        raw = post_json(url, self._payload(conversation, tools), headers=self._headers(), provider=self.name)
+        text_parts, calls = [], []
+        self._read_parts((raw.get("candidates") or [{}])[0], text_parts, calls)
         text = "".join(text_parts).strip()
-        return ProviderResponse(
-            message=Message.assistant(text=text or None, tool_calls=calls),
-            raw=raw,
-        )
+        return ProviderResponse(message=Message.assistant(text=text or None, tool_calls=calls), raw=raw)
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
                on_text: Callable[[str], None]) -> ProviderResponse:
-        # Non-streaming fallback (SSE parsing not yet validated for this provider).
-        resp = self.send(conversation, model, tools)
-        if resp.message.text:
-            on_text(resp.message.text)
-        return resp
+        # Gemini SSE: :streamGenerateContent?alt=sse yields `data: {chunk}` lines, each a partial
+        # GenerateContentResponse. Emit text as it arrives; collect functionCall parts along the way.
+        url = f"{BASE}/models/{model}:streamGenerateContent?alt=sse"
+        text_parts: list = []
+        calls: list = []
+        last: dict = {}
+        for line in post_stream(url, self._payload(conversation, tools), headers=self._headers(), provider=self.name):
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            body = line[5:].strip()
+            if not body:
+                continue
+            try:
+                last = json.loads(body)
+            except ValueError:
+                continue
+            delta = self._read_parts((last.get("candidates") or [{}])[0], text_parts, calls)
+            if delta:
+                on_text(delta)
+        text = "".join(text_parts).strip()
+        return ProviderResponse(message=Message.assistant(text=text or None, tool_calls=calls), raw=last)

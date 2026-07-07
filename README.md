@@ -355,15 +355,4 @@ small as you keep it.
 
 ---
 
-## How it's built
-
-- **Python, standard library first.** The only real dependencies are `rich`, `prompt_toolkit`, and
-  `textual`. Every provider talks over `urllib` — no per-provider SDKs.
-- **A canonical conversation model** that each provider serializes fresh on every request. That
-  re-derivation is exactly what makes switching models mid-task safe.
-- **One worker thread per task**, emitting events into a queue the UI thread drains and renders — so
-  the tool code stays untouched off the main thread and one thread owns the terminal.
-- The five-tool schema is **frozen**. It's what makes small models reliable, and it isn't up for
-  redesign.
-
 Built for local models, kept on task.

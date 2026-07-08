@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time as _time
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -44,6 +45,46 @@ class ProviderError(RuntimeError):
         self.retryable = retryable
 
 
+# --- Abortable connections -------------------------------------------------
+# ESC/panic can't wake a thread blocked in a C-level socket read by flipping a
+# flag; it has to close the socket. Every live response registers here so
+# abort_all_connections() can close them all at once. A close mid-read raises
+# OSError/ValueError in the blocked thread, which the helpers translate to
+# _Cancelled when the caller's cancel Event is set.
+_active_conns: set = set()
+_conns_lock = threading.Lock()
+
+
+class _Cancelled(Exception):
+    """Raised by the HTTP helpers when their cancel Event is set — either before
+    connecting or because abort_all_connections() closed the socket mid-read. Not
+    a ProviderError, so stream_with_retry re-raises it immediately (never retries)."""
+
+
+def _register(resp) -> None:
+    with _conns_lock:
+        _active_conns.add(resp)
+
+
+def _unregister(resp) -> None:
+    with _conns_lock:
+        _active_conns.discard(resp)
+
+
+def abort_all_connections() -> None:
+    """Close every live HTTP response so any thread blocked reading one raises at
+    once. Called from the esc/panic path — makes cancellation immediate regardless
+    of provider or how long the model would otherwise take to respond."""
+    with _conns_lock:
+        conns = list(_active_conns)
+        _active_conns.clear()
+    for resp in conns:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+
 class Provider(Protocol):
     name: str
 
@@ -60,31 +101,12 @@ class Provider(Protocol):
 
 
 def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 600,
-              provider: str = "http") -> dict:
-    """POST JSON, return parsed JSON. Raises ProviderError with a useful message."""
-    data = json.dumps(payload).encode()
-    hdrs = {"Content-Type": "application/json", "User-Agent": _USER_AGENT}
-    if headers:
-        hdrs.update(headers)
-    req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode(errors="replace")[:500]
-        except Exception:
-            pass
-        raise ProviderError(provider, f"HTTP {e.code}: {body or e.reason}", retryable=(e.code == 429 or e.code >= 500)) from e
-    except urllib.error.URLError as e:
-        raise ProviderError(provider, f"connection failed: {e.reason}", retryable=True) from e
-
-
-def post_stream(url: str, payload: dict, headers: dict | None = None, timeout: int = 600,
-                provider: str = "http"):
-    """POST JSON and yield decoded response lines as they arrive (for streaming
-    NDJSON / SSE). Raises ProviderError on connection/HTTP failure."""
+              provider: str = "http", cancel=None) -> dict:
+    """POST JSON, return parsed JSON. Raises ProviderError with a useful message.
+    Honors a cancel Event: raises _Cancelled if it's already set, or if the socket
+    is closed mid-read by abort_all_connections()."""
+    if cancel is not None and cancel.is_set():
+        raise _Cancelled()
     data = json.dumps(payload).encode()
     hdrs = {"Content-Type": "application/json", "User-Agent": _USER_AGENT}
     if headers:
@@ -100,10 +122,60 @@ def post_stream(url: str, payload: dict, headers: dict | None = None, timeout: i
             pass
         raise ProviderError(provider, f"HTTP {e.code}: {body or e.reason}", retryable=(e.code == 429 or e.code >= 500)) from e
     except urllib.error.URLError as e:
+        if cancel is not None and cancel.is_set():
+            raise _Cancelled() from e
         raise ProviderError(provider, f"connection failed: {e.reason}", retryable=True) from e
-    with resp:
-        for raw in resp:
-            yield raw.decode("utf-8", errors="replace")
+    _register(resp)
+    try:
+        with resp:
+            return json.loads(resp.read())
+    except (OSError, ValueError) as e:
+        if cancel is not None and cancel.is_set():
+            raise _Cancelled() from e
+        raise ProviderError(provider, f"read failed: {e}", retryable=True) from e
+    finally:
+        _unregister(resp)
+
+
+def post_stream(url: str, payload: dict, headers: dict | None = None, timeout: int = 600,
+                provider: str = "http", cancel=None):
+    """POST JSON and yield decoded response lines as they arrive (for streaming
+    NDJSON / SSE). Raises ProviderError on connection/HTTP failure. Honors a cancel
+    Event: raises _Cancelled if it's already set, on each line, or if the socket is
+    closed mid-read by abort_all_connections()."""
+    if cancel is not None and cancel.is_set():
+        raise _Cancelled()
+    data = json.dumps(payload).encode()
+    hdrs = {"Content-Type": "application/json", "User-Agent": _USER_AGENT}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode(errors="replace")[:500]
+        except Exception:
+            pass
+        raise ProviderError(provider, f"HTTP {e.code}: {body or e.reason}", retryable=(e.code == 429 or e.code >= 500)) from e
+    except urllib.error.URLError as e:
+        if cancel is not None and cancel.is_set():
+            raise _Cancelled() from e
+        raise ProviderError(provider, f"connection failed: {e.reason}", retryable=True) from e
+    _register(resp)
+    try:
+        with resp:
+            for raw in resp:
+                if cancel is not None and cancel.is_set():
+                    raise _Cancelled()
+                yield raw.decode("utf-8", errors="replace")
+    except (OSError, ValueError) as e:
+        if cancel is not None and cancel.is_set():
+            raise _Cancelled() from e
+        raise ProviderError(provider, f"stream read failed: {e}", retryable=True) from e
+    finally:
+        _unregister(resp)
 
 
 def stream_with_retry(provider, conversation, model, tools, on_text, *, retries=3, cancel=None):

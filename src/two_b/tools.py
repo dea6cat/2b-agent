@@ -27,7 +27,12 @@ READ_ONLY_GIT = {"status", "diff", "log", "show", "blame", "ls-files",
                  "rev-parse", "shortlog", "rev-list", "diff-tree", "describe"}
 _RANGE_RE = re.compile(r"^(?P<base>.+):(?P<start>\d+)-(?P<end>\d+)$")   # "path:90-120"
 _MATCH_SCAN_CAP = 40   # stop walking once we've seen this many basename hits
-SKIP_DIRS = {".git", "build", ".dart_tool", "node_modules", ".idea", ".aider.tags.cache.v4"}
+SKIP_DIRS = {".git", "build", ".dart_tool", "node_modules", ".idea", ".aider.tags.cache.v4",
+             # Python virtualenvs and caches: dependency/generated trees, not project
+             # source — walking them pollutes search/list and lets a basename fallback
+             # resolve an imprecise read to a site-package file.
+             ".venv", "venv", "site-packages", "__pycache__",
+             ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".eggs"}
 SKIP_DIR_PREFIXES = (".aider",)  # e.g. .aider.tags.cache.v4, any future .aider* cache dirs
 BINARY_PROBE_BYTES = 8192
 MAX_SEARCH_MATCHES = 30

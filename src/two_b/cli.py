@@ -388,6 +388,14 @@ def main() -> None:
             console.print(f"{m}: {win} tokens (num_ctx 2B will pin on this machine)")
         raise SystemExit(0)
 
+    # License acknowledgment gate — before the agent actually runs. Metadata/maintenance
+    # commands above already exited, so this fires only when using the agent. --yes counts
+    # as acceptance (also how install.sh's non-interactive path accepts).
+    from . import license as _license
+    if not _license.ensure_accepted(assume_yes=args.yes, interactive=sys.stdin.isatty(),
+                                     out=console.print):
+        raise SystemExit(1)
+
     try:
         if args.model:
             model = args.model

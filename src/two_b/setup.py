@@ -464,6 +464,13 @@ def run(opts: dict | None = None) -> int:
     opts = opts or {}
     emit = print
 
+    # 0) license acknowledgment — must accept before any onboarding (covers every install
+    # channel, since brew/curl/pip all funnel into `2b setup`). --yes counts as acceptance.
+    from . import license as _license
+    if not _license.ensure_accepted(assume_yes=bool(opts.get("yes")),
+                                     interactive=sys.stdin.isatty(), out=emit):
+        return 1
+
     # 1) optional clean-install of other agentic tools
     clean = opts.get("clean")
     if clean == "yes" or (clean is None and _confirm(

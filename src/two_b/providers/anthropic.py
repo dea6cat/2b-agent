@@ -6,13 +6,14 @@ model earlier in the conversation) is dropped on serialize — you can't fabrica
 Anthropic's signed thinking blocks, and every provider ignores foreign reasoning
 traces anyway.
 """
+import json
 import os
 from typing import Callable
 
 from .. import catalog
 from ..conversation import Conversation, Message, Role, ToolCall
 from ..toolspec import ToolSpec, to_anthropic
-from .base import ProviderResponse, post_json
+from .base import ProviderResponse, post_json, post_stream
 
 API_URL = "https://api.anthropic.com/v1/messages"
 _MODELS = ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-fable-5"]
@@ -87,11 +88,77 @@ class AnthropicProvider:
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None]) -> ProviderResponse:
-        # Non-streaming fallback (SSE parsing not yet validated for this provider):
-        # send once, then emit the full text through the same delta path so the
-        # UI treats it uniformly.
-        resp = self.send(conversation, model, tools)
-        if resp.message.text:
-            on_text(resp.message.text)
-        return resp
+               on_text: Callable[[str], None], *, cancel=None) -> ProviderResponse:
+        # Real SSE: emit text deltas as they arrive and assemble tool_use blocks
+        # from input_json_delta fragments. Sharing post_stream means esc closes the
+        # socket and aborts immediately, same as every other provider.
+        tools_json = to_anthropic(tools)
+        if tools_json:
+            tools_json[-1] = {**tools_json[-1], "cache_control": {"type": "ephemeral"}}
+        payload = {
+            "model": model,
+            "max_tokens": catalog.max_tokens(model, 4096),
+            "system": [{"type": "text", "text": conversation.system_prompt,
+                        "cache_control": {"type": "ephemeral"}}],
+            "tools": tools_json,
+            "messages": self._messages(conversation),
+            "stream": True,
+        }
+        text_parts: list[str] = []
+        blocks: dict[int, dict] = {}   # index -> {"type", "name", "id", "json"}
+        stop_reason = None
+        prompt_tokens = None
+        for line in post_stream(API_URL, payload, headers=self._headers(),
+                                provider=self.name, cancel=cancel):
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data:
+                continue
+            try:
+                evt = json.loads(data)
+            except ValueError:
+                continue
+            etype = evt.get("type")
+            if etype == "message_start":
+                usage = (evt.get("message") or {}).get("usage") or {}
+                prompt_tokens = usage.get("input_tokens", prompt_tokens)
+            elif etype == "content_block_start":
+                idx = evt.get("index", 0)
+                cb = evt.get("content_block") or {}
+                blocks[idx] = {"type": cb.get("type"), "name": cb.get("name", ""),
+                               "id": cb.get("id"), "json": ""}
+            elif etype == "content_block_delta":
+                idx = evt.get("index", 0)
+                delta = evt.get("delta") or {}
+                dtype = delta.get("type")
+                if dtype == "text_delta":
+                    chunk = delta.get("text", "")
+                    if chunk:
+                        text_parts.append(chunk)
+                        on_text(chunk)
+                elif dtype == "input_json_delta":
+                    slot = blocks.setdefault(idx, {"type": "tool_use", "name": "", "id": None, "json": ""})
+                    slot["json"] += delta.get("partial_json", "")
+            elif etype == "message_delta":
+                stop_reason = (evt.get("delta") or {}).get("stop_reason", stop_reason)
+            elif etype == "message_stop":
+                break
+        calls = []
+        for idx in sorted(blocks):
+            b = blocks[idx]
+            if b.get("type") != "tool_use":
+                continue
+            try:
+                args = json.loads(b["json"]) if b["json"] else {}
+            except ValueError:
+                args = {}
+            calls.append(ToolCall.new(name=b["name"], arguments=args, id=b["id"]))
+        text = "".join(text_parts).strip()
+        return ProviderResponse(
+            message=Message.assistant(text=text or None, tool_calls=calls),
+            raw={},
+            done_reason=stop_reason,
+            prompt_tokens=prompt_tokens,
+        )

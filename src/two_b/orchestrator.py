@@ -37,7 +37,8 @@ from typing import Any, Callable
 
 from . import catalog, changelog, cmdguard, conversation, diagnostics, mcp_client, planparse, registry, tools, verify
 from .conversation import Conversation, Message, Role, ToolResult
-from .providers.base import ProviderError, stream_with_retry
+from .providers import base as _provider_base
+from .providers.base import ProviderError, _Cancelled, abort_all_connections, stream_with_retry
 from .session import PendingConfirmation, Session, Task, TaskState
 from .toolspec import TOOL_SPECS, specs_for, DELEGATE_SPEC
 
@@ -411,6 +412,22 @@ def _continuity_effective(session, is_local: bool) -> bool:
     return not is_local
 
 
+def abort_all(session: Session) -> int:
+    """Global panic: set the cancel flag on every running task (foreground AND
+    backgrounded), clear any pending steer, and close all live HTTP connections so
+    parked model calls abort at once. Subprocess tools then die within ~100ms via
+    their own cancel poll. Returns how many tasks were aborted."""
+    tasks = [t for t in session.tasks
+             if t.state in (TaskState.ACTIVE, TaskState.BACKGROUNDED)]
+    for t in tasks:
+        t.clear_steer()
+        t.cancel_flag.set()
+    # Looked up via the module (not the re-exported name above) so tests can
+    # monkeypatch base.abort_all_connections and have this pick it up live.
+    _provider_base.abort_all_connections()
+    return len(tasks)
+
+
 def teardown_helpers() -> None:
     """Hard-stop the long-lived helper servers on esc. Local subprocesses die via
     the cancel flag + process-group kill (see tools._run_cancellable); this tears
@@ -636,7 +653,7 @@ def _strip_leading_orphan_results(tail: list[Message]) -> list[Message]:
     return tail[i:]
 
 
-def compact_conversation(conv: Conversation, provider, model: str, touched=None, breadcrumb: str = ""):
+def compact_conversation(conv: Conversation, provider, model: str, touched=None, breadcrumb: str = "", cancel=None):
     """Replace all but the recent tail of `conv` with a single structured summary message.
     Returns the list of dropped (folded-away) messages on success — truthy — or False if
     nothing was compacted. The cut lands on an assistant message so tool_call/tool_result
@@ -673,7 +690,7 @@ def compact_conversation(conv: Conversation, provider, model: str, touched=None,
     else:
         summ.append(Message.user(_render_transcript(body)))
     buf: list[str] = []
-    resp = provider.stream(summ, model, (), lambda c: buf.append(c))
+    resp = provider.stream(summ, model, (), lambda c: buf.append(c), cancel=cancel)
     summary = "".join(buf).strip() or (resp.message.text or resp.message.thinking or "").strip()
     if not summary:
         return False
@@ -718,7 +735,8 @@ def _maybe_compact(conv: Conversation, provider, model: str, task: Task,
         from . import persist
         archiving = persist.enabled()
         dropped = compact_conversation(conv, provider, model, touched=touched,
-                                       breadcrumb=_ARCHIVE_BREADCRUMB if archiving else "")
+                                       breadcrumb=_ARCHIVE_BREADCRUMB if archiving else "",
+                                       cancel=task.cancel_flag)
         if dropped:
             if archiving:
                 # Skip the leading prior recap — it's a summary, not a real turn to recall.
@@ -1498,7 +1516,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             req_conv = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
             try:
                 resp = stream_with_retry(provider, req_conv, model, active_specs, on_text, cancel=task.cancel_flag)
-            except _Interrupted:
+            except (_Interrupted, _Cancelled):
                 _finish_stopped(task, on_event)
                 return
             except Exception as e:
@@ -1703,12 +1721,14 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                            else "(reached the tool-call limit without a final answer)")
                 on_event(AgentEvent(EventType.ASSISTANT_DELTA, task.id, {"chunk": txt}))
             on_event(AgentEvent(EventType.TASK_DONE, task.id))
-        except _Interrupted:
+        except (_Interrupted, _Cancelled):
             _finish_stopped(task, on_event)
         except Exception as e:
             _finish_failed(task, on_event, f"max turns reached; final attempt failed: {_classify_exc(e)}")
-    except _Interrupted:
-        # Net for any interrupt that escaped an inner handler — finish quietly, not red.
+    except (_Interrupted, _Cancelled):
+        # Net for any interrupt/cancel that escaped an inner handler — finish quietly,
+        # not red. Unreachable today (both stream paths catch these locally), but a
+        # panic button must never surface an abort as an error, so the net holds too.
         _finish_stopped(task, on_event)
     except Exception as e:
         # The never-throw guarantee: any exception that escaped the loop body (e.g. a

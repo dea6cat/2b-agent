@@ -69,7 +69,7 @@ class Consumption(_Base):
             def __init__(self): self.i = 0
             def is_available(self): return True
             def list_models(self): return ["m"]
-            def stream(self, conv, model, tools, on_text):
+            def stream(self, conv, model, tools, on_text, *, cancel=None):
                 self.i += 1
                 if self.i == 1:
                     task.push_steer("actually, focus on error handling")
@@ -95,7 +95,7 @@ class Consumption(_Base):
             name, api_key = "fake", "x"
             def is_available(self): return True
             def list_models(self): return ["m"]
-            def stream(self, conv, model, tools, on_text):
+            def stream(self, conv, model, tools, on_text, *, cancel=None):
                 on_text("done")
                 return ProviderResponse(message=Message.assistant(text="done"), raw={})
 

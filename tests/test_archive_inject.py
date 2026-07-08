@@ -128,7 +128,7 @@ class TailIntegrity(unittest.TestCase):
 
 
 class _FakeSummarizer:
-    def stream(self, conv, model, tools, on_text):
+    def stream(self, conv, model, tools, on_text, *, cancel=None):
         from two_b.providers.base import ProviderResponse
         on_text("GOAL: x\nDONE:\n1. did a\nOUTSTANDING: y\nSTATE: z")
         return ProviderResponse(message=Message.assistant(text="ok"), raw={})

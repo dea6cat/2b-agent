@@ -643,27 +643,27 @@ class TwoBApp(App):
         self.query_one("#log", VerticalScroll).scroll_down()    # shift+↓ — one line
 
     def action_interrupt(self, announce: bool = True) -> bool:
-        """Esc handler. Returns True only if it actually aborted a running task (so the
-        caller — e.g. double-Ctrl-C — can report honestly). If a scrollback search is open,
-        esc exits that instead and returns False. `announce=False` suppresses the "stopping…"
-        line so a caller can print its own combined message."""
+        """Esc handler — a global panic button. Aborts every running task (foreground
+        and backgrounded): sets each cancel flag, closes all live model connections so
+        generation stops immediately, and tears down the LSP/MCP helpers off-thread.
+        Returns True only if it actually aborted at least one task (so the caller — e.g.
+        double-Ctrl-C — can report honestly). If a scrollback search is open, esc exits
+        that instead and returns False. `announce=False` suppresses the 'stopping…' line."""
         if self._history is not None:
             self._exit_history_search()
             return False
-        # P11: snap scrollback to the bottom first, so the "stopping…" line is in view
-        # (a long tool run may have left the user scrolled up).
+        # P11: snap scrollback to the bottom first, so the "stopping…" line is in view.
         self.query_one("#log", VerticalScroll).scroll_end(animate=False)
-        t = self.session.active_task
-        if t is not None and t.state == TaskState.ACTIVE:
-            t.clear_steer()                     # hard stop drops any pending mid-turn steer
-            t.cancel_flag.set()                 # orchestrator aborts the stream; subprocess tools killpg within ~100ms
-            # Tear down the long-lived helpers (LSP/MCP) off the UI thread so a slow
-            # server can't freeze the interface while we stop everything.
-            threading.Thread(target=orchestrator.teardown_helpers, daemon=True).start()
-            if announce:
-                self.log_write(Text("stopping…", style=self.c("faint")))
-            return True
-        return False
+        n = orchestrator.abort_all(self.session)
+        if n == 0:
+            return False
+        # Tear down the long-lived helpers (LSP/MCP) off the UI thread so a slow
+        # server can't freeze the interface while we stop everything.
+        threading.Thread(target=orchestrator.teardown_helpers, daemon=True).start()
+        if announce:
+            msg = "stopping…" if n == 1 else f"stopping everything ({n} tasks)…"
+            self.log_write(Text(msg, style=self.c("faint")))
+        return True
 
     def action_sigint(self) -> None:
         """P11 double-Ctrl-C: first press aborts the running task (if any) and arms a ~1.5s

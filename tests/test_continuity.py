@@ -30,7 +30,7 @@ class _RecordingProvider:
     def list_models(self):
         return ["m"]
 
-    def stream(self, conv, model, tools, on_text):
+    def stream(self, conv, model, tools, on_text, *, cancel=None):
         self.calls.append([(m.role.value, (m.text or "")) for m in conv.messages])
         n = len(self.calls)
         return ProviderResponse(message=Message.assistant(text=f"answer{n}"), raw={})

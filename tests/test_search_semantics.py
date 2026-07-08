@@ -127,5 +127,32 @@ class ReadOutline(Project):
         self.assertIn("class C:", out)                           # content itself intact
 
 
+class SkipsDependencyDirs(Project):
+    """The project walk (search/list and the read basename fallback) must not descend
+    into virtualenv/cache trees, or an imprecise read resolves to a site-package file
+    and search/list fill with dependency noise."""
+
+    def test_basename_fallback_ignores_venv_matches(self):
+        # A dependency file whose basename collides with the given name — the only
+        # place "helper.py" exists — must NOT be resolved when it lives under .venv.
+        self._write(".venv/lib/python3.11/site-packages/pkg/helper.py", "x = 1\n")
+        self.assertEqual(tools._find_by_basename("helper.py", "helper.py"), [])
+        self.assertIsNone(tools.resolve_read_path("/no/such/helper.py"))
+
+    def test_real_project_file_still_wins_over_venv_namesake(self):
+        # A real project file and a venv namesake: only the project one is found.
+        self._write("app/helper.py", "y = 2\n")
+        self._write(".venv/lib/python3.11/site-packages/pkg/helper.py", "x = 1\n")
+        self.assertEqual(tools._find_by_basename("helper.py", "helper.py"),
+                         [os.path.join("app", "helper.py")])
+
+    def test_search_skips_venv(self):
+        self._write("app/mod.py", "TOKEN = 1\n")
+        self._write(".venv/lib/python3.11/site-packages/pkg/mod.py", "TOKEN = 2\n")
+        out = tools.do_search_files("TOKEN", ".")
+        self.assertIn(os.path.join("app", "mod.py"), out)
+        self.assertNotIn(".venv", out)
+
+
 if __name__ == "__main__":
     unittest.main()

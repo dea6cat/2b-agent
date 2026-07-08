@@ -19,7 +19,7 @@ class _FakeSummarizer:
     def __init__(self, out="GOAL: build x\nDONE:\n1. did a\nOUTSTANDING: y\nSTATE: z"):
         self.out, self.seen_system, self.seen_input = out, None, None
 
-    def stream(self, conv, model, tools, on_text):
+    def stream(self, conv, model, tools, on_text, *, cancel=None):
         self.seen_system = conv.system_prompt
         self.seen_input = conv.messages[0].text if conv.messages else ""
         on_text(self.out)

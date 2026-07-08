@@ -5,7 +5,7 @@ class TwobAgent < Formula
   homepage "https://github.com/dea6cat/2b-agent"
   url "https://files.pythonhosted.org/packages/c7/95/0fc1fe77b6fa21c23cf893142d1d6abba715132406a78856d678e00d022d/2b_agent-1.1.1.tar.gz"
   sha256 "0e8288ebbbbce44f407a41602feb1c0a3632a3f7b4aed35936e092c9f6dc5744"
-  license "Apache-2.0"
+  license "PolyForm-Noncommercial-1.0.0"
 
   depends_on "rust" => :build # cryptography, pydantic-core, rpds-py build from source
   depends_on "openssl@3" # cryptography links against it

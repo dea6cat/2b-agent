@@ -186,7 +186,9 @@ def stream_with_retry(provider, conversation, model, tools, on_text, *, retries=
     delay = 1.0
     for attempt in range(retries + 1):
         try:
-            return provider.stream(conversation, model, tools, on_text)
+            return provider.stream(conversation, model, tools, on_text, cancel=cancel)
+        except _Cancelled:
+            raise                                        # user aborted — never retry
         except ProviderError as e:
             cancelled = cancel is not None and cancel.is_set()
             if not e.retryable or cancelled:

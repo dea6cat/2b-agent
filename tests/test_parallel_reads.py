@@ -132,7 +132,7 @@ class _Scripted:
     def list_models(self):
         return ["m"]
 
-    def stream(self, conv, model, tools_, on_text):
+    def stream(self, conv, model, tools_, on_text, *, cancel=None):
         r = self._responses[min(self._i, len(self._responses) - 1)]
         self._i += 1
         if r.message.text:

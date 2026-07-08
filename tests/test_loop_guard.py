@@ -129,7 +129,7 @@ class _StuckProvider:
     def list_models(self):
         return ["m"]
 
-    def stream(self, conv, model, tools, on_text):
+    def stream(self, conv, model, tools, on_text, *, cancel=None):
         return ProviderResponse(message=Message.assistant(
             tool_calls=[ToolCall.new("read_file", {"path": "nope.txt"})]), raw={})
 
@@ -148,7 +148,7 @@ class _BatchLooper:
     def list_models(self):
         return ["m"]
 
-    def stream(self, conv, model, tools, on_text):
+    def stream(self, conv, model, tools, on_text, *, cancel=None):
         self.last_conv = conv
         return ProviderResponse(message=Message.assistant(tool_calls=[
             ToolCall.new("read_file", {"path": "a.txt"}),

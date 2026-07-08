@@ -228,7 +228,7 @@ class OllamaProvider:
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None]) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None) -> ProviderResponse:
         payload = {
             "model": model,
             "messages": self._messages(conversation),
@@ -240,7 +240,7 @@ class OllamaProvider:
         content, thinking, calls = [], [], []
         done_reason = prompt_tokens = None
         for line in post_stream(f"{self.host}/api/chat", payload, headers=self._headers(),
-                                provider=self.name):
+                                provider=self.name, cancel=cancel):
             line = line.strip()
             if not line:
                 continue

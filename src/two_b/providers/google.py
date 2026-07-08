@@ -95,14 +95,15 @@ class GoogleProvider:
         return ProviderResponse(message=Message.assistant(text=text or None, tool_calls=calls), raw=raw)
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None]) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None) -> ProviderResponse:
         # Gemini SSE: :streamGenerateContent?alt=sse yields `data: {chunk}` lines, each a partial
         # GenerateContentResponse. Emit text as it arrives; collect functionCall parts along the way.
         url = f"{BASE}/models/{model}:streamGenerateContent?alt=sse"
         text_parts: list = []
         calls: list = []
         last: dict = {}
-        for line in post_stream(url, self._payload(conversation, tools), headers=self._headers(), provider=self.name):
+        for line in post_stream(url, self._payload(conversation, tools), headers=self._headers(),
+                                provider=self.name, cancel=cancel):
             line = line.strip()
             if not line.startswith("data:"):
                 continue

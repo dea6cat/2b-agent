@@ -113,7 +113,7 @@ class _EditThenFinalize:
     def list_models(self):
         return ["m"]
 
-    def stream(self, conv, model, tools, on_text):
+    def stream(self, conv, model, tools, on_text, *, cancel=None):
         self.last_conv = conv
         self.i += 1
         if self.i == 1:
@@ -158,7 +158,7 @@ class VerifyNudge(unittest.TestCase):
             f.write("final a = 1;\n")
 
         class _EditThenEmpty(_EditThenFinalize):
-            def stream(self, conv, model, tools, on_text):
+            def stream(self, conv, model, tools, on_text, *, cancel=None):
                 self.last_conv = conv
                 self.i += 1
                 if self.i == 1:

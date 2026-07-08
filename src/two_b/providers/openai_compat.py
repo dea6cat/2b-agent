@@ -123,7 +123,7 @@ class OpenAICompatProvider:
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None]) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None) -> ProviderResponse:
         payload = {
             "model": model,
             "messages": self._messages(conversation),
@@ -133,7 +133,7 @@ class OpenAICompatProvider:
         content = []
         by_index: dict[int, dict] = {}   # assemble tool_calls from streamed fragments
         for line in post_stream(f"{self.base_url}/chat/completions", payload,
-                                headers=self._headers(), provider=self.name):
+                                headers=self._headers(), provider=self.name, cancel=cancel):
             line = line.strip()
             if not line or not line.startswith("data:"):
                 continue

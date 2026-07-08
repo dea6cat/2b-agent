@@ -1725,8 +1725,10 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             _finish_stopped(task, on_event)
         except Exception as e:
             _finish_failed(task, on_event, f"max turns reached; final attempt failed: {_classify_exc(e)}")
-    except _Interrupted:
-        # Net for any interrupt that escaped an inner handler — finish quietly, not red.
+    except (_Interrupted, _Cancelled):
+        # Net for any interrupt/cancel that escaped an inner handler — finish quietly,
+        # not red. Unreachable today (both stream paths catch these locally), but a
+        # panic button must never surface an abort as an error, so the net holds too.
         _finish_stopped(task, on_event)
     except Exception as e:
         # The never-throw guarantee: any exception that escaped the loop body (e.g. a

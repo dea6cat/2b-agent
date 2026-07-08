@@ -68,6 +68,10 @@ _MAX_SECTION = 4000
 
 
 def delegate(tasks, provider, model, read_cap=None, on_event=None, cancel=None, read_only=False) -> tuple[str, list]:
+    # NOTE: `delegate` is not yet dispatched from the interactive loop (no branch in
+    # orchestrator._dispatch_tool). When it is wired in, the caller MUST pass the parent
+    # task's cancel_flag as `cancel` here — otherwise ESC's abort_all() won't stop in-flight
+    # sub-agents (a closed socket would surface as a retryable error and reconnect).
     tasks = [t for t in (tasks or []) if isinstance(t, dict) and t.get("goal")]
     if not tasks:
         return "error: delegate needs at least one {role, goal} task", []

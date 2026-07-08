@@ -37,7 +37,8 @@ from typing import Any, Callable
 
 from . import catalog, changelog, cmdguard, conversation, diagnostics, mcp_client, planparse, registry, tools, verify
 from .conversation import Conversation, Message, Role, ToolResult
-from .providers.base import ProviderError, _Cancelled, stream_with_retry
+from .providers import base as _provider_base
+from .providers.base import ProviderError, _Cancelled, abort_all_connections, stream_with_retry
 from .session import PendingConfirmation, Session, Task, TaskState
 from .toolspec import TOOL_SPECS, specs_for, DELEGATE_SPEC
 
@@ -409,6 +410,22 @@ def _continuity_effective(session, is_local: bool) -> bool:
     if override is not None:
         return override
     return not is_local
+
+
+def abort_all(session: Session) -> int:
+    """Global panic: set the cancel flag on every running task (foreground AND
+    backgrounded), clear any pending steer, and close all live HTTP connections so
+    parked model calls abort at once. Subprocess tools then die within ~100ms via
+    their own cancel poll. Returns how many tasks were aborted."""
+    tasks = [t for t in session.tasks
+             if t.state in (TaskState.ACTIVE, TaskState.BACKGROUNDED)]
+    for t in tasks:
+        t.clear_steer()
+        t.cancel_flag.set()
+    # Looked up via the module (not the re-exported name above) so tests can
+    # monkeypatch base.abort_all_connections and have this pick it up live.
+    _provider_base.abort_all_connections()
+    return len(tasks)
 
 
 def teardown_helpers() -> None:

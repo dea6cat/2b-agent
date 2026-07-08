@@ -742,8 +742,10 @@ from two_b import orchestrator  # noqa: E402
 class CancelMapping(unittest.TestCase):
     def test_run_task_source_maps_cancelled_to_stopped(self):
         # Guard: both stream paths must catch _Cancelled and route to _finish_stopped.
+        # (Written as `except (_Interrupted, _Cancelled)`, so assert on the name, not the
+        # exact clause text, and require it in both stream paths.)
         src = inspect.getsource(orchestrator.run_task)
-        self.assertIn("except _Cancelled", src)
+        self.assertGreaterEqual(src.count("_Cancelled"), 2, "both stream paths must catch _Cancelled")
         # And _Cancelled must be imported so the except can reference it.
         self.assertTrue(hasattr(orchestrator, "_Cancelled"))
 

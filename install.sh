@@ -43,6 +43,7 @@ PATH="$(uv tool dir --bin 2>/dev/null || echo "$HOME/.local/bin"):$PATH"; export
 
 # 3) onboarding lives in the tool (single source of truth). Feed /dev/tty so prompts
 #    work even when this script is piped from `curl | sh`; otherwise run non-interactive.
+log "2B is licensed under PolyForm Noncommercial 1.0.0 — free for noncommercial use; commercial use needs a license (https://polyformproject.org/licenses/noncommercial/1.0.0). Setup will ask you to accept."
 log "Running 2B setup…"
 if [ -r /dev/tty ]; then
   2b setup "$@" < /dev/tty

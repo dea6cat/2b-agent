@@ -4,7 +4,7 @@ dynamic = ["version"]                    # single source of truth: two_b.__versi
 description = "A local-first coding agent that keeps small local models focused instead of hallucinating."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 # Floors are the earliest releases that officially list Python 3.14 support
 # (rich 14.2, textual 6.3, mcp 1.28). prompt_toolkit is pure-Python with no
 # upper Python cap; 3.0.52 is the current release. All still support 3.11.

@@ -353,6 +353,17 @@ small as you keep it.
   mouse drag selects what's on screen, not scrolled-off history. For a classic inline REPL, run
   `2b --classic`.
 
+## License & privacy
+
+2B is source-available under the **PolyForm Noncommercial License 1.0.0** — free for
+noncommercial use; commercial use needs a separate license (see [`LICENSE`](LICENSE), or open an
+issue). On first run you're asked to accept it once.
+
+2B is local-first and has **no telemetry**. With a local model your code stays on your machine;
+with a cloud provider your prompts and the files the agent reads are sent to that provider under
+their terms. Full details — what's stored, where, and the opt-out environment variables — are in
+[`PRIVACY.md`](PRIVACY.md).
+
 ---
 
 Built for local models, kept on task.

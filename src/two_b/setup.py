@@ -464,6 +464,20 @@ def run(opts: dict | None = None) -> int:
     opts = opts or {}
     emit = print
 
+    # 0) license acknowledgment — must accept before any onboarding (covers every install
+    # channel, since brew/curl/pip all funnel into `2b setup`). --yes counts as acceptance;
+    # an explicit 'n' uninstalls 2B, Enter/anything else just stops (asked again next run).
+    from . import license as _license
+
+    def _decline_uninstall() -> None:
+        from . import uninstall
+        raise SystemExit(uninstall.run(emit, lambda _p: True, assume_yes=True))
+
+    if not _license.ensure_accepted(assume_yes=bool(opts.get("yes")),
+                                    interactive=sys.stdin.isatty(), out=emit,
+                                    on_decline=_decline_uninstall):
+        return 1
+
     # 1) optional clean-install of other agentic tools
     clean = opts.get("clean")
     if clean == "yes" or (clean is None and _confirm(

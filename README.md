@@ -104,7 +104,7 @@ integrations are opt-in individually; older parts of a long conversation get aut
 summarized as space runs low; and sessions are saved so they can be resumed later. Recent changes
 can be undone.
 
-A few distinct modes**, switchable on demand: one that confirms before writing, one that applies
+A few distinct modes, switchable on demand: one that confirms before writing, one that applies
 changes automatically, and one that only investigates and proposes without making any changes.
 ---
 

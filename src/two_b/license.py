@@ -23,7 +23,7 @@ _NOTICE = (
     f"Commercial use requires a separate license — open an issue at {CONTACT_URL} to arrange one.\n"
     f"Full terms: LICENSE / {LICENSE_URL}"
 )
-_PROMPT = "Accept the PolyForm Noncommercial license and use 2B? [y/N] "
+_PROMPT = "Use 2B under this license?  [y] accept · [n] uninstall 2B · [Enter] cancel: "
 
 
 def accepted() -> bool:
@@ -37,13 +37,18 @@ def record() -> None:
 
 
 def ensure_accepted(*, assume_yes: bool, interactive: bool,
-                    out: Callable[[str], None] = print) -> bool:
-    """Return True if the user may proceed, False if they must be stopped.
+                    out: Callable[[str], None] = print,
+                    on_decline: Callable[[], None] | None = None) -> bool:
+    """Validate the license gate. Returns True if the user may proceed, False otherwise.
 
-    Prompts only on the first run per license version. `assume_yes` (the --yes flag,
-    which install.sh also passes) counts as acceptance. Interactive runs prompt with a
-    default of No — the user must type 'y'. A non-interactive run without --yes cannot
-    consent, so it's blocked with a hint."""
+    Checked on every run: once accepted it returns True silently, so it never nags. When
+    acceptance is missing it prompts:
+      - 'y'/'yes'      -> record acceptance, proceed.
+      - 'n'/'no'       -> explicit decline: call `on_decline` (which uninstalls 2B), stop.
+      - Enter/anything -> cancel: do nothing destructive, stop, ask again next run.
+    `assume_yes` (the --yes flag, which install.sh passes) counts as acceptance. A
+    non-interactive run without --yes cannot consent, so it stops with a hint — and never
+    uninstalls (a stray CI run must not remove the tool)."""
     if accepted():
         return True
     out(_NOTICE)
@@ -58,7 +63,12 @@ def ensure_accepted(*, assume_yes: bool, interactive: bool,
         if ans in ("y", "yes"):
             record()
             return True
-        out("License not accepted — 2B will not run.")
+        if ans in ("n", "no"):
+            out("License declined — removing 2B.")
+            if on_decline is not None:
+                on_decline()          # uninstall; may exit the process
+            return False
+        out("Not accepted — exiting without changes. You'll be asked again next run.")
         return False
     out("Non-interactive run: pass --yes to accept the license (see LICENSE), then re-run.")
     return False

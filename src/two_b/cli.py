@@ -388,12 +388,18 @@ def main() -> None:
             console.print(f"{m}: {win} tokens (num_ctx 2B will pin on this machine)")
         raise SystemExit(0)
 
-    # License acknowledgment gate — before the agent actually runs. Metadata/maintenance
-    # commands above already exited, so this fires only when using the agent. --yes counts
-    # as acceptance (also how install.sh's non-interactive path accepts).
+    # License acknowledgment gate — validated on every run before the agent (incl. chat).
+    # Metadata/maintenance commands above already exited, so this fires only when using the
+    # agent. --yes counts as acceptance (also how install.sh accepts non-interactively). An
+    # explicit 'n' uninstalls 2B; Enter/anything else just exits (asked again next run).
     from . import license as _license
+
+    def _decline_uninstall() -> None:
+        from . import uninstall
+        raise SystemExit(uninstall.run(console.print, lambda _p: True, assume_yes=True))
+
     if not _license.ensure_accepted(assume_yes=args.yes, interactive=sys.stdin.isatty(),
-                                     out=console.print):
+                                    out=console.print, on_decline=_decline_uninstall):
         raise SystemExit(1)
 
     try:

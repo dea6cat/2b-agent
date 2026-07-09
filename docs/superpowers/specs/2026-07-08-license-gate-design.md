@@ -37,7 +37,8 @@ Single responsibility: the acknowledgment gate.
   ask · link).
 - `accepted() -> bool` → `config.get_prefs().get("license_accepted") == LICENSE_ID`
 - `record() -> None` → `config.set_pref("license_accepted", LICENSE_ID)`
-- `ensure_accepted(*, assume_yes: bool, interactive: bool, out: Callable[[str], None]) -> bool`
+- `ensure_accepted(*, assume_yes: bool, interactive: bool, out: Callable[[str], None], on_decline: Callable[[], None] | None = None) -> bool`
+  - Validated on **every run** (cheap prefs read); once accepted it returns True silently, so it never nags.
 
 `out` is an injected print function (so tests capture output and the caller controls
 formatting — `cli.main` passes `console.print`, `setup` its own printer).
@@ -47,16 +48,27 @@ formatting — `cli.main` passes `console.print`, `setup` its own printer).
 1. `accepted()` → return `True` immediately, print nothing (genuinely once).
 2. Print the notice.
 3. `assume_yes` → `record()`, return `True`. (Covers `install.sh`'s `2b setup --yes` and `2b --yes`.)
-4. `interactive` (TTY) → prompt `Accept the PolyForm Noncommercial license and use 2B? [y/N] `.
-   - Input `y`/`yes` (case-insensitive) → `record()`, return `True`.
-   - Anything else (incl. bare Enter) → print "License not accepted — 2B will not run." → return `False`.
-   - `EOFError` → treated as decline → `False`.
-5. Non-interactive without `--yes` → print "Non-interactive: pass --yes to accept the license
-   (see LICENSE / the URL above)." → return `False`.
+4. `interactive` (TTY) → prompt `Use 2B under this license?  [y] accept · [n] uninstall 2B · [Enter] cancel: `.
+   - `y`/`yes` (case-insensitive) → `record()`, return `True`.
+   - `n`/`no` → **explicit decline**: print "License declined — removing 2B.", call `on_decline()`
+     (which runs the uninstall), return `False`.
+   - Anything else, bare Enter, or `EOFError` → **cancel**: print "Not accepted — exiting without
+     changes. You'll be asked again next run.", return `False`. Does **not** uninstall.
+5. Non-interactive without `--yes` → print the "pass --yes" hint, return `False`. Does **not**
+   uninstall (a stray CI/scripted run must never remove the tool).
 
-**Decisions:** interactive default is **No** (must type `y` — affirmative assent).
-Non-interactive acceptance is **`--yes`** (no new flag; documented that `--yes` implies license
-acceptance). `--yes` already exists for auto-applying edits and is what `install.sh` passes.
+**Decisions:**
+- The gate is **validated on every run** (including the chat/TUI, via the `cli.main` gate that
+  precedes launch). Once accepted it's silent; if the flag is missing/changed it prompts again.
+- **Enter cancels** (safe): only an explicit `n`/`no` uninstalls, so a stray keypress can't wipe
+  an install. Chosen over "default No + decline uninstalls," which would make bare Enter destructive.
+- **Explicit decline → `--rm`**: `on_decline` runs `uninstall.run(emit, lambda _p: True,
+  assume_yes=True)` (removes the tool + deletes `~/.config/2b`, no second prompt — the `n` is the
+  consent), then exits via `SystemExit(uninstall's code)`.
+- Non-interactive acceptance is **`--yes`** (no new flag; `--yes` implies acceptance and is what
+  `install.sh` passes). Non-interactive never uninstalls.
+- `on_decline` is injected so the pure gate stays testable (tests pass a recorder; real callers
+  pass the uninstall).
 
 ### Wiring — two call sites
 
@@ -99,11 +111,13 @@ visibility; the real enforcement stays in the tool (so brew/pip are covered iden
 Point `config.PREFS_FILE`/`CONFIG_DIR` at a tempdir per test.
 
 - `accepted()`/`record()` roundtrip: false before, true after `record()`.
-- `ensure_accepted(assume_yes=True, ...)` → returns True, records, prints notice, does not prompt.
+- `ensure_accepted(assume_yes=True, ...)` → returns True, records, does not prompt, `on_decline` not called.
 - Already-accepted → returns True, prints nothing, does not prompt.
-- Interactive decline (monkeypatch `input` → "" and "n") → returns False, does **not** record.
-- Interactive accept (`input` → "y") → returns True, records.
-- Non-interactive without yes (`interactive=False, assume_yes=False`) → returns False, does not record.
+- Interactive accept (`input` → "y") → returns True, records, `on_decline` not called.
+- Explicit decline (`input` → "n") → returns False, does **not** record, `on_decline` called once.
+- Enter (`input` → "") → returns False, does not record, `on_decline` **not** called (cancel).
+- Unrecognized answer (`input` → "maybe") → returns False, `on_decline` not called (cancel).
+- Non-interactive without yes → returns False, does not record, `on_decline` **not** called.
 - Stored id mismatch (prefs has an old id) → not accepted → prompts again.
 
 ## Out of scope (YAGNI)

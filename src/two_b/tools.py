@@ -319,7 +319,8 @@ def do_write_file(path, content, auto_yes):
     if os.path.isfile(full):
         with open(full, "r", errors="replace") as f:
             existing_lines = len(f.readlines())
-    print(f"\n--- proposed write: {path} ({existing_lines} -> {len(content.splitlines())} lines) ---")
+    new_lines = len(content.splitlines())
+    print(f"\n--- proposed write: {path} ({existing_lines} -> {new_lines} lines) ---")
     if not auto_yes:
         if input("Apply this write? [y/N] ").strip().lower() != "y":
             return "write rejected by user"

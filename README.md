@@ -43,65 +43,69 @@ model has to understand.
 
 ## What it does
 
-**The one idea that makes it work:** the model only ever sees **five tools** — `list_files`,
-`read_file`, `search_files`, `edit_file`, `write_file` — over its provider's **native** wire
-format, never a generic `/v1` shim. Every feature below is something 2B renders *around* that
-tiny loop, so a small model's world stays dead simple while you get a full-screen coding agent.
+**The one idea that makes it work:** the model only ever sees a small, fixed set of file-oriented
+tools, communicated in a way that stays close to each provider's own conventions rather than a
+one-size-fits-all shim. Most of what follows is functionality that 2B builds *around* that small
+surface, so a smaller model's world stays simple while the experience on screen is a full coding
+agent.
 
-**Reliable with small models — the host does the hard part:**
+**Reliable with small models — the host absorbs most of the difficulty:**
 
-- **Edits that survive drift.** `edit_file` matches in tiers (exact → whitespace-tolerant →
-  indentation-agnostic), so a near-miss still lands — never on an ambiguous match. The tool the
-  model sees is unchanged; the tolerance is all host-side.
-- **Catches its own mistakes.** After an edit, 2B runs the file's checker (`dart analyze`, `ruff`, …)
-  and folds new errors into the *same* tool result — the model sees the break it just caused, no new
-  tool to learn.
-- **Finds definitions, not just matches.** `search_files` floats a symbol's *definition* to the top
-  and `read_file` appends a symbol outline — resolved semantically over a language server (LSP) when
-  one's installed, with a dependency-free regex fallback otherwise.
-- **Rescues weak tool-calls.** Recovers calls a small model emits as plain text, and nudges one that
-  narrates a plan but forgets to act — so weak models actually finish the job.
+- **Edits that survive drift.** Edits are matched using a layered fallback approach, so a near-miss
+  can still land without falling back to something too uncertain. The interface the model works with
+  doesn't change; the extra tolerance lives entirely on the host side.
+- **Catches its own mistakes.** After a change, 2B runs some form of project-appropriate validation
+  and works any new problems back into the same exchange — so the model becomes aware of issues it
+  introduced without needing a separate mechanism for it.
+- **Finds definitions, not just matches.** Searches are weighted to prioritize where something is
+  actually defined, and file reads can include a structural summary — using deeper language tooling
+  when it's available, and a simpler fallback approach otherwise.
+- **Rescues weak tool-calls.** The system can recognize and recover intended actions that a weaker
+  model expresses imperfectly, and nudges things along when a model describes an action without
+  quite completing it.
 
-**A full-screen experience, not a log dump:**
+**A fuller experience, not a log dump:**
 
-- **Streaming TUI** with a live **plan checklist** (`□ ■ ✓`) and a status line showing a context
-  meter (`ctx N%`) plus, for local models, a live RAM/GPU readout.
-- **Narrated actions** — plain-language steps with a ✓/✗ tree, not raw `read_file {...}`:
+- A live, continuously updating terminal view that shows overall progress and rough resource usage,
+  including some indication of how full the working context is.
+- **Narrated actions** — steps described in plain language with a simple success/failure tree,
+  rather than raw tool output:
+
   ```
   ├ ✓ Searching for "MemoryScopeLevel" in lib
   └ ✓ Editing lib/memory/memory_store.dart
   ```
-- **Themes** (`/theme`), **copy that works** (Ctrl+Y, or drag + Ctrl+C via `pbcopy`), **keyboard
-  scroll** (Shift+↑/↓), and **queued/background tasks** (Ctrl+B, `/fg`).
 
-**Any model, one conversation.** Ollama (local + cloud), OpenAI, OpenRouter, Mistral, NVIDIA,
-DeepSeek, Cerebras, Anthropic, and Google Gemini — each over its own native format, all streaming.
-History is provider-agnostic, so you **switch models mid-task** with `/model` and keep every bit of
-context: start on a local Qwen, hand it to Claude when it gets hard.
+- Visual customization, reliable copy behavior across environments, keyboard-driven navigation, and
+  support for running tasks in the background while you keep working.
 
-**Keeps the thread — or doesn't, your call.** Cloud sessions carry context across messages by
-default; local models stay lean until you opt in with `/continuity`. `/new` starts a fresh thread,
-and `/export` dumps the whole session — **tool calls included** — to a Markdown file.
+**Many models, one conversation.** A broad range of providers — local and cloud — are supported,
+each communicated with in a way suited to that provider. The conversation history isn't tied to any
+one provider, so you can move between models mid-task without losing what's been established:
+start small and local, and move to something larger only if you need to.
 
-**Knows your project.** `/init` writes a compact `2B.md` (stack, layout, ranked symbol map) that's
-auto-loaded into context; `/map` shows an outline on demand — all bounded so it never floods a small
-window.
+**Keeps the thread — or doesn't, your call.** Depending on the setup, context can either persist
+automatically across messages or stay minimal until you choose otherwise. You can always start clean,
+and a full session — including the underlying actions taken — can be exported for reference.
 
-**Runs things, safely.** Local models get `run_git` (git only — no raw shell); cloud models get a
-full `run_command` whose **writes are sandbox-confined to the workspace** (macOS `sandbox-exec` /
-Linux `bubblewrap`). Network and secret-path commands re-prompt even under "allow-all," your ambient
-secrets (`*_API_KEY`, `AWS_*`) are scrubbed from the child env, and tool output is fenced as
-*untrusted* so a poisoned file can't hijack the model.
+**Knows your project.** A compact project summary can be generated and kept loaded automatically, with
+an on-demand outline view available too — all kept within limits so it won't overwhelm a smaller
+model's context.
 
-**Scales without bloating the model.** Cloud models can `delegate` read-only investigations (and
-isolated edit sub-tasks) in parallel so a big search never bloats the main thread; **MCP tools** are
-opt-in *per tool*; **auto-compaction** folds old turns into a summary near the window limit; and
-**sessions persist** to SQLite (`2b --continue` / `--resume`, `/sessions`). `/undo` reverts the last
-write or edit.
+**Runs things, safely.** What a model is allowed to execute depends on where it's running: more
+constrained locally, broader (but sandboxed) in cloud contexts, with writes confined to the project
+workspace. Riskier actions get an extra confirmation step regardless of settings, sensitive
+environment values are kept away from anything executed, and outputs from tools are treated as
+untrusted input so they can't be used to manipulate the model.
 
-**Three modes** (Shift+Tab): **normal** (confirm writes) · **accept edits** (auto-apply) · **plan**
-(read-only — investigate and return a plan, touching nothing).
+**Scales without bloating the model.** Larger or cloud-capable models can offload certain
+investigative or editing work so it doesn't consume the main conversation's space; external tool
+integrations are opt-in individually; older parts of a long conversation get automatically
+summarized as space runs low; and sessions are saved so they can be resumed later. Recent changes
+can be undone.
 
+**A few distinct modes**, switchable on demand: one that confirms before writing, one that applies
+changes automatically, and one that only investigates and proposes without making any changes.
 ---
 
 ## Install

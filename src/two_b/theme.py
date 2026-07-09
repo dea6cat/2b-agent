@@ -25,8 +25,10 @@ THEMES: dict[str, dict[str, str]] = {
         "faint": "#6E6A58", "ok": "#8FA06A", "err": "#C6704A",
     },
     # Original YoRHa menu palette: parchment ground, dark-olive ink, bronze accent.
+    # All backgrounds share one parchment shade (ground) — the log, input, and status
+    # panels are flat rather than stepped, so no faint banding shows in light mode.
     "light": {
-        "ground": "#D3CDBB", "logbg": "#CDC7B4", "panelbg": "#C7C1AE",
+        "ground": "#D3CDBB", "logbg": "#D3CDBB", "panelbg": "#D3CDBB",
         "ink": "#454235", "accent": "#8A7A45", "dim": "#6E6A58",
         "faint": "#928D79", "ok": "#6F7550", "err": "#9E5238",
     },

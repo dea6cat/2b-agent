@@ -31,9 +31,8 @@ that applied but don't pass).
 ## Language-agnosticism
 
 The loop is generic; *all* language knowledge stays in two existing, isolated detectors:
-- `verify.discover_checks(root)` — manifest → check commands. Already covers **Node**
-  (`package.json` scripts test/lint/typecheck/check), **Python** (`pytest`, `ruff check .`),
-  **Dart/Flutter** (`dart analyze`, `dart test`/`flutter test`).
+- `verify.discover_checks(root)` — manifest → check commands. Covers **Node/JS/TS**, **Python**,
+  **Dart/Flutter**, and (this change) **Go**, **Swift**, **Kotlin** — full rules in §0 below.
 - `diagnostics.check(path)` — file-extension → per-file static check (already Python/Dart);
   unchanged, keeps running after each edit for fast in-flight feedback.
 
@@ -43,9 +42,37 @@ Consequences:
 - **Escape hatch for the long tail** (monorepos, Bazel, bespoke scripts, or to override
   detection): `TWOB_VERIFY_CMD` — a user-declared command list (newline- or `;;`-separated).
   When set, it *replaces* discovery. Covers any stack without 2B knowing the ecosystem.
-- **Broadening auto-detection later** (Rust `cargo check`/`cargo test`, Go `go vet`/`go test`,
-  `make test`, Gradle/Maven…) is additive in `discover_checks` — never touches the loop. Not
-  required for v1; `TWOB_VERIFY_CMD` covers these now.
+- **Broadening auto-detection is additive in `discover_checks`** — never touches the loop.
+  This change adds JavaScript/TypeScript, Go, Swift, and Kotlin (see §0 below). Still-future
+  candidates (covered now by `TWOB_VERIFY_CMD`): Rust (`cargo check`/`cargo test`), `make test`,
+  Maven (`mvn`). `diagnostics.check(path)` per-file handlers for `.ts`/`.go`/`.swift`/`.kt` are
+  a **separate, optional** follow-up (fast in-flight per-file feedback) — out of scope here; the
+  project-level checks below are what feed the verify loop.
+
+## §0. Language detectors (`verify.discover_checks`) — v1 scope
+
+Each detector is best-effort, gated on a manifest/config file, order-stable, deduped by the
+existing `add()`. The runner skips any command whose binary isn't installed, so listing a
+command is always safe. Prefer the project's own declared scripts; add direct tool invocations
+only to fill gaps.
+
+| Stack | Trigger file(s) | Fast/static checks | Test checks |
+|---|---|---|---|
+| **Node / JS / TS** (extend existing) | `package.json` | `npm run <lint\|typecheck\|check>` (existing scripts); **+** `tsc --noEmit` if `tsconfig.json` exists **and** no `typecheck`/`check` script; **+** `eslint .` if an eslint config (`.eslintrc*`, `eslint.config.*`) exists **and** no `lint` script | `npm run test` (existing) |
+| **Python** (existing) | `pyproject.toml`/`setup.py` | `ruff check .` (if ruff configured) | `pytest` (if `tests/`) |
+| **Dart/Flutter** (existing) | `pubspec.yaml` | `dart analyze` | `dart test`/`flutter test` |
+| **Go** (new) | `go.mod` | `go build ./...` | `go test ./...` |
+| **Swift** (new) | `Package.swift` (SwiftPM; Xcode-project `xcodebuild` is out of scope) | `swift build` | `swift test` |
+| **Kotlin** (new) | `build.gradle.kts` or `build.gradle` | `<gradle> check` | `<gradle> test`, where `<gradle>` is `./gradlew` if the wrapper exists, else `gradle` |
+
+Notes:
+- JS/TS: the existing `package.json`-script detection already covers projects that expose
+  `test`/`lint`/`typecheck` scripts; the new `tsc`/`eslint` fallbacks only fire when the
+  matching script is absent, so we never run a linter twice.
+- Kotlin uses the Gradle wrapper (`./gradlew`) when present (no global Gradle needed); this also
+  covers Gradle-based Java, though Java isn't a target here.
+- All new commands are classified correctly by `classify()` (below) — `build`/`check` → fast,
+  `test` → tests.
 
 ## Design
 
@@ -54,8 +81,10 @@ Consequences:
 Add a helper to split discovered commands into **fast/static** vs **tests**, by a
 language-neutral name heuristic:
 - fast (static): command contains `analyze`, `lint`, `typecheck`, `check`, `ruff`, `vet`,
-  `tsc`, `mypy`.
+  `tsc`, `mypy`, or `build` (covers `go build`, `swift build`, `<gradle> check`, `tsc`, `eslint`).
 - tests: command contains `test` or `spec`.
+  (Order matters: a command like `swift test` is tests, `swift build` is fast; classify on the
+  tests keyword first so a `build` substring can't misclassify a test command.)
 - anything unmatched is treated as fast (conservative — run it, it's usually quick).
 
 Used so the fast-only opt-down (`TWOB_VERIFY_FAST`) works generically even though the default
@@ -127,21 +156,32 @@ gap while (possibly slow) tests run — same principle as the `--test` progress 
 
 ## Testing
 
-- `verify.classify` — fast vs tests split across Node/Python/Dart command strings + an
-  unmatched command → fast.
-- `verify.discover_or_override` — returns `TWOB_VERIFY_CMD` when set (parsed), else discovery;
-  unknown project → `[]`.
+- `verify.classify` — fast vs tests split across every stack's command strings, incl. the
+  edge cases: `swift build`/`go build`/`<gradle> check` → fast, `swift test`/`go test ./...`/
+  `<gradle> test` → tests (tests keyword wins over a `build` substring), unmatched → fast.
+- `verify.discover_checks` per new stack, using tmp project dirs with only the trigger file:
+  - `go.mod` → `go build ./...`, `go test ./...`
+  - `Package.swift` → `swift build`, `swift test`
+  - `build.gradle.kts` (+ a `gradlew` file) → `./gradlew check`, `./gradlew test`; without the
+    wrapper → `gradle check`, `gradle test`
+  - `tsconfig.json` with no `typecheck`/`check` script → includes `tsc --noEmit`; **with** a
+    `typecheck` script → does **not** duplicate (`npm run typecheck` only)
+  - eslint config with no `lint` script → includes `eslint .`; with a `lint` script → no dupe
+  - unknown project (no manifest) → `[]`
+- `verify.discover_or_override` — returns `TWOB_VERIFY_CMD` when set (parsed), else discovery.
 - `verify.run_checks` — a passing command (`sh -c "exit 0"`) → ok; a failing one
   (`sh -c "echo boom; exit 1"`) → not ok, output captured; a missing binary → skipped, not
   failed; honors a pre-set cancel Event (returns promptly).
 - Loop trigger predicate (edits landed + checks exist + enabled) — small pure helper, unit test.
-- Existing `discover_checks` multi-language behavior still holds (unknown project → []).
 - Full suite green; the cloud verify-nudge test (if any) updated to the new host-run behavior.
 
 ## Out of scope (YAGNI)
 
-- New-language auto-detectors beyond current (cargo/go/make/gradle) — additive later; the
+- Auto-detectors beyond v1's set (Node/JS/TS, Python, Dart, Go, Swift, Kotlin) — Rust
+  (`cargo`), `make`, Maven (`mvn`), and Xcode-project `xcodebuild` are additive later; the
   `TWOB_VERIFY_CMD` escape hatch covers them now.
+- Per-file `diagnostics.check` handlers for `.ts`/`.go`/`.swift`/`.kt` (in-flight per-edit
+  feedback) — a separate, optional follow-up; v1 extends the project-level checks only.
 - Structured parsing of check output — the model reads truncated raw output (as it already does
   for `dart analyze`).
 - Confirmation prompts for host-run checks — they're bounded/known; `TWOB_NO_VERIFY` is the

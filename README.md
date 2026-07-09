@@ -105,7 +105,7 @@ summarized as space runs low; and sessions are saved so they can be resumed late
 can be undone.
 
 **A few distinct modes**, switchable on demand: one that confirms before writing, one that applies
-changes automatically, and one that only investigates and proposes without making any changes.
+changes automatically, and one that only investigates and proposes without making any changes.**
 ---
 
 ## Install

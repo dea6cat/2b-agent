@@ -389,6 +389,23 @@ def _asked_instead_of_acting(text: str) -> bool:
     return bool(text) and "?" in text and bool(_CLARIFY_RE.search(text))
 
 
+_FALSE_DONE_NUDGE = (
+    "Your edits did NOT apply — every edit_file/write_file this task returned an error "
+    "(see the results above), so no file was changed. Do not report this as done. Use "
+    "read_file to find the correct path and the exact text to match, then retry the edit; "
+    "only finish once an edit actually succeeds."
+)
+
+
+def _edits_all_failed(edit_attempts: int, applied_count: int) -> bool:
+    """True when the model tried to edit files but none landed — every edit_file/write_file
+    this task returned an error, so nothing changed. `applied_count` is len(task.edit_history),
+    which is appended only on a successful write/edit (see apply_write/apply_edit). Used to
+    stop a model (a local-model failure mode) from declaring success on edits that never
+    applied. False when no edit was attempted, or at least one applied."""
+    return edit_attempts > 0 and applied_count == 0
+
+
 def _persist_final(conv, msg) -> None:
     """Append the closing assistant answer to the conversation (Phase 0 of continuity).
     The turn loop only appends tool-call turns, never the final message, so any thread
@@ -1467,6 +1484,8 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     stall_nudges = 0       # intent-only stall nudge fires at most once
     clarify_nudges = 0     # "asked instead of acting" nudge fires at most once
     verify_nudged = False  # done-verify reminder fires at most once per task
+    edit_attempts = 0      # edit_file/write_file calls dispatched (any outcome), across turns
+    false_done_nudged = False  # "declared done but no edit applied" nudge fires at most once
     try:
         # The project's real check commands (test/lint), discovered once, to remind a model
         # that can run commands to verify its edits before finishing (see below). Inside the
@@ -1574,6 +1593,16 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                         f"project's checks with run_command ({', '.join(repo_checks[:3])}) and fix any "
                         "failures; if they pass (or you already ran them), give your final answer."))
                     continue
+                # Declared done, but every edit this task attempted errored (edit_history is
+                # empty despite edit_file/write_file calls) — nothing was changed. Stop the
+                # false "done" (a local-model failure mode) once, pointing back at the errors so
+                # it retries for real. Fires for local and cloud alike.
+                if (content and not false_done_nudged
+                        and _edits_all_failed(edit_attempts, len(task.edit_history))):
+                    false_done_nudged = True
+                    conv.append(msg)
+                    conv.append(Message.user(_FALSE_DONE_NUDGE))
+                    continue
                 planparse.finalize_steps(task.plan_steps)
                 task.status_line = ""
                 task.state = TaskState.DONE
@@ -1601,6 +1630,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             for tc in calls:
                 tc.name, tc.arguments = tools.coerce_tool_args(tc.name, tc.arguments, known_tools)
             tool_calls_made += len(calls)
+            edit_attempts += sum(1 for tc in calls if tc.name in ("edit_file", "write_file"))
             results = []
             nudge_pending = False
 

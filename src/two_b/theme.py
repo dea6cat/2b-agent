@@ -32,9 +32,10 @@ THEMES: dict[str, dict[str, str]] = {
         "ink": "#454235", "accent": "#8A7A45", "dim": "#6E6A58",
         "faint": "#928D79", "ok": "#6F7550", "err": "#9E5238",
     },
-    # Dimmed, darker take on the same palette.
+    # Dimmed, darker take on the same palette. Backgrounds share one shade (ground)
+    # so the log, input, and status panels are flat — no banding in either direction.
     "dark": {
-        "ground": "#21201A", "logbg": "#1B1A15", "panelbg": "#2A281F",
+        "ground": "#21201A", "logbg": "#21201A", "panelbg": "#21201A",
         "ink": "#D3CDBB", "accent": "#B69A5E", "dim": "#8A8578",
         "faint": "#6E6A58", "ok": "#8FA06A", "err": "#C6704A",
     },

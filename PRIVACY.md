@@ -128,4 +128,4 @@ Questions about privacy: open an issue at https://github.com/dea6cat/2b-agent.
 
 ---
 
-*This document is a factual description of 2B's behavior, not legal advice.*
+*This document is a factual description of 2B's behavior*

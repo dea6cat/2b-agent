@@ -75,9 +75,9 @@ class DiscoverChecks(unittest.TestCase):
         with open(os.path.join(d, "package.json"), "w") as f:
             f.write('{"scripts": {"test": "jest", "lint": "eslint .", "build": "tsc"}}')
         cmds = verify.discover_checks(d)
-        self.assertIn("npm run test", cmds)
-        self.assertIn("npm run lint", cmds)
-        self.assertNotIn("npm run build", cmds)   # build isn't a check
+        self.assertIn(("npm run test", "tests"), cmds)
+        self.assertIn(("npm run lint", "fast"), cmds)
+        self.assertNotIn("npm run build", [c for c, _ in cmds])   # build isn't a check
 
     def test_pyproject_and_tests_dir(self):
         d = self._dir()
@@ -85,16 +85,16 @@ class DiscoverChecks(unittest.TestCase):
             f.write("[tool.ruff]\nline-length = 100\n")
         os.mkdir(os.path.join(d, "tests"))
         cmds = verify.discover_checks(d)
-        self.assertIn("pytest", cmds)
-        self.assertIn("ruff check .", cmds)
+        self.assertIn(("pytest", "tests"), cmds)
+        self.assertIn(("ruff check .", "fast"), cmds)
 
     def test_pubspec(self):
         d = self._dir()
         open(os.path.join(d, "pubspec.yaml"), "w").close()
         os.mkdir(os.path.join(d, "test"))
         cmds = verify.discover_checks(d)
-        self.assertIn("dart analyze", cmds)
-        self.assertIn("dart test", cmds)
+        self.assertIn(("dart analyze", "fast"), cmds)
+        self.assertIn(("dart test", "tests"), cmds)
 
     def test_bare_dir_has_no_checks(self):
         self.assertEqual(verify.discover_checks(self._dir()), [])

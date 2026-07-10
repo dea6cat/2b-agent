@@ -1590,7 +1590,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                     conv.append(msg)
                     conv.append(Message.user(
                         "Before finishing: you've edited files but haven't verified them. Run the "
-                        f"project's checks with run_command ({', '.join(repo_checks[:3])}) and fix any "
+                        f"project's checks with run_command ({', '.join(c for c, _ in repo_checks[:3])}) and fix any "
                         "failures; if they pass (or you already ran them), give your final answer."))
                     continue
                 # Declared done, but every edit this task attempted errored (edit_history is

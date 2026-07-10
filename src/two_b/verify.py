@@ -12,9 +12,11 @@ capable model can be nudged to verify its own work before finishing.
 
 Dep-free, host-side, opt out with TWOB_NO_VERIFY=1. Never raises.
 """
+import glob
 import json
 import os
 import re
+import shutil
 
 # Markers of unfinished work that a syntax checker accepts. Kept deliberately narrow to
 # HIGH-CONFIDENCE stub signals — explicit not-implemented raises and "implement this" /
@@ -71,35 +73,88 @@ def _load_toml(path: str) -> dict:
         return {}
 
 
-def discover_checks(root: str = ".") -> list[str]:
-    """Best-effort list of the project's real check commands, read from its manifests
-    (package.json scripts, pyproject tools, pubspec). Used only to *suggest* a
-    verification step — nothing is run here. Deduped, order-stable. Never raises."""
-    cmds: list[str] = []
+FAST, TESTS = "fast", "tests"
 
-    def add(c: str) -> None:
-        if c not in cmds:
-            cmds.append(c)
+
+def classify(cmd: str) -> str:
+    """Best-effort tier for a user-supplied TWOB_VERIFY_CMD command (detected checks carry
+    their own tier from discover_checks). Tests keyword wins so `swift test` -> tests while
+    `swift build` -> fast; anything unmatched -> fast (conservative — usually quick)."""
+    low = cmd.lower()
+    return TESTS if ("test" in low or "spec" in low) else FAST
+
+
+def _has_eslint_config(root: str) -> bool:
+    return bool(glob.glob(os.path.join(root, ".eslintrc*"))
+                or glob.glob(os.path.join(root, "eslint.config.*")))
+
+
+def discover_checks(root: str = ".") -> list[tuple[str, str]]:
+    """The project's real check commands as (command, kind) pairs — kind in {'fast','tests'},
+    assigned by the detector (it knows the tool's semantics). Read from manifests; deduped,
+    order-stable; fast checks before tests within a stack. Never raises."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(cmd: str, kind: str) -> None:
+        if cmd not in seen:
+            seen.add(cmd)
+            out.append((cmd, kind))
 
     try:
+        # Node / JS / TS — prefer the project's own scripts; fill gaps with direct tools.
+        scripts: dict = {}
         pj = os.path.join(root, "package.json")
         if os.path.isfile(pj):
             with open(pj, errors="replace") as f:
                 scripts = (json.load(f).get("scripts") or {})
-            for key in ("test", "lint", "typecheck", "check"):
+            for key in ("lint", "typecheck", "check"):
                 if key in scripts:
-                    add(f"npm run {key}")
+                    add(f"npm run {key}", FAST)
+            if "test" in scripts:
+                add("npm run test", TESTS)
+        if os.path.isfile(os.path.join(root, "tsconfig.json")) and not ({"typecheck", "check"} & set(scripts)):
+            add("tsc --noEmit", FAST)
+        if _has_eslint_config(root) and "lint" not in scripts:
+            add("eslint .", FAST)
 
+        # Python
         ppt = os.path.join(root, "pyproject.toml")
         is_py = os.path.isfile(ppt) or os.path.isfile(os.path.join(root, "setup.py"))
-        if is_py and os.path.isdir(os.path.join(root, "tests")):
-            add("pytest")
         if os.path.isfile(ppt) and "ruff" in _load_toml(ppt).get("tool", {}):
-            add("ruff check .")
+            add("ruff check .", FAST)
+        if is_py and os.path.isdir(os.path.join(root, "tests")):
+            add("pytest", TESTS)
 
+        # Dart / Flutter
         if os.path.isfile(os.path.join(root, "pubspec.yaml")):
-            add("dart analyze")
-            add("dart test" if os.path.isdir(os.path.join(root, "test")) else "flutter test")
+            add("dart analyze", FAST)
+            add("dart test" if os.path.isdir(os.path.join(root, "test")) else "flutter test", TESTS)
+
+        # Go
+        if os.path.isfile(os.path.join(root, "go.mod")):
+            add("go build ./...", FAST)
+            add("go test ./...", TESTS)
+
+        # Swift (SwiftPM only; Xcode xcodebuild out of scope)
+        if os.path.isfile(os.path.join(root, "Package.swift")):
+            add("swift build", FAST)
+            add("swift test", TESTS)
+
+        # Kotlin / Gradle — `check` is test-inclusive (dependsOn test): one command, kind=tests.
+        if os.path.isfile(os.path.join(root, "build.gradle.kts")) or os.path.isfile(os.path.join(root, "build.gradle")):
+            gradle = "./gradlew" if os.path.isfile(os.path.join(root, "gradlew")) else "gradle"
+            add(f"{gradle} check", TESTS)
     except Exception:
         pass
-    return cmds
+    return out
+
+
+def discover_or_override(root: str = ".") -> list[tuple[str, str]]:
+    """TWOB_VERIFY_CMD (';;'- or newline-separated) tagged via classify(), if set; else
+    discover_checks(root). The escape hatch for stacks 2B can't auto-detect."""
+    raw = os.environ.get("TWOB_VERIFY_CMD")
+    if raw:
+        cmds = [c.strip() for c in re.split(r";;|\n", raw) if c.strip()]
+        return [(c, classify(c)) for c in cmds]
+    return discover_checks(root)

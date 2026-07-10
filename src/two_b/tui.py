@@ -64,6 +64,16 @@ def render_task(task: Task) -> Group:
     return Group(*lines)
 
 
+def thinking_summary(seconds: float) -> str:
+    """One-line collapsed marker shown once the reply starts."""
+    return f"💭 thought for {int(seconds)}s"
+
+
+def thinking_line(text: str) -> Text:
+    """A dim line of streamed reasoning."""
+    return Text(text, style="dim")
+
+
 def render_session(session: Session) -> Group:
     """Full live view: the active task's detail, then a dim one-line summary of
     every other task so the user can glance at what else is queued/running."""

@@ -31,7 +31,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, TextArea
 
-from . import commands, completion, config, difffmt, notify, orchestrator, registry, theme, toolline, tools
+from . import commands, completion, config, difffmt, notify, orchestrator, registry, theme, toolline, tools, tui
 from .commands import command_specs, dispatch_input
 from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
@@ -288,6 +288,9 @@ class TwoBApp(App):
         self.ui = _LogConsole(self)               # provider-neutral output for commands.py
         self._stream_text = ""
         self._stream_widget = None                # the in-flow Static currently being streamed into
+        self._thinking_text = ""
+        self._thinking_widget = None              # the in-flow Static currently streaming reasoning
+        self._thinking_started: float | None = None  # monotonic() when the current thinking run began
         self._pending_confirm = None              # PendingConfirmation shown inline (answered y/n in view)
         self._default_placeholder = "Type a task, or / for commands  ·  ⇧⏎ or ^J = newline"
         self._pal: list[tuple[str, str]] = []     # current command-palette matches
@@ -893,13 +896,34 @@ class TwoBApp(App):
         self._stream_widget = None
         self._stream_text = ""
 
+    def _commit_thinking(self, collapsed: bool) -> None:
+        # Mirrors _commit_stream: a live "thinking" region either collapses to a
+        # one-line summary (the reply started) or is left as-is (a thinking-only
+        # turn — no reply followed, so the streamed reasoning is the visible output).
+        if self._thinking_widget is not None and collapsed:
+            elapsed = time.monotonic() - self._thinking_started if self._thinking_started else 0.0
+            self._thinking_widget.update(Text(tui.thinking_summary(elapsed), style="dim"))
+        self._thinking_widget = None
+        self._thinking_text = ""
+        self._thinking_started = None
+
     def _drain_events(self) -> None:
         q = self.session.events
         log = self.query_one("#log", VerticalScroll)
         while not q.empty():
             ev = q.get()
             t = ev.type
-            if t == EventType.ASSISTANT_DELTA:
+            if t == EventType.THINKING_DELTA:
+                if self._thinking_widget is None:
+                    self._thinking_started = time.monotonic()
+                    self._thinking_widget = Static(Text(""), classes="thinking")
+                    log.mount(self._thinking_widget)
+                self._thinking_text += ev.payload["chunk"]
+                self._thinking_widget.update(tui.thinking_line(self._thinking_text))
+                log.scroll_end(animate=False)
+            elif t == EventType.ASSISTANT_DELTA:
+                if self._thinking_widget is not None:
+                    self._commit_thinking(collapsed=True)
                 if self._stream_widget is None:
                     self._stream_widget = Static(Text(""), classes="reply")
                     log.mount(self._stream_widget)
@@ -929,6 +953,8 @@ class TwoBApp(App):
                 self._flush_leftover_steer(ev.task_id)
             elif t == EventType.TASK_DONE:
                 self._commit_stream()
+                if self._thinking_widget is not None:
+                    self._commit_thinking(collapsed=False)
                 self._close_tool_group()
                 self._notify_finished(ev.task_id, ok=True)
                 self._flush_leftover_steer(ev.task_id)

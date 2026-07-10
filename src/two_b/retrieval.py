@@ -11,7 +11,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from . import repomap, symbols, tools
+from . import repomap, symbols, tools, untrusted
 
 MAX_PROJECT_SCAN = 4000       # bound the walk, like lsp._MAX_PROJECT_SCAN
 GRAPH_RADIUS = 2              # BFS hops from a seed that still count as "near"
@@ -335,3 +335,58 @@ def enrich_seeds_with_refs(seeds: set, ids: list, root: str, deadline: float) ->
     except Exception:
         return set(seeds)
     return out
+
+
+RETRIEVAL_CHAR_BUDGET = 1500   # hard cap on the injected pointer block (tuned to the 8k local floor)
+TIME_BUDGET = 1.8              # soft seconds budget for the whole step
+_OUTLINE_PER_FILE = 200        # max chars of symbol outline shown per file
+
+_HEADER = "Likely-relevant files for this task (host-provided; read what you need):"
+
+
+def format_block(ranked: list, root: str) -> str:
+    """Render the ranked files as a budget-capped pointer mini-map. Each file's outline is fenced
+    with untrusted.wrap; our own header/reason labels are host text (not fenced)."""
+    if not ranked:
+        return ""
+    lines = [_HEADER]
+    used = len(_HEADER)
+    for r in ranked:
+        try:
+            raw = symbols.outline(os.path.join(root, r.path)) or ""
+        except Exception:
+            raw = ""
+        outline = raw[:_OUTLINE_PER_FILE].strip()
+        header = f"- {r.path} ({'; '.join(r.reasons)})"
+        fenced = untrusted.wrap(outline, f"outline:{r.path}") if outline else ""
+        entry = header + ("\n" + fenced if fenced else "")
+        if used + len(entry) + 1 > RETRIEVAL_CHAR_BUDGET and len(lines) > 1:
+            break
+        lines.append(entry)
+        used += len(entry) + 1
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def retrieve_block(root: str, task: str) -> str:
+    """Public entry. Build the graph, seed from the task, (optionally) enrich via LSP, rank, apply
+    the confidence gate, and format a pointer block — or "" when disabled, low-confidence, or on
+    any failure. Time-boxed; never raises."""
+    import time
+    if os.environ.get("TWOB_NO_RETRIEVAL") == "1":
+        return ""
+    deadline = time.monotonic() + TIME_BUDGET
+    try:
+        graph = build_graph(root)
+        if not graph.files:
+            return ""
+        seeds, ids = seeds_from_task(task, root, graph)
+        if not seeds:
+            return ""
+        if time.monotonic() < deadline:
+            seeds = enrich_seeds_with_refs(seeds, ids, root, deadline)
+        ranked = rank(task, root, graph, seeds, ids, top_k())
+        if not ranked or ranked[0].score < MIN_SCORE:   # confidence gate
+            return ""
+        return format_block(ranked, root)
+    except Exception:
+        return ""

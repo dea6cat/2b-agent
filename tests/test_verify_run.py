@@ -77,6 +77,19 @@ class Seatbelt(unittest.TestCase):
         self.assertEqual(seen["cmd"], "sh -c 'exit 0'")
         self.assertTrue(seen["shell"])    # None -> run the raw command with shell=True
 
+    def test_wrap_failure_degrades_to_fail_not_raise(self):
+        # seatbelt.wrap reads cwd; if it raises (e.g. cwd deleted) run_checks must record a
+        # fail, never propagate — the "never raises" contract.
+        def boom(_c):
+            raise FileNotFoundError("cwd gone")
+
+        orig_wrap = seatbelt.wrap
+        seatbelt.wrap = boom
+        self.addCleanup(lambda: setattr(seatbelt, "wrap", orig_wrap))
+        r = verify.run_checks([("sh -c 'exit 0'", "fast")])
+        self.assertEqual(r[0].status, "fail")
+        self.assertIn("could not run", r[0].output)
+
 
 class Truncate(unittest.TestCase):
     def test_under_cap_is_identity(self):

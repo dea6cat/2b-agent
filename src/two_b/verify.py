@@ -209,9 +209,9 @@ def run_checks(checks, *, cancel=None, per_cmd_timeout: int = VERIFY_TIMEOUT, on
         # and is fed back as a normal failure; we never drop the sandbox without a human. Honors
         # TWOB_NO_SEATBELT / TWOB_SEATBELT=strict via seatbelt.wrap (argv is None when the sandbox
         # is off or unavailable -> run the command directly, as before).
-        argv, _strict = seatbelt.wrap(cmd)
-        sandboxed = argv is not None
         try:
+            argv, _strict = seatbelt.wrap(cmd)   # wrap() reads cwd — keep inside try (never-raise)
+            sandboxed = argv is not None
             rc, out, status = tools._run_cancellable(argv if sandboxed else cmd,
                                                      shell=not sandboxed, timeout=per_cmd_timeout,
                                                      cancel=cancel, env=tools._child_env())

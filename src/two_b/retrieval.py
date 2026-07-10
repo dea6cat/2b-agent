@@ -243,3 +243,66 @@ def seeds_from_task(task: str, root: str, graph: Graph) -> tuple:
 def candidate_files(graph: Graph, seeds: set) -> dict:
     """rel -> graph distance for the seed neighborhood (seeds at distance 0)."""
     return bfs_distances(graph, seeds)
+
+
+W_GRAPH, W_LEXICAL, W_PRIOR = 0.55, 0.30, 0.15   # scoring weights (sum≈1); tune here
+MIN_SCORE = 0.20                                 # confidence gate: below this -> not injected
+DEFAULT_K = 8
+
+
+def top_k() -> int:
+    raw = os.environ.get("TWOB_RETRIEVAL_FILES", "")
+    return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_K
+
+
+@dataclass
+class RankedFile:
+    path: str
+    score: float
+    reasons: list
+
+
+def _lexical_score(rel: str, symcount_terms: set, task_terms: set) -> float:
+    """Fraction of task terms that appear in the file's path stem or symbol names (0..1)."""
+    if not task_terms:
+        return 0.0
+    hay = set(re.split(r"[_\-./]", rel.lower())) | symcount_terms
+    return len(task_terms & hay) / len(task_terms)
+
+
+def rank(task: str, root: str, graph: Graph, seeds: set, ids: list, k: int | None = None) -> list:
+    """Score the candidate neighborhood by graph proximity + lexical relevance + path prior;
+    return the top-k RankedFiles (highest first), each above no gate here — the gate is applied
+    by retrieve_block. Never raises."""
+    try:
+        k = k or top_k()
+        dist = candidate_files(graph, seeds)
+        if not dist:
+            return []
+        task_terms = {w.lower() for w in _WORD.findall(task or "") if len(w) >= 3 and w.lower() not in _STOP}
+        idset = set(ids)
+        out = []
+        for rel, d in dist.items():
+            syms = [s for _ln, s in repomap.symbols_with_lines(os.path.join(root, rel))]
+            symterms = {t.lower() for s in syms for t in re.split(r"[^A-Za-z0-9_]", s) if t}
+            g_component = 1.0 / (d + 1)                                  # 1.0 at seed, decays
+            lex = _lexical_score(rel, symterms, task_terms)
+            prior = repomap._score(rel, len(syms), "") / 12.0            # normalize (~max 12) to 0..1
+            score = W_GRAPH * g_component + W_LEXICAL * lex + W_PRIOR * max(0.0, min(1.0, prior))
+            reasons = []
+            defines = [s for s in syms if any(i in s for i in idset)]
+            if d == 0 and defines:
+                reasons.append(f"defines {defines[0].split('(')[0].split()[-1]}" if defines else "seed")
+            elif d == 0:
+                reasons.append("matches the request")
+            else:
+                # name a concrete neighbor for the reason
+                nbrs = (graph.imported_by.get(rel, set()) & seeds) or (graph.imports.get(rel, set()) & seeds)
+                nbr = os.path.basename(next(iter(nbrs))) if nbrs else "a relevant file"
+                reasons.append(f"imported by {nbr}" if graph.imports.get(rel, set()) & seeds
+                               else f"connected to {nbr}")
+            out.append(RankedFile(rel, score, reasons))
+        out.sort(key=lambda r: (-r.score, r.path))
+        return out[:k]
+    except Exception:
+        return []

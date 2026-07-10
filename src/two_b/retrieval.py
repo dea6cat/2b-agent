@@ -290,17 +290,24 @@ def rank(task: str, root: str, graph: Graph, seeds: set, ids: list, k: int | Non
             prior = repomap._score(rel, len(syms), "") / 12.0            # normalize (~max 12) to 0..1
             score = W_GRAPH * g_component + W_LEXICAL * lex + W_PRIOR * max(0.0, min(1.0, prior))
             reasons = []
-            defines = [s for s in syms if any(i in s for i in idset)]
-            if d == 0 and defines:
-                reasons.append(f"defines {defines[0].split('(')[0].split()[-1]}" if defines else "seed")
+            # Which task identifier does this file define? (name it directly — don't re-parse the
+            # declaration text, which would leave a trailing ':' on `class Foo:`.)
+            matched = next((i for i in idset if any(i in s for s in syms)), None)
+            if d == 0 and matched:
+                reasons.append(f"defines {matched}")
             elif d == 0:
                 reasons.append("matches the request")
             else:
-                # name a concrete neighbor for the reason
-                nbrs = (graph.imported_by.get(rel, set()) & seeds) or (graph.imports.get(rel, set()) & seeds)
-                nbr = os.path.basename(next(iter(nbrs))) if nbrs else "a relevant file"
-                reasons.append(f"imported by {nbr}" if graph.imports.get(rel, set()) & seeds
-                               else f"connected to {nbr}")
+                # Describe the edge to a seed by its TRUE direction. imported_by[rel]∩seeds means a
+                # seed imports rel ("imported by"); imports[rel]∩seeds means rel imports a seed.
+                by_seed = graph.imported_by.get(rel, set()) & seeds
+                to_seed = graph.imports.get(rel, set()) & seeds
+                if by_seed:
+                    reasons.append(f"imported by {os.path.basename(next(iter(by_seed)))}")
+                elif to_seed:
+                    reasons.append(f"imports {os.path.basename(next(iter(to_seed)))}")
+                else:
+                    reasons.append("connected to the seed files")
             out.append(RankedFile(rel, score, reasons))
         out.sort(key=lambda r: (-r.score, r.path))
         return out[:k]

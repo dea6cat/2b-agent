@@ -48,6 +48,30 @@ class Rank(unittest.TestCase):
         ranked = retrieval.rank("AuthService", d, g, seeds, ids, k=5)
         self.assertTrue(any("defines" in r.reasons[0] or "matches" in r.reasons[0] for r in ranked))
 
+    def test_defines_reason_has_no_trailing_colon(self):
+        d = self._proj({"lib/auth.py": "class AuthService:\n    pass\n"})
+        g = retrieval.build_graph(d)
+        seeds, ids = retrieval.seeds_from_task("AuthService", d, g)
+        ranked = retrieval.rank("AuthService", d, g, seeds, ids, k=5)
+        auth = next(r for r in ranked if r.path.endswith("auth.py"))
+        self.assertIn("defines AuthService", auth.reasons)
+        self.assertNotIn("defines AuthService:", auth.reasons)   # no leaked ':'
+
+    def test_dependent_neighbor_reason_direction(self):
+        # login_view imports auth. Seeding ONLY on auth (the definition), the dependent
+        # login_view must be described as importing auth — the correct edge direction.
+        d = self._proj({
+            "lib/auth.py": "class AuthService:\n    pass\n",
+            "lib/login_view.py": "import lib.auth\n",
+        })
+        g = retrieval.build_graph(d)
+        # force the seed set to just the definition file (isolate the d>0 branch)
+        seeds = {os.path.join("lib", "auth.py")}
+        ranked = retrieval.rank("AuthService", d, g, seeds, ["AuthService"], k=10)
+        lv = next(r for r in ranked if r.path.endswith("login_view.py"))
+        self.assertIn("imports auth.py", lv.reasons)             # login_view imports the seed
+        self.assertNotIn("imported by auth.py", lv.reasons)      # NOT the reverse
+
     def test_top_k_env(self):
         os.environ["TWOB_RETRIEVAL_FILES"] = "3"
         self.assertEqual(retrieval.top_k(), 3)

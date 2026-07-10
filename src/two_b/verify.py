@@ -173,10 +173,13 @@ class CheckResult:
 
 
 def _truncate(s: str, cap: int = 4000) -> str:
-    """Keep head + tail (compiler errors lead, test summaries trail)."""
+    """Keep head + tail (compiler errors lead, test summaries trail). Never returns a string
+    longer than the input — near the cap boundary the elision marker would otherwise inflate
+    it, defeating the point of bounding the output."""
     if len(s) <= cap:
         return s
-    return f"{s[: cap * 2 // 3]}\n… [check output truncated] …\n{s[-cap // 3:]}"
+    out = f"{s[: cap * 2 // 3]}\n… [check output truncated] …\n{s[-cap // 3:]}"
+    return out if len(out) < len(s) else s
 
 
 def run_checks(checks, *, cancel=None, per_cmd_timeout: int = VERIFY_TIMEOUT, on_start=None):

@@ -16,7 +16,9 @@ import glob
 import json
 import os
 import re
+import shlex
 import shutil
+from dataclasses import dataclass
 
 # Markers of unfinished work that a syntax checker accepts. Kept deliberately narrow to
 # HIGH-CONFIDENCE stub signals — explicit not-implemented raises and "implement this" /
@@ -158,3 +160,57 @@ def discover_or_override(root: str = ".") -> list[tuple[str, str]]:
         cmds = [c.strip() for c in re.split(r";;|\n", raw) if c.strip()]
         return [(c, classify(c)) for c in cmds]
     return discover_checks(root)
+
+
+VERIFY_TIMEOUT = 300   # per-command cap (seconds); a hung suite can't wedge the session
+
+
+@dataclass(frozen=True, slots=True)
+class CheckResult:
+    cmd: str
+    status: str   # "pass" | "fail" | "skipped" | "cancelled"
+    output: str
+
+
+def _truncate(s: str, cap: int = 4000) -> str:
+    """Keep head + tail (compiler errors lead, test summaries trail)."""
+    if len(s) <= cap:
+        return s
+    return f"{s[: cap * 2 // 3]}\n… [check output truncated] …\n{s[-cap // 3:]}"
+
+
+def run_checks(checks, *, cancel=None, per_cmd_timeout: int = VERIFY_TIMEOUT, on_start=None):
+    """Run each (cmd, kind) check host-side, returning a CheckResult per command. Missing
+    binaries are skipped (not failed); a set `cancel` (task.cancel_flag) aborts promptly with
+    `cancelled`. Never raises."""
+    from . import tools
+    results = []
+    for cmd, _kind in checks:
+        if cancel is not None and cancel.is_set():
+            results.append(CheckResult(cmd, "cancelled", ""))
+            break
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            parts = cmd.split()
+        first = parts[0] if parts else ""
+        # shell=True returns exit 127 for a missing binary (no FileNotFoundError) — precheck.
+        if not first or shutil.which(first) is None:
+            results.append(CheckResult(cmd, "skipped", ""))
+            continue
+        if on_start:
+            on_start(cmd)
+        try:
+            rc, out, status = tools._run_cancellable(cmd, shell=True, timeout=per_cmd_timeout,
+                                                     cancel=cancel, env=tools._child_env())
+        except Exception as e:
+            results.append(CheckResult(cmd, "fail", f"could not run: {e}"))
+            continue
+        if status == "cancelled":
+            results.append(CheckResult(cmd, "cancelled", ""))
+            break
+        if status in ("timeout", "kill_failed"):
+            results.append(CheckResult(cmd, "fail", _truncate(out) + f"\n[{status} after {per_cmd_timeout}s]"))
+            continue
+        results.append(CheckResult(cmd, "pass" if rc == 0 else "fail", _truncate(out)))
+    return results

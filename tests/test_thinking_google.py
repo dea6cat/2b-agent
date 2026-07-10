@@ -52,6 +52,14 @@ class GoogleThinking(unittest.TestCase):
         prov._read_parts(cand, text_parts, calls)
         self.assertEqual("".join(text_parts), "ANSWER")
 
+    def test_think_off_does_not_request_thoughts_even_on_pro(self):
+        # `/think off` must not surface thoughts, even on 2.5 Pro (whose budget floors at 128) —
+        # otherwise the off gating is contradicted and includeThoughts rides a 0/low budget.
+        prov = g.GoogleProvider()
+        prov.stream(Conversation(system_prompt="s"), "gemini-2.5-pro", (), lambda _c: None, reasoning="off")
+        tc = self._captured["payload"]["generationConfig"]["thinkingConfig"]
+        self.assertNotIn("includeThoughts", tc)
+
 
 if __name__ == "__main__":
     unittest.main()

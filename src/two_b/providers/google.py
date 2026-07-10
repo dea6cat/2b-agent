@@ -127,7 +127,12 @@ class GoogleProvider:
         # Gemini SSE: :streamGenerateContent?alt=sse yields `data: {chunk}` lines, each a partial
         # GenerateContentResponse. Emit text as it arrives; collect functionCall parts along the way.
         budget = self._thinking_budget(model, reasoning)
-        payload = self._payload(conversation, tools, thinking_budget=budget, include_thoughts=budget is not None)
+        # Only request thought summaries when reasoning is actually on. `/think off` still floors
+        # 2.5 Pro's budget at its minimum (it can't fully disable), but we must NOT surface thoughts
+        # then — that would contradict the off gating and send includeThoughts alongside a 0 budget
+        # on the compaction path (which streams with reasoning="off").
+        include_thoughts = reasoning != "off" and budget is not None
+        payload = self._payload(conversation, tools, thinking_budget=budget, include_thoughts=include_thoughts)
         url = f"{BASE}/models/{model}:streamGenerateContent?alt=sse"
         text_parts: list = []
         thought_parts: list = []

@@ -55,6 +55,7 @@ CONTEXT_BUDGETS = {
 }
 COMPACT_AT = 0.75       # compact once estimated usage crosses this fraction
 COMPACT_KEEP_TAIL = 6   # most-recent messages kept verbatim (rest are summarized)
+_THINK_LEVELS = frozenset({"off", "on", "low", "medium", "high"})
 MAX_VERIFY_ROUNDS = 2   # bound on host-run verify-and-fix rounds per task
 _COMPACT_MAX_INPUT_CHARS = 48_000   # cap the transcript handed to the summarizer
 
@@ -445,6 +446,16 @@ def _continuity_effective(session, is_local: bool) -> bool:
     return not is_local
 
 
+def _reasoning_effective(session) -> str | None:
+    """The reasoning level for this turn: session /think override, else TWOB_THINK, else None
+    (each provider's capped default). Mirrors _continuity_effective's precedence."""
+    override = getattr(session, "think", None)
+    if override in _THINK_LEVELS:
+        return override
+    env = os.environ.get("TWOB_THINK", "").strip().lower()
+    return env if env in _THINK_LEVELS else None
+
+
 def abort_all(session: Session) -> int:
     """Global panic: set the cancel flag on every running task (foreground AND
     backgrounded), clear any pending steer, and close all live HTTP connections so
@@ -723,7 +734,9 @@ def compact_conversation(conv: Conversation, provider, model: str, touched=None,
     else:
         summ.append(Message.user(_render_transcript(body)))
     buf: list[str] = []
-    resp = provider.stream(summ, model, (), lambda c: buf.append(c), cancel=cancel)
+    # Summarization gains nothing from reasoning — force it off so compaction stays fast and
+    # doesn't spend a thinking budget (Ollama omits think; Google sends thinkingBudget:0).
+    resp = provider.stream(summ, model, (), lambda c: buf.append(c), cancel=cancel, reasoning="off")
     summary = "".join(buf).strip() or (resp.message.text or resp.message.thinking or "").strip()
     if not summary:
         return False
@@ -1550,7 +1563,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             active_specs = _active_specs(is_local)
             req_conv = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
             try:
-                resp = stream_with_retry(provider, req_conv, model, active_specs, on_text, cancel=task.cancel_flag)
+                resp = stream_with_retry(provider, req_conv, model, active_specs, on_text, cancel=task.cancel_flag, reasoning=_reasoning_effective(session))
             except (_Interrupted, _Cancelled):
                 _finish_stopped(task, on_event)
                 return
@@ -1782,7 +1795,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
 
         req_conv = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
         try:
-            resp = stream_with_retry(provider, req_conv, model, _active_specs(is_local), on_final, cancel=task.cancel_flag)
+            resp = stream_with_retry(provider, req_conv, model, _active_specs(is_local), on_final, cancel=task.cancel_flag, reasoning=_reasoning_effective(session))
             planparse.finalize_steps(task.plan_steps)
             task.status_line = ""
             task.state = TaskState.DONE

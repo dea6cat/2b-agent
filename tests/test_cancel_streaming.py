@@ -20,7 +20,7 @@ class ForwardsCancel(unittest.TestCase):
         class P:
             name = "p"
 
-            def stream(self, conv, model, tools, on_text, *, cancel=None):
+            def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
                 seen["cancel"] = cancel
                 return "ok"
 
@@ -34,7 +34,7 @@ class ForwardsCancel(unittest.TestCase):
         class P:
             name = "p"
 
-            def stream(self, conv, model, tools, on_text, *, cancel=None):
+            def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
                 calls["n"] += 1
                 raise _Cancelled()
 
@@ -48,7 +48,7 @@ class ForwardsCancel(unittest.TestCase):
         class P:
             name = "p"
 
-            def stream(self, conv, model, tools, on_text, *, cancel=None):
+            def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
                 calls["n"] += 1
                 raise ProviderError("p", "boom", retryable=True)
 

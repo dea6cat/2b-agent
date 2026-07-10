@@ -16,6 +16,7 @@ from .base import ProviderResponse, post_json, post_stream
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 _MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+_G_LOW, _G_MED, _G_HIGH = 2048, 8192, 24576   # bounded thinking budgets; never -1 (dynamic)
 
 
 class GoogleProvider:
@@ -58,12 +59,31 @@ class GoogleProvider:
                 contents.append({"role": "user", "parts": [{"text": m.text or ""}]})
         return contents
 
-    def _payload(self, conversation: Conversation, tools: tuple[ToolSpec, ...]) -> dict:
-        return {
+    def supports_reasoning(self, model: str) -> bool:
+        return model.startswith("gemini-2.5")
+
+    def _thinking_budget(self, model: str, reasoning):
+        """thinkingBudget for thinkingConfig, or None to omit it (unsupported model). None ->
+        capped MED (protect latency); never -1/dynamic. 2.5 Pro can't fully disable, so 'off'
+        uses its minimum."""
+        if not self.supports_reasoning(model):
+            return None
+        if reasoning is None:
+            return _G_MED
+        tier = {"off": 0, "low": _G_LOW, "medium": _G_MED, "on": _G_MED, "high": _G_HIGH}.get(reasoning, _G_MED)
+        if tier == 0 and "pro" in model:
+            return 128
+        return tier
+
+    def _payload(self, conversation: Conversation, tools: tuple[ToolSpec, ...], thinking_budget=None) -> dict:
+        p = {
             "systemInstruction": {"parts": [{"text": conversation.system_prompt}]},
             "contents": self._contents(conversation),
             "tools": to_gemini(tools),
         }
+        if thinking_budget is not None:
+            p["generationConfig"] = {"thinkingConfig": {"thinkingBudget": thinking_budget}}
+        return p
 
     # The key rides in the x-goog-api-key header (as the official SDK / Google guidance do)
     # rather than a ?key= URL param, so the secret never lands in a URL (logs, tracing, export).
@@ -95,14 +115,16 @@ class GoogleProvider:
         return ProviderResponse(message=Message.assistant(text=text or None, tool_calls=calls), raw=raw)
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None], *, cancel=None) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None, reasoning=None) -> ProviderResponse:
         # Gemini SSE: :streamGenerateContent?alt=sse yields `data: {chunk}` lines, each a partial
         # GenerateContentResponse. Emit text as it arrives; collect functionCall parts along the way.
+        budget = self._thinking_budget(model, reasoning)
+        payload = self._payload(conversation, tools, thinking_budget=budget)
         url = f"{BASE}/models/{model}:streamGenerateContent?alt=sse"
         text_parts: list = []
         calls: list = []
         last: dict = {}
-        for line in post_stream(url, self._payload(conversation, tools), headers=self._headers(),
+        for line in post_stream(url, payload, headers=self._headers(),
                                 provider=self.name, cancel=cancel):
             line = line.strip()
             if not line.startswith("data:"):

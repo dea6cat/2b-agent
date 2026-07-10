@@ -791,6 +791,34 @@ def _continuity(rest, app):
         app.ui.print("Continuity [bold]off[/bold] — each message starts a fresh thread.")
 
 
+_THINK_ALIASES = {"off": "off", "no": "off", "false": "off",
+                  "on": "on", "yes": "on", "true": "on",
+                  "low": "low", "medium": "medium", "med": "medium", "high": "high"}
+
+
+@command("think")
+def _think(rest, app):
+    """Control model reasoning: /think off|on|low|medium|high (bare shows current)."""
+    session = app.session
+    resolved = registry.resolve(app.registry, session.default_model)
+    provider, model = resolved if resolved else (None, "")
+    supports = bool(provider and provider.supports_reasoning(model))
+    arg = rest.strip().lower()
+    if not arg:
+        eff = orchestrator._reasoning_effective(session) or "default"
+        cap = "supported" if supports else "not supported by the current model"
+        app.ui.print(f"Reasoning: [bold]{eff}[/bold] ({cap}).  "
+                     "Set with /think off|on|low|medium|high.")
+        return
+    level = _THINK_ALIASES.get(arg)
+    if level is None:
+        app.ui.print("[red]Usage:[/red] /think off|on|low|medium|high")
+        return
+    session.think = level
+    note = "" if supports else "  (current model doesn't support reasoning — no effect)"
+    app.ui.print(f"Reasoning [bold]{level}[/bold] for this session.{note}")
+
+
 def _session_conversations(session) -> list[dict]:
     """Every conversation in the session, in task order, deduped by object identity — so a
     shared continuity thread appears once, while detached tasks each contribute their own.

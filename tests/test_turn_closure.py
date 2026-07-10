@@ -35,25 +35,25 @@ class _Raises(_FakeProvider):
     def __init__(self, exc):
         self._exc = exc
 
-    def stream(self, conv, model, tools, on_text, *, cancel=None):
+    def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
         raise self._exc
 
 
 class _FinalText(_FakeProvider):
-    def stream(self, conv, model, tools, on_text, *, cancel=None):
+    def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
         on_text("all done")
         return ProviderResponse(message=Message.assistant(text="all done"), raw={})
 
 
 class _EmptyLength(_FakeProvider):
-    def stream(self, conv, model, tools, on_text, *, cancel=None):
+    def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
         return ProviderResponse(message=Message.assistant(), raw={}, done_reason="length")
 
 
 class _CallsTool(_FakeProvider):
     """Returns one tool call so dispatch runs — the path where a raising
     _dispatch_tool previously escaped run_task entirely (past only `finally`)."""
-    def stream(self, conv, model, tools, on_text, *, cancel=None):
+    def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
         call = ToolCall.new("read_file", {"path": "a.py"})
         return ProviderResponse(message=Message.assistant(tool_calls=[call]), raw={})
 
@@ -146,7 +146,7 @@ class PersistsFinalAnswer(unittest.TestCase):
         # A reasoning model may put its answer in `thinking` with empty text; history
         # should carry what the UI showed (the thinking fallback) as a clean text turn.
         class _ThinkingOnly(_FakeProvider):
-            def stream(self, conv, model, tools, on_text, *, cancel=None):
+            def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
                 return ProviderResponse(message=Message.assistant(thinking="the answer is 42"), raw={})
 
         task, _ = _run(_ThinkingOnly())
@@ -159,7 +159,7 @@ class PersistsFinalAnswer(unittest.TestCase):
         # the last thing in the thread, so the next message continues from it.
         class _ToolThenAnswer(_FakeProvider):
             def __init__(self): self.i = 0
-            def stream(self, conv, model, tools, on_text, *, cancel=None):
+            def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
                 self.i += 1
                 if self.i == 1:
                     return ProviderResponse(message=Message.assistant(

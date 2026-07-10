@@ -58,6 +58,9 @@ class OpenAICompatProvider:
     def is_available(self) -> bool:
         return bool(self.api_key)
 
+    def supports_reasoning(self, model: str) -> bool:
+        return False   # reasoning deferred (see design §7)
+
     def list_models(self) -> list[str]:
         if not self._dynamic:
             return list(self._static_models)
@@ -123,7 +126,7 @@ class OpenAICompatProvider:
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None], *, cancel=None) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None, reasoning=None) -> ProviderResponse:
         payload = {
             "model": model,
             "messages": self._messages(conversation),

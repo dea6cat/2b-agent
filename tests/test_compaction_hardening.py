@@ -18,10 +18,12 @@ class _FakeSummarizer:
     """Captures the summarization request it's handed and returns a canned summary."""
     def __init__(self, out="GOAL: build x\nDONE:\n1. did a\nOUTSTANDING: y\nSTATE: z"):
         self.out, self.seen_system, self.seen_input = out, None, None
+        self.seen_reasoning = "unset"
 
-    def stream(self, conv, model, tools, on_text, *, cancel=None):
+    def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
         self.seen_system = conv.system_prompt
         self.seen_input = conv.messages[0].text if conv.messages else ""
+        self.seen_reasoning = _kwargs.get("reasoning")
         on_text(self.out)
         return ProviderResponse(message=Message.assistant(text=self.out), raw={})
 
@@ -55,6 +57,13 @@ class Compact(unittest.TestCase):
         self.assertIn("did a", recap)
         self.assertIn("Recently-touched files: a.py, b.py", recap)
         self.assertNotIn(orchestrator.COMPACT_UPDATE, prov.seen_system)   # fresh: no update instruction
+
+    def test_compaction_runs_with_reasoning_off(self):
+        # Summarization never needs thinking — compaction forces reasoning="off".
+        conv = _long_conv()
+        prov = _FakeSummarizer()
+        orchestrator.compact_conversation(conv, prov, "m")
+        self.assertEqual(prov.seen_reasoning, "off")
 
     def test_iterative_update_feeds_prior_summary(self):
         conv = _long_conv(prior_recap="GOAL: build x\nDONE:\n1. earlier thing\nOUTSTANDING: rest")

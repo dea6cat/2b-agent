@@ -23,7 +23,7 @@ class RunExplorer(unittest.TestCase):
         ])
         class FakeProvider:
             name = "anthropic"
-            def stream(self, conv, model, tools_, on_text, *, cancel=None):
+            def stream(self, conv, model, tools_, on_text, *, cancel=None, **_kwargs):
                 from two_b.providers.base import ProviderResponse
                 return ProviderResponse(message=next(calls), raw={})
         out = subagents.run_explorer("find Widget", FakeProvider(), "m")
@@ -149,7 +149,7 @@ class RunWorker(unittest.TestCase):
         ])
         class FP:
             name="anthropic"
-            def stream(self, conv, model, tools_, on_text, *, cancel=None):
+            def stream(self, conv, model, tools_, on_text, *, cancel=None, **_kwargs):
                 from two_b.providers.base import ProviderResponse
                 return ProviderResponse(message=next(seq), raw={})
         report, changes = subagents.run_worker("bump v", FP(), "m")

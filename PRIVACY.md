@@ -45,6 +45,11 @@ store file and tool content verbatim, if you have 2B read a file containing secr
 is written to your local history/undo store (on your machine, owner-readable). Remove it by
 deleting `~/.config/2b/` or running `2b --rm`.
 
+Separately, after edits land, 2B runs the project's discovered check commands (e.g. `dart analyze`,
+`go test`, `npm run test`) as local subprocesses on your machine — write-confined under the same
+workspace sandbox as `run_command` — and on failure feeds the errors back for a bounded fix loop.
+Nothing is sent anywhere. Opt out with `TWOB_NO_VERIFY=1`.
+
 ## 3. What leaves your machine
 
 ### 3a. Your model provider (the main one)
@@ -109,7 +114,8 @@ receiving content you direct the agent to read.
 
 - Use a **local Ollama model** to keep all code on your machine.
 - `TWOB_NO_HISTORY=1` — don't persist sessions/undo · `TWOB_NO_UPDATE_CHECK=1` — no update check ·
-  `TWOB_NO_MODEL_FETCH=1` / `--no-discover` — no model discovery.
+  `TWOB_NO_MODEL_FETCH=1` / `--no-discover` — no model discovery · `TWOB_NO_VERIFY=1` — no host-run
+  verify loop after edits.
 - Delete `~/.config/2b/` or run `2b --rm` to remove all stored data (keys, history, preferences).
 - Choose which providers and MCP servers to connect, and review their terms.
 

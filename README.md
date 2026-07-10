@@ -332,12 +332,19 @@ small as you keep it.
   trained for. That number drives auto-compaction (~75%) and the read-a-section threshold. Set
   `TWOB_CONTEXT_TOKENS` to override (higher if you want to spend more RAM, lower to save it).
 
+- **Verify loop.** After a turn lands edits, 2B runs the project's own checks (analyze/lint/typecheck,
+  test suites — whatever it detects for your stack) as local subprocesses — write-confined under the
+  same workspace sandbox as `run_command` — and on failure feeds the errors back for a bounded fix
+  loop (max 2 rounds). Nothing is sent anywhere.
+
 - **Environment toggles.** Everything on-by-default can be turned off:
   `TWOB_CONTEXT_TOKENS` (override the local window) · `TWOB_NO_DIAGNOSTICS` (skip post-edit checks) ·
   `TWOB_NO_LSP` (regex symbol map instead of a language server) · `TWOB_NO_SEATBELT` /
   `TWOB_SEATBELT=strict` (relax / harden the `run_command` sandbox) · `TWOB_NO_TRIM` (keep bulky tool
   output in each request) · `TWOB_NO_HISTORY` (don't persist sessions) · `TWOB_SUBAGENT_MODEL` (run
-  delegated sub-agents on a cheaper model) · `TWOB_NO_UPDATE_CHECK` (no background update check).
+  delegated sub-agents on a cheaper model) · `TWOB_NO_UPDATE_CHECK` (no background update check) ·
+  `TWOB_NO_VERIFY` (turn off the verify loop) · `TWOB_VERIFY_FAST` (skip test suites, static checks
+  only) · `TWOB_VERIFY_CMD="cmd1;;cmd2"` (declare your own checks for stacks 2B can't auto-detect).
 
 ---
 

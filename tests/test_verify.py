@@ -1,7 +1,8 @@
-"""Tests for deterministic verification (verify.py) + the done-verify nudge.
+"""Tests for deterministic verification (verify.py) + the host-run verify-and-fix loop.
 
-Placeholder/stub detection, repo-check discovery, and the once-per-task reminder
-to verify edits. Host-side; the frozen schema is untouched.
+Placeholder/stub detection, repo-check discovery, and the bounded loop that runs the
+project's real checks after edits and feeds failures back to the model. Host-side; the
+frozen schema is untouched.
 Run: `python -m unittest tests.test_verify`.
 """
 import os
@@ -9,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -17,6 +19,7 @@ from two_b.conversation import Message, ToolCall  # noqa: E402
 from two_b.orchestrator import EventType  # noqa: E402
 from two_b.providers.base import ProviderResponse  # noqa: E402
 from two_b.session import Session, Task  # noqa: E402
+from two_b.verify import CheckResult  # noqa: E402
 
 
 class ScanText(unittest.TestCase):
@@ -75,9 +78,9 @@ class DiscoverChecks(unittest.TestCase):
         with open(os.path.join(d, "package.json"), "w") as f:
             f.write('{"scripts": {"test": "jest", "lint": "eslint .", "build": "tsc"}}')
         cmds = verify.discover_checks(d)
-        self.assertIn("npm run test", cmds)
-        self.assertIn("npm run lint", cmds)
-        self.assertNotIn("npm run build", cmds)   # build isn't a check
+        self.assertIn(("npm run test", "tests"), cmds)
+        self.assertIn(("npm run lint", "fast"), cmds)
+        self.assertNotIn("npm run build", [c for c, _ in cmds])   # build isn't a check
 
     def test_pyproject_and_tests_dir(self):
         d = self._dir()
@@ -85,16 +88,16 @@ class DiscoverChecks(unittest.TestCase):
             f.write("[tool.ruff]\nline-length = 100\n")
         os.mkdir(os.path.join(d, "tests"))
         cmds = verify.discover_checks(d)
-        self.assertIn("pytest", cmds)
-        self.assertIn("ruff check .", cmds)
+        self.assertIn(("pytest", "tests"), cmds)
+        self.assertIn(("ruff check .", "fast"), cmds)
 
     def test_pubspec(self):
         d = self._dir()
         open(os.path.join(d, "pubspec.yaml"), "w").close()
         os.mkdir(os.path.join(d, "test"))
         cmds = verify.discover_checks(d)
-        self.assertIn("dart analyze", cmds)
-        self.assertIn("dart test", cmds)
+        self.assertIn(("dart analyze", "fast"), cmds)
+        self.assertIn(("dart test", "tests"), cmds)
 
     def test_bare_dir_has_no_checks(self):
         self.assertEqual(verify.discover_checks(self._dir()), [])
@@ -125,7 +128,7 @@ class _EditThenFinalize:
 
 
 class VerifyNudge(unittest.TestCase):
-    def test_edits_without_verifying_get_one_nudge(self):
+    def test_edits_then_passing_checks_run_once_and_report_pass(self):
         proj = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, proj, ignore_errors=True)
         cwd = os.getcwd()
@@ -138,12 +141,43 @@ class VerifyNudge(unittest.TestCase):
         s = Session(auto_yes=True, default_model="fake:m")          # auto-approve the edit
         t = Task(description="bump a")
         events = []
-        orchestrator.run_task(s, t, events.append, {"fake": provider})
+        with patch.object(verify, "run_checks",
+                           return_value=[CheckResult("dart analyze", "pass", "")]):
+            orchestrator.run_task(s, t, events.append, {"fake": provider})
         self.assertIn(EventType.TASK_DONE, [e.type for e in events])
-        # The model edited, then tried to finish; a single verify reminder was injected.
-        nudges = [m for m in provider.last_conv.messages
-                  if m.text and "haven't verified" in m.text]
-        self.assertEqual(len(nudges), 1)
+        # The model edited, then tried to finish; the host ran the real checks once and
+        # they passed, so no fix-loop feedback was injected and the task finished.
+        feedback = [m for m in provider.last_conv.messages
+                    if m.text and "did not pass the project checks" in m.text]
+        self.assertEqual(feedback, [])
+        passed = [e for e in events if e.type == EventType.LOG and "checks passed" in e.payload.get("text", "")]
+        self.assertEqual(len(passed), 1)
+
+    def test_failing_checks_are_fed_back_then_bounded_by_max_rounds(self):
+        proj = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, proj, ignore_errors=True)
+        cwd = os.getcwd()
+        os.chdir(proj)
+        self.addCleanup(os.chdir, cwd)
+        open(os.path.join(proj, "pubspec.yaml"), "w").close()
+        with open(os.path.join(proj, "x.dart"), "w") as f:
+            f.write("final a = 1;\n")
+        provider = _EditThenFinalize()
+        s = Session(auto_yes=True, default_model="fake:m")
+        t = Task(description="bump a")
+        events = []
+        with patch.object(verify, "run_checks",
+                           return_value=[CheckResult("dart analyze", "fail", "error: bad")]):
+            orchestrator.run_task(s, t, events.append, {"fake": provider})
+        self.assertIn(EventType.TASK_DONE, [e.type for e in events])
+        # Every round fails, so the loop feeds it back exactly MAX_VERIFY_ROUNDS times,
+        # then gives up and finishes rather than looping forever.
+        feedback = [m for m in provider.last_conv.messages
+                    if m.text and "did not pass the project checks" in m.text]
+        self.assertEqual(len(feedback), orchestrator.MAX_VERIFY_ROUNDS)
+        exhausted = [e for e in events if e.type == EventType.LOG
+                     and "still failing" in e.payload.get("text", "")]
+        self.assertEqual(len(exhausted), 1)
 
     def test_empty_finalizing_turn_is_not_nudged(self):
         # A finalizing turn with empty content must NOT be nudged — appending an empty
@@ -171,10 +205,13 @@ class VerifyNudge(unittest.TestCase):
         s = Session(auto_yes=True, default_model="fake:m")
         t = Task(description="bump a")
         events = []
-        orchestrator.run_task(s, t, events.append, {"fake": provider})
+        with patch.object(verify, "run_checks",
+                           return_value=[CheckResult("dart analyze", "pass", "")]):
+            orchestrator.run_task(s, t, events.append, {"fake": provider})
         self.assertIn(EventType.TASK_DONE, [e.type for e in events])
-        nudges = [m for m in provider.last_conv.messages if m.text and "haven't verified" in m.text]
-        self.assertEqual(nudges, [])   # empty finalize was not nudged
+        feedback = [m for m in provider.last_conv.messages
+                    if m.text and "did not pass the project checks" in m.text]
+        self.assertEqual(feedback, [])   # empty finalize was not run through the check loop
 
 
 if __name__ == "__main__":

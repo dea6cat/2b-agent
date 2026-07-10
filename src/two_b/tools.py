@@ -174,6 +174,12 @@ def _should_skip_dir(name):
 def _should_skip_file(name):
     # Aider leaves .aider.chat.history.md / .aider.input.history / etc. in any
     # project it's run in — noise for search_files/list_files, not real content.
+    # 2B's own session exports (2b-session-<timestamp>.md, see commands.py) are logs
+    # that contain verbatim code from past answers — skip them in the walk so the agent
+    # doesn't search or edit its own transcripts as if they were project source. Explicit
+    # read_file by path still works (this only filters search_files/list_files/basename).
+    if name.startswith("2b-session-") and name.endswith(".md"):
+        return True
     return name.startswith(SKIP_DIR_PREFIXES)
 
 

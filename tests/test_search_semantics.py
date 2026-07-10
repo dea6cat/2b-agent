@@ -153,6 +153,21 @@ class SkipsDependencyDirs(Project):
         self.assertIn(os.path.join("app", "mod.py"), out)
         self.assertNotIn(".venv", out)
 
+    def test_search_skips_2b_session_exports(self):
+        # 2B's own session logs contain verbatim code from past answers; the walk must not
+        # surface them (or the agent searches/edits its own transcripts as if they were source).
+        self._write("app/mod.py", "WIDGET = 1\n")
+        self._write("2b-session-20260709-155904.md", "```dart\nWIDGET = 2\n```\n")
+        out = tools.do_search_files("WIDGET", ".")
+        self.assertIn(os.path.join("app", "mod.py"), out)
+        self.assertNotIn("2b-session-", out)
+
+    def test_basename_fallback_ignores_session_exports(self):
+        # A read of a bare name must not resolve to a session-log namesake.
+        self._write("2b-session-20260709-155904.md", "irrelevant\n")
+        self.assertEqual(tools._find_by_basename("2b-session-20260709-155904.md",
+                                                 "2b-session-20260709-155904.md"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

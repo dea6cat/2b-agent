@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import catalog, changelog, cmdguard, conversation, diagnostics, mcp_client, planparse, registry, tools, verify
+from . import catalog, changelog, cmdguard, conversation, diagnostics, mcp_client, planparse, registry, tools, untrusted, verify
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers import base as _provider_base
 from .providers.base import ProviderError, _Cancelled, abort_all_connections, stream_with_retry
@@ -55,6 +55,7 @@ CONTEXT_BUDGETS = {
 }
 COMPACT_AT = 0.75       # compact once estimated usage crosses this fraction
 COMPACT_KEEP_TAIL = 6   # most-recent messages kept verbatim (rest are summarized)
+MAX_VERIFY_ROUNDS = 2   # bound on host-run verify-and-fix rounds per task
 _COMPACT_MAX_INPUT_CHARS = 48_000   # cap the transcript handed to the summarizer
 
 # Structured summary template (P27). A coherent shape — GOAL / DONE / OUTSTANDING / STATE —
@@ -387,6 +388,38 @@ def _asked_instead_of_acting(text: str) -> bool:
     tool calls so far — the fix is to look with the read-only tools, then ask only if
     still genuinely blocked."""
     return bool(text) and "?" in text and bool(_CLARIFY_RE.search(text))
+
+
+_FALSE_DONE_NUDGE = (
+    "Your edits did NOT apply — every edit_file/write_file this task returned an error "
+    "(see the results above), so no file was changed. Do not report this as done. Use "
+    "read_file to find the correct path and the exact text to match, then retry the edit; "
+    "only finish once an edit actually succeeds."
+)
+
+
+def _edits_all_failed(edit_attempts: int, applied_count: int) -> bool:
+    """True when the model tried to edit files but none landed — every edit_file/write_file
+    this task returned an error, so nothing changed. `applied_count` is len(task.edit_history),
+    which is appended only on a successful write/edit (see apply_write/apply_edit). Used to
+    stop a model (a local-model failure mode) from declaring success on edits that never
+    applied. False when no edit was attempted, or at least one applied."""
+    return edit_attempts > 0 and applied_count == 0
+
+
+def _verify_to_run(checks, fast_only: bool):
+    """The checks to run this round — drop the test tier under TWOB_VERIFY_FAST."""
+    return [(c, k) for c, k in checks if not (fast_only and k == "tests")]
+
+
+def _verify_verdict(results) -> str:
+    """'cancelled' if any check was aborted (ESC — stop the task), else 'fail' if any failed,
+    else 'pass' (only passes/skips)."""
+    if any(r.status == "cancelled" for r in results):
+        return "cancelled"
+    if any(r.status == "fail" for r in results):
+        return "fail"
+    return "pass"
 
 
 def _persist_final(conv, msg) -> None:
@@ -1466,12 +1499,14 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     tool_calls_made = 0    # any tool calls dispatched this task (gates the intent-stall nudge)
     stall_nudges = 0       # intent-only stall nudge fires at most once
     clarify_nudges = 0     # "asked instead of acting" nudge fires at most once
-    verify_nudged = False  # done-verify reminder fires at most once per task
+    verify_rounds = 0   # host-run verify-and-fix rounds, bounded by MAX_VERIFY_ROUNDS
+    edit_attempts = 0      # edit_file/write_file calls dispatched (any outcome), across turns
+    false_done_nudged = False  # "declared done but no edit applied" nudge fires at most once
     try:
         # The project's real check commands (test/lint), discovered once, to remind a model
         # that can run commands to verify its edits before finishing (see below). Inside the
         # try so even a surprise here lands on the never-throw closure.
-        repo_checks = verify.discover_checks(os.getcwd()) if not os.environ.get("TWOB_NO_VERIFY") else []
+        repo_checks = verify.discover_or_override(os.getcwd()) if not os.environ.get("TWOB_NO_VERIFY") else []
         # Valid tool names for this task, so coerce_tool_args can let a name nested in
         # a malformed wrapper override an empty/unknown outer name. Fixed for the task.
         known_tools = tuple(s.name for s in _active_specs(is_local))
@@ -1562,17 +1597,55 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                     conv.append(msg)
                     conv.append(Message.user(_CLARIFY_NUDGE))
                     continue
-                # Done-verify (once): if the model made edits and can run commands, remind it
-                # to run the project's real checks before finishing — the deterministic
-                # counterpart to "declare done, then actually verify". Local models (run_git
-                # only) can't run project checks, so it's skipped for them.
-                if (content and not verify_nudged and not is_local and repo_checks and task.edit_history):
-                    verify_nudged = True
+                # Host-run verify-and-fix: the model finished with edits that landed — run the
+                # project's own checks and, on failure, feed the errors back for a bounded fix
+                # loop. The HOST runs them (not the model), so local models get toolchain
+                # grounding without run_command. Replaces the old cloud-only verify nudge.
+                if content and repo_checks and task.edit_history:
+                    to_run = _verify_to_run(repo_checks, bool(os.environ.get("TWOB_VERIFY_FAST")))
+                    if to_run:
+                        task.status_line = "Verifying"
+                        results = verify.run_checks(
+                            to_run, cancel=task.cancel_flag,
+                            on_start=lambda c: on_event(AgentEvent(EventType.LOG, task.id,
+                                                                   {"text": f"Verifying — running {c}…"})))
+                        verdict = _verify_verdict(results)
+                        if verdict == "cancelled" or task.cancel_flag.is_set():
+                            _finish_stopped(task, on_event)
+                            return
+                        if verdict == "fail":
+                            failures = [r for r in results if r.status == "fail"]
+                            if verify_rounds < MAX_VERIFY_ROUNDS:
+                                verify_rounds += 1
+                                body = "\n\n".join(
+                                    f"`{r.cmd}` failed:\n" + untrusted.wrap(r.output, f"check:{r.cmd}")
+                                    for r in failures)
+                                conv.append(msg)
+                                conv.append(Message.user(
+                                    "Your edits did not pass the project checks. Fix the code so "
+                                    "these pass, then finish:\n\n" + body))
+                                on_event(AgentEvent(EventType.LOG, task.id,
+                                                    {"text": f"{len(failures)} check(s) failed — fixing…"}))
+                                continue
+                            # Exhausted the fix budget — finish, but report the true state.
+                            on_event(AgentEvent(EventType.LOG, task.id, {"text":
+                                "⚠ checks still failing after "
+                                f"{MAX_VERIFY_ROUNDS} fix attempt(s): "
+                                + ", ".join(r.cmd for r in failures)}))
+                        else:
+                            ran = [r.cmd for r in results if r.status == "pass"]
+                            if ran:
+                                on_event(AgentEvent(EventType.LOG, task.id,
+                                                    {"text": "✓ checks passed: " + ", ".join(ran)}))
+                # Declared done, but every edit this task attempted errored (edit_history is
+                # empty despite edit_file/write_file calls) — nothing was changed. Stop the
+                # false "done" (a local-model failure mode) once, pointing back at the errors so
+                # it retries for real. Fires for local and cloud alike.
+                if (content and not false_done_nudged
+                        and _edits_all_failed(edit_attempts, len(task.edit_history))):
+                    false_done_nudged = True
                     conv.append(msg)
-                    conv.append(Message.user(
-                        "Before finishing: you've edited files but haven't verified them. Run the "
-                        f"project's checks with run_command ({', '.join(repo_checks[:3])}) and fix any "
-                        "failures; if they pass (or you already ran them), give your final answer."))
+                    conv.append(Message.user(_FALSE_DONE_NUDGE))
                     continue
                 planparse.finalize_steps(task.plan_steps)
                 task.status_line = ""
@@ -1601,6 +1674,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             for tc in calls:
                 tc.name, tc.arguments = tools.coerce_tool_args(tc.name, tc.arguments, known_tools)
             tool_calls_made += len(calls)
+            edit_attempts += sum(1 for tc in calls if tc.name in ("edit_file", "write_file"))
             results = []
             nudge_pending = False
 

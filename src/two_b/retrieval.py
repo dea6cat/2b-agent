@@ -385,7 +385,11 @@ def retrieve_block(root: str, task: str) -> str:
         if time.monotonic() < deadline:
             seeds = enrich_seeds_with_refs(seeds, ids, root, deadline)
         ranked = rank(task, root, graph, seeds, ids, top_k())
-        if not ranked or ranked[0].score < MIN_SCORE:   # confidence gate
+        # Confidence gate. In practice the operative gate is seed-existence (a `if not seeds`
+        # above): every seed is a graph distance-0 node, so ranked[0] always scores >= W_GRAPH,
+        # comfortably above MIN_SCORE. The score check is kept as a cheap defensive backstop in
+        # case future scoring/weights let the top candidate fall below the floor.
+        if not ranked or ranked[0].score < MIN_SCORE:
             return ""
         return format_block(ranked, root)
     except Exception:

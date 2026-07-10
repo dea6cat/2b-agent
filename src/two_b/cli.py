@@ -195,7 +195,9 @@ class App:
                     self.session.active_task_id = None
                     return
 
-                if not mid_stream:
+                # Don't restart the transient status spinner while a reply OR a thinking run is
+                # mid-stream — it would blink around the partial (dim) line and garble it.
+                if not mid_stream and thinking_started is None:
                     if live is None:
                         live = Live(render_session(self.session), console=self.console,
                                     refresh_per_second=12, transient=True)

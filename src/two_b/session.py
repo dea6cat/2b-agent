@@ -146,6 +146,7 @@ class Session:
     active_task_id: str | None = None
     thread: Conversation | None = None   # live conversation the foreground line continues on (continuity)
     continuity_override: bool | None = None   # None = provider default (cloud on, local off); True/False = /continuity
+    think: str | None = None     # /think override: off|on|low|medium|high; None = provider default
     granted: set = field(default_factory=set)    # tool keys "allowed for this session" (skip confirm)
     # Events emitted by any task thread, drained by the UI thread so all
     # rendering happens on one thread regardless of which task produced it.

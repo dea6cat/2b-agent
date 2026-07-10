@@ -272,6 +272,8 @@ class OllamaProvider:
                 on_text(m["content"])
             if m.get("thinking"):
                 thinking.append(m["thinking"])
+                if on_thinking:
+                    on_thinking(m["thinking"])
             for c in m.get("tool_calls") or []:
                 fn = c["function"]
                 args = _parse_args(fn["arguments"])

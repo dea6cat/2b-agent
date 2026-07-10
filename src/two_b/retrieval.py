@@ -183,3 +183,64 @@ def bfs_distances(graph: Graph, seeds: set, radius: int = GRAPH_RADIUS) -> dict:
             dist[p] = d
         frontier = nxt
     return dist
+
+
+MAX_SEED_FILES = 20
+
+# Words we never treat as code identifiers when seeding from prose.
+_STOP = frozenset("""the a an and or of to in on for fix add edit make update change
+implement create remove delete refactor investigate this that with into from flow bug issue
+error test file code function class method""".split())
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def task_identifiers(task: str) -> list[str]:
+    """Candidate code identifiers in the task text: CamelCase / snake_case / dotted names and
+    other non-stopword tokens, order-stable and deduped."""
+    out, seen = [], set()
+    for tok in _WORD.findall(task or ""):
+        low = tok.lower()
+        if low in _STOP or len(tok) < 3:
+            continue
+        # A likely identifier: has case variation, an underscore, or is a dotted attribute head.
+        looks_code = any(c.isupper() for c in tok[1:]) or "_" in tok or tok[0].isupper()
+        key = tok
+        if key not in seen and (looks_code or low not in _STOP):
+            seen.add(key)
+            out.append(tok)
+    return out
+
+
+def _lexical_seeds(task: str, graph: Graph) -> set:
+    """Files whose path stem appears (case-insensitively) as a whole token in the task text."""
+    terms = {w.lower() for w in _WORD.findall(task or "") if w.lower() not in _STOP and len(w) >= 3}
+    hits = set()
+    for rel in graph.files:
+        stem = os.path.splitext(os.path.basename(rel))[0].lower()
+        parts = set(re.split(r"[_\-.]", stem)) | {stem}
+        if parts & terms:
+            hits.add(rel)
+    return hits
+
+
+def seeds_from_task(task: str, root: str, graph: Graph) -> tuple:
+    """(seed rel-paths, identifiers used). Seeds = files defining the task's identifiers
+    (symbols.definitions, tiered LSP→MCP→regex) ∪ files whose name matches a task term. Capped."""
+    ids = task_identifiers(task)
+    seeds: set = set()
+    for ident in ids:
+        if not symbols.is_identifier(ident):
+            continue
+        for loc in symbols.definitions(ident, root):
+            rel = os.path.relpath(loc.path, root) if os.path.isabs(loc.path) else loc.path
+            seeds.add(rel)
+    seeds |= _lexical_seeds(task, graph)
+    seeds = {s for s in seeds if s in graph.files}     # keep only real graph nodes
+    if len(seeds) > MAX_SEED_FILES:
+        seeds = set(sorted(seeds)[:MAX_SEED_FILES])
+    return seeds, ids
+
+
+def candidate_files(graph: Graph, seeds: set) -> dict:
+    """rel -> graph distance for the seed neighborhood (seeds at distance 0)."""
+    return bfs_distances(graph, seeds)

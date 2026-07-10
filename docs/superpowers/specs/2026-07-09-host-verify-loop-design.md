@@ -63,47 +63,71 @@ only to fill gaps.
 | **Dart/Flutter** (existing) | `pubspec.yaml` | `dart analyze` | `dart test`/`flutter test` |
 | **Go** (new) | `go.mod` | `go build ./...` | `go test ./...` |
 | **Swift** (new) | `Package.swift` (SwiftPM; Xcode-project `xcodebuild` is out of scope) | `swift build` | `swift test` |
-| **Kotlin** (new) | `build.gradle.kts` or `build.gradle` | `<gradle> check` | `<gradle> test`, where `<gradle>` is `./gradlew` if the wrapper exists, else `gradle` |
+| **Kotlin** (new) | `build.gradle.kts` or `build.gradle` | — (none in v1, see note) | `<gradle> check` — `<gradle>` = `./gradlew` if the wrapper exists, else `gradle` |
+
+The Fast/Tests columns are authoritative: **`discover_checks` returns `(cmd, kind)` pairs**, with
+`kind ∈ {"fast","tests"}` assigned by the detector that emitted the command (it knows the tool's
+semantics). The fuzzy `classify()` heuristic (§1) is used **only** for user-supplied
+`TWOB_VERIFY_CMD` commands, where 2B can't know the tier.
 
 Notes:
 - JS/TS: the existing `package.json`-script detection already covers projects that expose
   `test`/`lint`/`typecheck` scripts; the new `tsc`/`eslint` fallbacks only fire when the
   matching script is absent, so we never run a linter twice.
-- Kotlin uses the Gradle wrapper (`./gradlew`) when present (no global Gradle needed); this also
-  covers Gradle-based Java, though Java isn't a target here.
-- All new commands are classified correctly by `classify()` (below) — `build`/`check` → fast,
-  `test` → tests.
+- **Kotlin/Gradle: `check` is test-inclusive by design** — in Gradle's lifecycle `check`
+  dependsOn `test`, so `<gradle> check` runs the full suite. It is therefore emitted as a
+  **single command classified as `tests`** (not fast), which (a) means `TWOB_VERIFY_FAST`
+  correctly skips it and (b) avoids running the suite twice (no separate `<gradle> test` entry).
+  v1 ships **no** fast/static Kotlin check: a portable compile-only Gradle task doesn't exist
+  (`compileKotlin` vs Android's `compileDebugKotlin` vs base `testClasses` all vary, and naming a
+  missing task fails the check), so a fast Kotlin check is left to `TWOB_VERIFY_CMD`
+  (e.g. `./gradlew ktlintCheck` or `detekt` for projects that have them). Uses the wrapper
+  (`./gradlew`) when present so no global Gradle is needed.
 
 ## Design
 
-### 1. Check classification (`verify.py`)
+### 1. Tiers (`verify.py`)
 
-Add a helper to split discovered commands into **fast/static** vs **tests**, by a
-language-neutral name heuristic:
-- fast (static): command contains `analyze`, `lint`, `typecheck`, `check`, `ruff`, `vet`,
-  `tsc`, `mypy`, or `build` (covers `go build`, `swift build`, `<gradle> check`, `tsc`, `eslint`).
-- tests: command contains `test` or `spec`.
-  (Order matters: a command like `swift test` is tests, `swift build` is fast; classify on the
-  tests keyword first so a `build` substring can't misclassify a test command.)
-- anything unmatched is treated as fast (conservative — run it, it's usually quick).
+Every check carries a `kind ∈ {"fast","tests"}` so `TWOB_VERIFY_FAST` can drop the test tier
+generically. **Detected checks get their kind from the detector** (§0 columns) — authoritative,
+because the detector knows e.g. that Gradle `check` runs tests but npm `check` doesn't. A
+substring heuristic can't make that distinction, which is exactly why the tier is assigned at
+detection, not inferred afterward.
 
-Used so the fast-only opt-down (`TWOB_VERIFY_FAST`) works generically even though the default
-runs everything.
+`classify(cmd) -> "fast" | "tests"` is a **fallback used only for user `TWOB_VERIFY_CMD`
+commands** (unknown tier): `tests` if the command contains `test` or `spec` (checked first),
+else `fast`. Tests-keyword-first so `swift test` → tests while `swift build` → fast; unmatched →
+fast (conservative). It is *not* applied to detected checks.
 
-New: `discover_or_override(root) -> list[str]` — returns `TWOB_VERIFY_CMD` commands if set,
-else `discover_checks(root)`. `classify(cmds) -> (fast, tests)`.
+APIs:
+- `discover_checks(root) -> list[(cmd, kind)]` — the detectors in §0, each pair tier-tagged.
+- `discover_or_override(root) -> list[(cmd, kind)]` — if `TWOB_VERIFY_CMD` is set, split it into
+  commands and tag each via `classify()`; else `discover_checks(root)`.
 
 ### 2. Runner (`verify.py`)
 
-`run_checks(cmds, *, cancel, per_cmd_timeout) -> list[CheckResult]` where
-`CheckResult = (cmd: str, ok: bool, output: str)`.
+`run_checks(checks, *, cancel, per_cmd_timeout, on_start=None) -> list[CheckResult]` where
+`checks` is the `(cmd, kind)` list and
+`CheckResult = (cmd: str, status: "pass"|"fail"|"skipped"|"cancelled", output: str)`.
+- `on_start(cmd)` is invoked immediately before each command runs, so the loop/UI can emit a
+  live "running `<cmd>`…" line (resolves the blocking-return-vs-progress gap — the caller drives
+  progress per command without waiting for the whole batch).
 - Executes each command host-side via the existing cancellable subprocess runner
   (`tools._run_cancellable`, shell=True, `env=tools._child_env()` for secret-scrubbing),
-  honoring `task.cancel_flag` so **ESC aborts a running verify** (ties into the global-abort
-  work) and a per-command timeout.
-- Non-zero exit → `ok=False`; output (stdout+stderr, truncated) captured for feedback.
-- A missing command binary (`FileNotFoundError`) → **skip that check** (not a failure) — never
-  fail a task because the toolchain isn't installed.
+  honoring `cancel` (`task.cancel_flag`) so **ESC aborts a running verify** (ties into the
+  global-abort work) and a per-command timeout.
+- **Missing binary → `skipped`, not `fail`.** Under `shell=True` a missing binary returns shell
+  exit **127**, not a `FileNotFoundError` — so detect it *before* running: `shutil.which(first
+  shlex token)`; if `None`, record `skipped` and move on. (Verified: `shell=True` raises no
+  exception for a missing command; `shutil.which` resolves both PATH names and `./gradlew`.)
+- **`cancelled` is distinct from `fail`.** `_run_cancellable` returns a `"cancelled"` status on
+  abort/timeout-kill; map that to `CheckResult.status == "cancelled"` so the loop can stop the
+  task cleanly instead of treating an ESC as a rejected edit (see §3).
+- Otherwise: exit 0 → `pass`; non-zero → `fail`, with combined stdout+stderr captured.
+- **Output truncation:** cap each command's captured output and keep **head + tail** (reusing
+  `do_run_command`'s existing head-⅔/tail-⅓ elision), not tail-only — compiler/type errors
+  (`tsc`, `go build`, `dart analyze`) lead at the top while test summaries land at the bottom, so
+  keeping both ends preserves the actionable lines for either kind of check.
 - Does **not** route through the model-facing `cmdguard` confirmation — these are host-initiated,
   bounded, discovered/config'd commands, not model input.
 
@@ -116,23 +140,39 @@ there are checks:
 ```
 rounds = 0
 on each finalize with landed edits:
-  cmds = fast-only if TWOB_VERIFY_FAST else all discovered/override cmds
-  status_line = "Verifying"; emit progress (per command)
-  results = verify.run_checks(cmds, cancel=task.cancel_flag, per_cmd_timeout=…)
-  failures = [r for r in results if not r.ok]
-  if not failures:                      # all green
-      (optional) append a brief "✓ checks passed (<cmds>)" to the final answer
+  checks = [(c,k) for (c,k) in discover_or_override(cwd)
+            if not (TWOB_VERIFY_FAST and k == "tests")]     # fast-only drops the test tier
+  status_line = "Verifying"
+  results = verify.run_checks(checks, cancel=task.cancel_flag, per_cmd_timeout=…,
+                              on_start=lambda c: emit("running " + c + "…"))
+  if any(r.status == "cancelled" for r in results) or task.cancel_flag.is_set():
+      _finish_stopped(task, on_event); return          # ESC — NOT a failure, no round consumed
+  failures = [r for r in results if r.status == "fail"]  # "skipped" (missing tool) is not a failure
+  if not failures:                        # all green (or only skips)
+      (optional) append a brief "✓ checks passed (<ran cmds>)" to the final answer
       finish DONE
-  elif rounds < MAX_VERIFY_ROUNDS:      # feed back, let it fix
+  elif rounds < MAX_VERIFY_ROUNDS:        # feed back ALL failures, let it fix
       rounds += 1
       conv.append(model msg)
-      conv.append(Message.user("Your edits did not pass the project checks. `<cmd>` failed:\n"
-                               "<truncated output>\nFix the code so it passes, then finish."))
+      body = "\n\n".join(f.cmd + " failed:\n" + untrusted.wrap(f.output, "check:" + f.cmd)
+                         for f in failures)
+      conv.append(Message.user("Your edits did not pass the project checks. Fix the code so "
+                               "these pass, then finish:\n\n" + body))
       continue
-  else:                                 # exhausted — finish, but HONESTLY
-      surface "checks still failing after N attempts:\n<failures>" in the final output
+  else:                                   # exhausted — finish, but HONESTLY
+      surface "checks still failing after N attempts:" + all failing cmds (fenced) in the output
       finish DONE
 ```
+
+Three review-driven specifics baked in above:
+- **All failures in a round are reported together** (`failures`, joined) — if `tsc` *and*
+  `npm test` both fail, the model sees both and fixes them in one round instead of wasting a
+  round blind to the second.
+- **Check output is fenced with `untrusted.wrap(output, "check:<cmd>")`** before it enters the
+  conversation as a user-role message — build/test output is environment-derived text and could
+  contain injection-shaped content; this is the same mechanism tool results already use.
+- **A cancelled check ends the task via `_finish_stopped`** and neither consumes a fix round nor
+  is fed back as a rejection — an ESC during verify is a stop, not a failed edit.
 
 - `MAX_VERIFY_ROUNDS = 2` (then stop — never loop forever; report the true state).
 - Fires for local and cloud alike (no `is_local` gate).
@@ -156,23 +196,31 @@ gap while (possibly slow) tests run — same principle as the `--test` progress 
 
 ## Testing
 
-- `verify.classify` — fast vs tests split across every stack's command strings, incl. the
-  edge cases: `swift build`/`go build`/`<gradle> check` → fast, `swift test`/`go test ./...`/
-  `<gradle> test` → tests (tests keyword wins over a `build` substring), unmatched → fast.
-- `verify.discover_checks` per new stack, using tmp project dirs with only the trigger file:
-  - `go.mod` → `go build ./...`, `go test ./...`
-  - `Package.swift` → `swift build`, `swift test`
-  - `build.gradle.kts` (+ a `gradlew` file) → `./gradlew check`, `./gradlew test`; without the
-    wrapper → `gradle check`, `gradle test`
-  - `tsconfig.json` with no `typecheck`/`check` script → includes `tsc --noEmit`; **with** a
-    `typecheck` script → does **not** duplicate (`npm run typecheck` only)
-  - eslint config with no `lint` script → includes `eslint .`; with a `lint` script → no dupe
+- `verify.classify` (user-command fallback only) — `swift test`/`go test ./...`/`npm test` →
+  tests; `swift build`/`go build`/`tsc --noEmit`/`eslint .`/`npm run lint` → fast (tests keyword
+  wins over any `build` substring); unmatched → fast.
+- `verify.discover_checks` returns `(cmd, kind)` pairs; per new stack, using tmp project dirs
+  with only the trigger file:
+  - `go.mod` → `("go build ./...","fast")`, `("go test ./...","tests")`
+  - `Package.swift` → `("swift build","fast")`, `("swift test","tests")`
+  - `build.gradle.kts` **with** a `gradlew` file → `("./gradlew check","tests")` **only** (single
+    test-inclusive command; **no** separate `test` entry, **not** classified fast); **without**
+    the wrapper → `("gradle check","tests")`
+  - `tsconfig.json`, no `typecheck`/`check` script → includes `("tsc --noEmit","fast")`; **with**
+    a `typecheck` script → no dupe (`npm run typecheck` only)
+  - eslint config, no `lint` script → includes `("eslint .","fast")`; with a `lint` script → no dupe
   - unknown project (no manifest) → `[]`
-- `verify.discover_or_override` — returns `TWOB_VERIFY_CMD` when set (parsed), else discovery.
-- `verify.run_checks` — a passing command (`sh -c "exit 0"`) → ok; a failing one
-  (`sh -c "echo boom; exit 1"`) → not ok, output captured; a missing binary → skipped, not
-  failed; honors a pre-set cancel Event (returns promptly).
-- Loop trigger predicate (edits landed + checks exist + enabled) — small pure helper, unit test.
+- `verify.discover_or_override` — `TWOB_VERIFY_CMD` set → its parsed commands, each tagged via
+  `classify()`; else `discover_checks`.
+- `verify.run_checks` — `sh -c "exit 0"` → `pass`; `sh -c "echo boom; exit 1"` → `fail`, output
+  captured; a **missing binary** (`no-such-cmd …`) → `skipped` (via `shutil.which`, *not* a
+  `fail` at exit 127); a pre-set cancel Event → returns promptly with `cancelled`; `on_start`
+  fires once per command.
+- Loop behavior (drive `run_task` with a fake provider, matching the nudge-test precedent, or
+  test the extracted decision helper): all-green → DONE; a `fail` → one corrective turn carrying
+  **every** failing cmd's fenced output; `cancelled`/`cancel_flag` set → `_finish_stopped`, no
+  round consumed, no feedback; `TWOB_VERIFY_FAST` drops `kind=="tests"` (so a Gradle-only project
+  runs nothing under fast); `MAX_VERIFY_ROUNDS` cap stops after N and reports honestly.
 - Full suite green; the cloud verify-nudge test (if any) updated to the new host-run behavior.
 
 ## Out of scope (YAGNI)

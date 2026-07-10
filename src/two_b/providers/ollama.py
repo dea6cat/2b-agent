@@ -32,6 +32,8 @@ CTX_ROUND = 1024         # round the computed window down to a clean multiple
 KV_RESERVE_BYTES = 3 * 1024 ** 3   # RAM kept free for OS + app + compute buffers
 KV_USE_FRACTION = 0.75             # of the RAM left after weights+reserve, give this to KV
 
+_THINK_STRING_MODELS = ("gpt-oss",)   # accept think:"low|medium|high"; other thinking models are boolean
+
 
 def _parse_args(args):
     """Tool-call arguments as a dict. A small local model sometimes emits the
@@ -101,6 +103,22 @@ class OllamaProvider:
             except Exception:
                 self._show_cache[model] = {}
         return self._show_cache[model]
+
+    def supports_reasoning(self, model: str) -> bool:
+        """True if the model advertises the 'thinking' capability (from /api/show)."""
+        return "thinking" in (self._show(model).get("capabilities") or [])
+
+    def _think_value(self, model: str, reasoning):
+        """Map a reasoning level to Ollama's `think` field, or None to omit it. None -> omit
+        (model default). A non-thinking model always omits (Ollama errors on `think`). Ordinary
+        thinking models take a bool; gpt-oss takes a native string level."""
+        if reasoning is None or not self.supports_reasoning(model):
+            return None
+        if reasoning == "off":
+            return False
+        if reasoning in ("low", "medium", "high") and any(s in model.lower() for s in _THINK_STRING_MODELS):
+            return reasoning
+        return True   # "on", or a level on a boolean thinking model
 
     def _weight_bytes(self, model: str) -> int:
         try:
@@ -237,6 +255,9 @@ class OllamaProvider:
             "options": self._options(model),
             "keep_alive": KEEP_ALIVE,
         }
+        think = self._think_value(model, reasoning)
+        if think is not None:
+            payload["think"] = think
         content, thinking, calls = [], [], []
         done_reason = prompt_tokens = None
         for line in post_stream(f"{self.host}/api/chat", payload, headers=self._headers(),

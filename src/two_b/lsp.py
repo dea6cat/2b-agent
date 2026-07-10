@@ -278,3 +278,48 @@ def definitions(identifier: str, cwd: str):
             line = (loc.get("range", {}).get("start", {}).get("line", 0)) + 1
             locs.append(Loc(os.path.relpath(path, cwd), line, identifier))
     return locs or None       # empty => let regex try (server may just be cold)
+
+
+def references(identifier: str, cwd: str):
+    """Semantic reference sites for `identifier`: locate its definition via workspace/symbol,
+    then ask the same server for textDocument/references at that position. Returns a non-empty
+    list of (relpath, line, name) tuples, or None on any failure (no server, nothing found,
+    timeout, malformed response) so the caller falls back to the regex graph."""
+    if os.environ.get("TWOB_NO_LSP"):
+        return None
+    specs = _project_langs(cwd)
+    if not specs:
+        return None
+    from .symbols import Loc
+    locs = []
+    try:
+        for argv, lang in specs:
+            srv = _get_server(argv, cwd, lang)
+            if srv is None:
+                continue
+            for si in srv.request("workspace/symbol", {"query": identifier}, REQUEST_TIMEOUT) or []:
+                if si.get("name") != identifier:
+                    continue
+                loc = si.get("location") or {}
+                uri = loc.get("uri")
+                path = _from_uri(uri)
+                if not path or not uri:
+                    continue
+                start = loc.get("range", {}).get("start", {})
+                line, character = start.get("line", 0), start.get("character", 0)
+                srv.open(path)
+                refs = srv.request("textDocument/references", {
+                    "textDocument": {"uri": uri},
+                    "position": {"line": line, "character": character},
+                    "context": {"includeDeclaration": False},
+                }, REQUEST_TIMEOUT) or []
+                for ref in refs:
+                    ref_uri = (ref or {}).get("uri")
+                    ref_path = _from_uri(ref_uri)
+                    if not ref_path:
+                        continue
+                    ref_line = (ref.get("range", {}).get("start", {}).get("line", 0)) + 1
+                    locs.append(Loc(os.path.relpath(ref_path, cwd), ref_line, identifier))
+    except Exception:
+        return None
+    return locs or None       # empty => let regex try (server may just be cold)

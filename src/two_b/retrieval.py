@@ -313,3 +313,25 @@ def rank(task: str, root: str, graph: Graph, seeds: set, ids: list, k: int | Non
         return out[:k]
     except Exception:
         return []
+
+
+def enrich_seeds_with_refs(seeds: set, ids: list, root: str, deadline: float) -> set:
+    """Optionally widen the seed set with files that reference the seed identifiers, via LSP
+    (seed symbols only, bounded by `deadline`). No-op when LSP is unavailable or time is up.
+    Never raises."""
+    import time
+    from . import lsp
+    out = set(seeds)
+    try:
+        for ident in ids:
+            if time.monotonic() >= deadline:
+                break
+            locs = lsp.references(ident, root)
+            if not locs:
+                continue
+            for loc in locs:
+                rel = os.path.relpath(loc.path, root) if os.path.isabs(loc.path) else loc.path
+                out.add(rel)
+    except Exception:
+        return set(seeds)
+    return out

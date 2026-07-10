@@ -151,6 +151,7 @@ class EventType(Enum):
     TURN_START = "turn_start"
     ASSISTANT_DELTA = "assistant_delta"    # a streamed chunk of the reply
     ASSISTANT_TEXT = "assistant_text"      # (legacy; kept for non-stream callers)
+    THINKING_DELTA = "thinking_delta"      # a streamed chunk of the model's reasoning
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_RESULT = "tool_call_result"
     LOG = "log"                # captured tool stdout, to print to scrollback

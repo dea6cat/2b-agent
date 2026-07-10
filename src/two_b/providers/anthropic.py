@@ -91,7 +91,7 @@ class AnthropicProvider:
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None], *, cancel=None, reasoning=None) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None, reasoning=None, on_thinking=None) -> ProviderResponse:
         # Real SSE: emit text deltas as they arrive and assemble tool_use blocks
         # from input_json_delta fragments. Sharing post_stream means esc closes the
         # socket and aborts immediately, same as every other provider.

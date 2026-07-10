@@ -259,6 +259,7 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | `/theme [system\|light\|dark]` | Switch color theme |
 | `/context` | Show estimated context usage (auto-compacts near the limit) |
 | `/continuity [on\|off]` | Carry conversation context across messages — on by default for cloud, opt-in for local |
+| `/think [off\|on\|low\|medium\|high]` | Control model reasoning (off = faster on slow local models); bare shows current. Ollama thinking models + Gemini 2.5 |
 | `/new` | Start a fresh conversation thread (keeps the scrollback on screen) |
 | `/export [path]` | Export the whole session — tool calls and errors included — to a Markdown file |
 | `/copy` | Copy the last reply to the clipboard (**Ctrl+Y**) |
@@ -344,7 +345,9 @@ small as you keep it.
   output in each request) · `TWOB_NO_HISTORY` (don't persist sessions) · `TWOB_SUBAGENT_MODEL` (run
   delegated sub-agents on a cheaper model) · `TWOB_NO_UPDATE_CHECK` (no background update check) ·
   `TWOB_NO_VERIFY` (turn off the verify loop) · `TWOB_VERIFY_FAST` (skip test suites, static checks
-  only) · `TWOB_VERIFY_CMD="cmd1;;cmd2"` (declare your own checks for stacks 2B can't auto-detect).
+  only) · `TWOB_VERIFY_CMD="cmd1;;cmd2"` (declare your own checks for stacks 2B can't auto-detect) ·
+  `TWOB_THINK=off|on|low|medium|high` (persistent reasoning level — the `/think` default; applies to
+  reasoning-capable Ollama models and Gemini 2.5; Anthropic and OpenAI-compatible providers not yet).
 
 ---
 

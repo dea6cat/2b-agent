@@ -338,6 +338,12 @@ small as you keep it.
   same workspace sandbox as `run_command` — and on failure feeds the errors back for a bounded fix
   loop (max 2 rounds). Nothing is sent anywhere.
 
+- **Context retrieval.** On a new task (fresh conversation only, not a continued thread), 2B builds a
+  short, host-side list of the files most likely relevant to your request — ranked by how they
+  reference each other and the terms in your task — and injects it as a pointer mini-map to help the
+  model orient. It's dropped when confidence is low, and it never replaces the model reading the files
+  itself.
+
 - **Environment toggles.** Everything on-by-default can be turned off:
   `TWOB_CONTEXT_TOKENS` (override the local window) · `TWOB_NO_DIAGNOSTICS` (skip post-edit checks) ·
   `TWOB_NO_LSP` (regex symbol map instead of a language server) · `TWOB_NO_SEATBELT` /
@@ -347,7 +353,9 @@ small as you keep it.
   `TWOB_NO_VERIFY` (turn off the verify loop) · `TWOB_VERIFY_FAST` (skip test suites, static checks
   only) · `TWOB_VERIFY_CMD="cmd1;;cmd2"` (declare your own checks for stacks 2B can't auto-detect) ·
   `TWOB_THINK=off|on|low|medium|high` (persistent reasoning level — the `/think` default; applies to
-  reasoning-capable Ollama models and Gemini 2.5; Anthropic and OpenAI-compatible providers not yet).
+  reasoning-capable Ollama models and Gemini 2.5; Anthropic and OpenAI-compatible providers not yet) ·
+  `TWOB_NO_RETRIEVAL` (skip the context retrieval pointer block) · `TWOB_RETRIEVAL_FILES=N` (how many
+  files it lists, default 8).
 
 ---
 

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from . import catalog, changelog, cmdguard, conversation, diagnostics, mcp_client, planparse, registry, tools, untrusted, verify
+from . import catalog, changelog, cmdguard, conversation, diagnostics, mcp_client, planparse, registry, retrieval, tools, untrusted, verify
 from .conversation import Conversation, Message, Role, ToolResult
 from .providers import base as _provider_base
 from .providers.base import ProviderError, _Cancelled, abort_all_connections, stream_with_retry
@@ -858,6 +858,12 @@ def _render_recall(hits: list[dict]) -> str:
     return "\n\n".join(out)
 
 
+def _retrieval_message(block: str):
+    """A host-provided 'relevant files' user message for a fresh task, or None when there's
+    nothing confident to inject."""
+    return Message.user(block) if block else None
+
+
 def _maybe_inject_recall(conv: Conversation, session_id: str, cwd: str | None) -> bool:
     """If the latest user turn dangles a reference to earlier work, recall the most relevant
     archived turns and insert them just before that turn as reference context. Returns True if
@@ -1489,8 +1495,12 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
         # directory even if the process cwd ever diverges from the session's.
         if _continuity_effective(session, is_local) and session.thread is not None:
             task.conversation = session.thread
+            fresh_conv = False
         else:
             task.conversation = Conversation(system_prompt=assemble_system_prompt(cwd=session.cwd))
+            fresh_conv = True
+    else:
+        fresh_conv = False
     conv = task.conversation
     # Register this conversation as the session's live thread so the next top-level message
     # continues it. Ephemeral /tool carriers never reach run_task, so they can't hijack it;
@@ -1505,6 +1515,13 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
     # If this request points back at earlier work that compaction folded away, pull the
     # referenced turns from the archive and inject them as reference context (P17).
     _maybe_inject_recall(conv, task.id, session.cwd)
+    # Dependency-ranked context retrieval: on a fresh conversation, point the model at the
+    # files most relevant to this task (host-built, budget-capped, confidence-gated). No-op
+    # when disabled, low-confidence, or continuing a thread. Frozen schema untouched.
+    if fresh_conv:
+        _msg = _retrieval_message(retrieval.retrieve_block(session.cwd, desc))
+        if _msg is not None:
+            conv.append(_msg)
 
     first_turn = not any(m.role.value == "assistant" for m in conv.messages)
     loop_guard = _LoopGuard()

@@ -195,18 +195,17 @@ _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def task_identifiers(task: str) -> list[str]:
-    """Candidate code identifiers in the task text: CamelCase / snake_case / dotted names and
-    other non-stopword tokens, order-stable and deduped."""
+    """Likely CODE identifiers in the task text — tokens with internal capitals (CamelCase),
+    an underscore (snake_case), or a leading capital. Lowercase prose words are intentionally
+    excluded (they'd trigger a full-tree symbols.definitions walk each, for little signal — path
+    lexical matching covers them). Order-stable, deduped."""
     out, seen = [], set()
     for tok in _WORD.findall(task or ""):
-        low = tok.lower()
-        if low in _STOP or len(tok) < 3:
+        if tok in seen or len(tok) < 3 or tok.lower() in _STOP:
             continue
-        # A likely identifier: has case variation, an underscore, or is a dotted attribute head.
         looks_code = any(c.isupper() for c in tok[1:]) or "_" in tok or tok[0].isupper()
-        key = tok
-        if key not in seen and (looks_code or low not in _STOP):
-            seen.add(key)
+        if looks_code:
+            seen.add(tok)
             out.append(tok)
     return out
 

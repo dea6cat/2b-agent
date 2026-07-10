@@ -95,7 +95,7 @@ class GoogleProvider:
         return ProviderResponse(message=Message.assistant(text=text or None, tool_calls=calls), raw=raw)
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None], *, cancel=None) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None, reasoning=None) -> ProviderResponse:
         # Gemini SSE: :streamGenerateContent?alt=sse yields `data: {chunk}` lines, each a partial
         # GenerateContentResponse. Emit text as it arrives; collect functionCall parts along the way.
         url = f"{BASE}/models/{model}:streamGenerateContent?alt=sse"

@@ -66,7 +66,7 @@ class ClarifyLoopTest(unittest.TestCase):
             def __init__(self): self.i = 0
             def is_available(self): return True
             def list_models(self): return ["m"]
-            def stream(self, conv, model, tools, on_text, *, cancel=None):
+            def stream(self, conv, model, tools, on_text, *, cancel=None, **_kwargs):
                 self.i += 1
                 seen["convs"].append(list(conv.messages))
                 if self.i == 1:

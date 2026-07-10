@@ -228,7 +228,7 @@ class OllamaProvider:
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None], *, cancel=None) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None, reasoning=None) -> ProviderResponse:
         payload = {
             "model": model,
             "messages": self._messages(conversation),

@@ -32,6 +32,9 @@ class AnthropicProvider:
     def list_models(self) -> list[str]:
         return list(_MODELS)
 
+    def supports_reasoning(self, model: str) -> bool:
+        return False   # reasoning deferred (see design §7)
+
     def _headers(self) -> dict:
         return {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
 
@@ -88,7 +91,7 @@ class AnthropicProvider:
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None], *, cancel=None) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None, reasoning=None) -> ProviderResponse:
         # Real SSE: emit text deltas as they arrive and assemble tool_use blocks
         # from input_json_delta fragments. Sharing post_stream means esc closes the
         # socket and aborts immediately, same as every other provider.

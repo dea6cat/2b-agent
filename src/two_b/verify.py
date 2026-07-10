@@ -186,7 +186,7 @@ def run_checks(checks, *, cancel=None, per_cmd_timeout: int = VERIFY_TIMEOUT, on
     """Run each (cmd, kind) check host-side, returning a CheckResult per command. Missing
     binaries are skipped (not failed); a set `cancel` (task.cancel_flag) aborts promptly with
     `cancelled`. Never raises."""
-    from . import tools
+    from . import seatbelt, tools
     results = []
     for cmd, _kind in checks:
         if cancel is not None and cancel.is_set():
@@ -203,8 +203,17 @@ def run_checks(checks, *, cancel=None, per_cmd_timeout: int = VERIFY_TIMEOUT, on
             continue
         if on_start:
             on_start(cmd)
+        # Run write-confined under the workspace seatbelt — same posture as run_command — so a
+        # repo's own check can't write outside the project. Verify runs unattended, so unlike
+        # run_command there is no on_denied re-run: a sandbox denial simply stands (fail-closed)
+        # and is fed back as a normal failure; we never drop the sandbox without a human. Honors
+        # TWOB_NO_SEATBELT / TWOB_SEATBELT=strict via seatbelt.wrap (argv is None when the sandbox
+        # is off or unavailable -> run the command directly, as before).
+        argv, _strict = seatbelt.wrap(cmd)
+        sandboxed = argv is not None
         try:
-            rc, out, status = tools._run_cancellable(cmd, shell=True, timeout=per_cmd_timeout,
+            rc, out, status = tools._run_cancellable(argv if sandboxed else cmd,
+                                                     shell=not sandboxed, timeout=per_cmd_timeout,
                                                      cancel=cancel, env=tools._child_env())
         except Exception as e:
             results.append(CheckResult(cmd, "fail", f"could not run: {e}"))

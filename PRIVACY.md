@@ -46,8 +46,9 @@ is written to your local history/undo store (on your machine, owner-readable). R
 deleting `~/.config/2b/` or running `2b --rm`.
 
 Separately, after edits land, 2B runs the project's discovered check commands (e.g. `dart analyze`,
-`go test`, `npm run test`) as local subprocesses on your machine, and on failure feeds the errors
-back for a bounded fix loop. Nothing is sent anywhere. Opt out with `TWOB_NO_VERIFY=1`.
+`go test`, `npm run test`) as local subprocesses on your machine — write-confined under the same
+workspace sandbox as `run_command` — and on failure feeds the errors back for a bounded fix loop.
+Nothing is sent anywhere. Opt out with `TWOB_NO_VERIFY=1`.
 
 ## 3. What leaves your machine
 

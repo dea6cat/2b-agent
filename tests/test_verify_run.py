@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import verify  # noqa: E402
+from two_b import seatbelt, tools, verify  # noqa: E402
 
 
 class RunChecks(unittest.TestCase):
@@ -41,6 +41,41 @@ class RunChecks(unittest.TestCase):
         seen = []
         verify.run_checks([("definitely-no-such-bin-xyz build", "fast")], on_start=seen.append)
         self.assertEqual(seen, [])
+
+
+class Seatbelt(unittest.TestCase):
+    """Checks must run write-confined under the workspace seatbelt, exactly like run_command."""
+
+    def _capture(self):
+        seen = {}
+
+        def fake_run(cmd, *, shell, timeout, cancel, env=None):
+            seen["cmd"], seen["shell"] = cmd, shell
+            return (0, "", "ok")
+
+        self._orig = tools._run_cancellable
+        tools._run_cancellable = fake_run
+        self.addCleanup(lambda: setattr(tools, "_run_cancellable", self._orig))
+        return seen
+
+    def test_runs_under_sandbox_argv_when_seatbelt_active(self):
+        seen = self._capture()
+        orig_wrap = seatbelt.wrap
+        seatbelt.wrap = lambda c: (["sandbox-exec", "-fake", c], False)
+        self.addCleanup(lambda: setattr(seatbelt, "wrap", orig_wrap))
+        r = verify.run_checks([("sh -c 'exit 0'", "fast")])
+        self.assertEqual(r[0].status, "pass")
+        self.assertEqual(seen["cmd"], ["sandbox-exec", "-fake", "sh -c 'exit 0'"])
+        self.assertFalse(seen["shell"])   # argv form runs shell=False
+
+    def test_runs_command_directly_when_seatbelt_off(self):
+        seen = self._capture()
+        orig_wrap = seatbelt.wrap
+        seatbelt.wrap = lambda c: (None, False)
+        self.addCleanup(lambda: setattr(seatbelt, "wrap", orig_wrap))
+        verify.run_checks([("sh -c 'exit 0'", "fast")])
+        self.assertEqual(seen["cmd"], "sh -c 'exit 0'")
+        self.assertTrue(seen["shell"])    # None -> run the raw command with shell=True
 
 
 class Truncate(unittest.TestCase):

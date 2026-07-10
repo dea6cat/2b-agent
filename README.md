@@ -333,8 +333,9 @@ small as you keep it.
   `TWOB_CONTEXT_TOKENS` to override (higher if you want to spend more RAM, lower to save it).
 
 - **Verify loop.** After a turn lands edits, 2B runs the project's own checks (analyze/lint/typecheck,
-  test suites — whatever it detects for your stack) as local subprocesses, and on failure feeds the
-  errors back for a bounded fix loop (max 2 rounds). Nothing is sent anywhere.
+  test suites — whatever it detects for your stack) as local subprocesses — write-confined under the
+  same workspace sandbox as `run_command` — and on failure feeds the errors back for a bounded fix
+  loop (max 2 rounds). Nothing is sent anywhere.
 
 - **Environment toggles.** Everything on-by-default can be turned off:
   `TWOB_CONTEXT_TOKENS` (override the local window) · `TWOB_NO_DIAGNOSTICS` (skip post-edit checks) ·

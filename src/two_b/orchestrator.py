@@ -734,7 +734,9 @@ def compact_conversation(conv: Conversation, provider, model: str, touched=None,
     else:
         summ.append(Message.user(_render_transcript(body)))
     buf: list[str] = []
-    resp = provider.stream(summ, model, (), lambda c: buf.append(c), cancel=cancel)
+    # Summarization gains nothing from reasoning — force it off so compaction stays fast and
+    # doesn't spend a thinking budget (Ollama omits think; Google sends thinkingBudget:0).
+    resp = provider.stream(summ, model, (), lambda c: buf.append(c), cancel=cancel, reasoning="off")
     summary = "".join(buf).strip() or (resp.message.text or resp.message.thinking or "").strip()
     if not summary:
         return False

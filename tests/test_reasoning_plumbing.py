@@ -16,7 +16,7 @@ class _FakeProvider:
     def __init__(self):
         self.seen = {}
 
-    def stream(self, conv, model, tools, on_text, *, cancel=None, reasoning=None):
+    def stream(self, conv, model, tools, on_text, *, cancel=None, reasoning=None, on_thinking=None):
         self.seen["reasoning"] = reasoning
         from two_b.conversation import Message
         from two_b.providers.base import ProviderResponse

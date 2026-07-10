@@ -151,6 +151,7 @@ class EventType(Enum):
     TURN_START = "turn_start"
     ASSISTANT_DELTA = "assistant_delta"    # a streamed chunk of the reply
     ASSISTANT_TEXT = "assistant_text"      # (legacy; kept for non-stream callers)
+    THINKING_DELTA = "thinking_delta"      # a streamed chunk of the model's reasoning
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_RESULT = "tool_call_result"
     LOG = "log"                # captured tool stdout, to print to scrollback
@@ -1561,7 +1562,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                     pass
             on_event(AgentEvent(EventType.TURN_START, task.id))
 
-            streamed = {"n": 0, "perf": False}
+            streamed = {"n": 0, "perf": False, "thinking": 0}
 
             def on_text(chunk: str, _t=task, _p=provider, _m=model) -> None:
                 if _t.cancel_flag.is_set():          # esc pressed mid-stream -> abort now
@@ -1577,10 +1578,18 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 streamed["n"] += len(chunk)
                 on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
+            def on_thinking(chunk: str, _t=task) -> None:
+                if os.environ.get("TWOB_NO_THINK_DISPLAY"):
+                    return                                    # model still thinks; just not shown
+                if _t.cancel_flag.is_set():
+                    raise _Interrupted()
+                streamed["thinking"] += len(chunk)
+                on_event(AgentEvent(EventType.THINKING_DELTA, _t.id, {"chunk": chunk}))
+
             active_specs = _active_specs(is_local)
             req_conv = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
             try:
-                resp = stream_with_retry(provider, req_conv, model, active_specs, on_text, cancel=task.cancel_flag, reasoning=_reasoning_effective(session))
+                resp = stream_with_retry(provider, req_conv, model, active_specs, on_text, cancel=task.cancel_flag, reasoning=_reasoning_effective(session), on_thinking=on_thinking)
             except (_Interrupted, _Cancelled):
                 _finish_stopped(task, on_event)
                 return
@@ -1681,17 +1690,20 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
                 task.status_line = ""
                 task.state = TaskState.DONE
                 _persist_final(conv, msg)   # keep the final answer in the thread (continuity)
-                # If nothing streamed (e.g. answer landed in `thinking`), emit it now.
+                # If nothing streamed (e.g. answer landed in `thinking`), emit it now — unless the
+                # thinking was already shown live, in which case it stands as the visible output.
                 if streamed["n"] == 0:
-                    fallback = content or (msg.thinking or "").strip()
-                    if not fallback:
-                        # No content and no call. Name the cause instead of re-prompting
-                        # the same wall: a length/truncation stop is a distinct, reportable
-                        # condition, not a genuine empty answer.
-                        fallback = ("(model output was cut off at its length limit)"
-                                    if resp.done_reason == "length"
-                                    else "(model returned an empty response)")
-                    on_event(AgentEvent(EventType.ASSISTANT_DELTA, task.id, {"chunk": fallback}))
+                    thinking_shown = streamed["thinking"] > 0 and (msg.thinking or "").strip()
+                    if not (not content and thinking_shown):
+                        fallback = content or (msg.thinking or "").strip()
+                        if not fallback:
+                            # No content and no call. Name the cause instead of re-prompting
+                            # the same wall: a length/truncation stop is a distinct, reportable
+                            # condition, not a genuine empty answer.
+                            fallback = ("(model output was cut off at its length limit)"
+                                        if resp.done_reason == "length"
+                                        else "(model returned an empty response)")
+                        on_event(AgentEvent(EventType.ASSISTANT_DELTA, task.id, {"chunk": fallback}))
                 on_event(AgentEvent(EventType.TASK_DONE, task.id))
                 return
 
@@ -1802,7 +1814,7 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
         task.status_line = "Thinking"
         task.turn_started_at = time.monotonic()
         on_event(AgentEvent(EventType.TURN_START, task.id))
-        got = {"n": 0}
+        got = {"n": 0, "thinking": 0}
 
         def on_final(chunk: str, _t=task) -> None:
             if _t.cancel_flag.is_set():
@@ -1810,20 +1822,30 @@ def run_task(session: Session, task: Task, on_event: Callable[[AgentEvent], None
             got["n"] += len(chunk)
             on_event(AgentEvent(EventType.ASSISTANT_DELTA, _t.id, {"chunk": chunk}))
 
+        def on_final_thinking(chunk: str, _t=task) -> None:
+            if os.environ.get("TWOB_NO_THINK_DISPLAY"):
+                return                                    # model still thinks; just not shown
+            if _t.cancel_flag.is_set():
+                raise _Interrupted()
+            got["thinking"] += len(chunk)
+            on_event(AgentEvent(EventType.THINKING_DELTA, _t.id, {"chunk": chunk}))
+
         req_conv = conv if os.environ.get("TWOB_NO_TRIM") else conversation.trimmed(conv)
         try:
-            resp = stream_with_retry(provider, req_conv, model, _active_specs(is_local), on_final, cancel=task.cancel_flag, reasoning=_reasoning_effective(session))
+            resp = stream_with_retry(provider, req_conv, model, _active_specs(is_local), on_final, cancel=task.cancel_flag, reasoning=_reasoning_effective(session), on_thinking=on_final_thinking)
             planparse.finalize_steps(task.plan_steps)
             task.status_line = ""
             task.state = TaskState.DONE
             _persist_final(conv, resp.message)   # keep the final answer in the thread (continuity)
             if got["n"] == 0:
-                txt = (resp.message.text or resp.message.thinking or "").strip()
-                if not txt:
-                    txt = ("(model output was cut off at its length limit)"
-                           if resp.done_reason == "length"
-                           else "(reached the tool-call limit without a final answer)")
-                on_event(AgentEvent(EventType.ASSISTANT_DELTA, task.id, {"chunk": txt}))
+                thinking_shown = got["thinking"] > 0 and (resp.message.thinking or "").strip()
+                if not (not (resp.message.text or "").strip() and thinking_shown):
+                    txt = (resp.message.text or resp.message.thinking or "").strip()
+                    if not txt:
+                        txt = ("(model output was cut off at its length limit)"
+                               if resp.done_reason == "length"
+                               else "(reached the tool-call limit without a final answer)")
+                    on_event(AgentEvent(EventType.ASSISTANT_DELTA, task.id, {"chunk": txt}))
             on_event(AgentEvent(EventType.TASK_DONE, task.id))
         except (_Interrupted, _Cancelled):
             _finish_stopped(task, on_event)

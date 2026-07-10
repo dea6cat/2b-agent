@@ -344,6 +344,10 @@ small as you keep it.
   model orient. It's dropped when confidence is low, and it never replaces the model reading the files
   itself.
 
+- **Live reasoning.** For thinking-capable models (Ollama thinking models like qwen3/gpt-oss, and
+  Gemini 2.5), 2B streams the model's reasoning live, dimmed, as it arrives, then collapses it to a
+  one-line `💭 thought for Ns` once the reply starts. Controlled by `/think`.
+
 - **Environment toggles.** Everything on-by-default can be turned off:
   `TWOB_CONTEXT_TOKENS` (override the local window) · `TWOB_NO_DIAGNOSTICS` (skip post-edit checks) ·
   `TWOB_NO_LSP` (regex symbol map instead of a language server) · `TWOB_NO_SEATBELT` /
@@ -354,6 +358,7 @@ small as you keep it.
   only) · `TWOB_VERIFY_CMD="cmd1;;cmd2"` (declare your own checks for stacks 2B can't auto-detect) ·
   `TWOB_THINK=off|on|low|medium|high` (persistent reasoning level — the `/think` default; applies to
   reasoning-capable Ollama models and Gemini 2.5; Anthropic and OpenAI-compatible providers not yet) ·
+  `TWOB_NO_THINK_DISPLAY` (hide the live reasoning stream — the model still thinks, just silently) ·
   `TWOB_NO_RETRIEVAL` (skip the context retrieval pointer block) · `TWOB_RETRIEVAL_FILES=N` (how many
   files it lists, default 8).
 

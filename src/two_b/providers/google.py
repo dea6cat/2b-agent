@@ -75,14 +75,17 @@ class GoogleProvider:
             return 128
         return tier
 
-    def _payload(self, conversation: Conversation, tools: tuple[ToolSpec, ...], thinking_budget=None) -> dict:
+    def _payload(self, conversation: Conversation, tools: tuple[ToolSpec, ...], thinking_budget=None, include_thoughts=False) -> dict:
         p = {
             "systemInstruction": {"parts": [{"text": conversation.system_prompt}]},
             "contents": self._contents(conversation),
             "tools": to_gemini(tools),
         }
         if thinking_budget is not None:
-            p["generationConfig"] = {"thinkingConfig": {"thinkingBudget": thinking_budget}}
+            tc = {"thinkingBudget": thinking_budget}
+            if include_thoughts:
+                tc["includeThoughts"] = True
+            p["generationConfig"] = {"thinkingConfig": tc}
         return p
 
     # The key rides in the x-goog-api-key header (as the official SDK / Google guidance do)
@@ -91,13 +94,18 @@ class GoogleProvider:
         return {"x-goog-api-key": self.api_key}
 
     @staticmethod
-    def _read_parts(cand: dict, text_parts: list, calls: list) -> str:
-        """Pull text + functionCall parts out of one candidate; append to the accumulators
-        and return the text this candidate contributed (for streaming emission)."""
+    def _read_parts(cand: dict, text_parts: list, calls: list, thought_parts: list | None = None) -> str:
+        """Pull text + functionCall parts out of one candidate. Gemini marks reasoning-summary
+        parts with `thought: true`; those go to thought_parts (when provided) and NEVER into the
+        answer text. Returns the answer text this candidate contributed (for streaming emission)."""
         chunk_text = []
         for p in cand.get("content", {}).get("parts", []) or []:
             if "text" in p:
-                chunk_text.append(p["text"])
+                if p.get("thought"):
+                    if thought_parts is not None:
+                        thought_parts.append(p["text"])
+                else:
+                    chunk_text.append(p["text"])
             elif "functionCall" in p:
                 fc = p["functionCall"]
                 calls.append(ToolCall.new(name=fc.get("name", ""), arguments=fc.get("args", {})))
@@ -115,13 +123,19 @@ class GoogleProvider:
         return ProviderResponse(message=Message.assistant(text=text or None, tool_calls=calls), raw=raw)
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None], *, cancel=None, reasoning=None) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None, reasoning=None, on_thinking=None) -> ProviderResponse:
         # Gemini SSE: :streamGenerateContent?alt=sse yields `data: {chunk}` lines, each a partial
         # GenerateContentResponse. Emit text as it arrives; collect functionCall parts along the way.
         budget = self._thinking_budget(model, reasoning)
-        payload = self._payload(conversation, tools, thinking_budget=budget)
+        # Only request thought summaries when reasoning is actually on. `/think off` still floors
+        # 2.5 Pro's budget at its minimum (it can't fully disable), but we must NOT surface thoughts
+        # then — that would contradict the off gating and send includeThoughts alongside a 0 budget
+        # on the compaction path (which streams with reasoning="off").
+        include_thoughts = reasoning != "off" and budget is not None
+        payload = self._payload(conversation, tools, thinking_budget=budget, include_thoughts=include_thoughts)
         url = f"{BASE}/models/{model}:streamGenerateContent?alt=sse"
         text_parts: list = []
+        thought_parts: list = []
         calls: list = []
         last: dict = {}
         for line in post_stream(url, payload, headers=self._headers(),
@@ -136,8 +150,13 @@ class GoogleProvider:
                 last = json.loads(body)
             except ValueError:
                 continue
-            delta = self._read_parts((last.get("candidates") or [{}])[0], text_parts, calls)
+            before = len(thought_parts)
+            delta = self._read_parts((last.get("candidates") or [{}])[0], text_parts, calls, thought_parts)
+            if on_thinking:
+                for tp in thought_parts[before:]:
+                    on_thinking(tp)
             if delta:
                 on_text(delta)
         text = "".join(text_parts).strip()
-        return ProviderResponse(message=Message.assistant(text=text or None, tool_calls=calls), raw=last)
+        think = "".join(thought_parts).strip()
+        return ProviderResponse(message=Message.assistant(text=text or None, thinking=think or None, tool_calls=calls), raw=last)

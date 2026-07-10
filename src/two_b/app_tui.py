@@ -31,7 +31,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, TextArea
 
-from . import commands, completion, config, difffmt, notify, orchestrator, registry, theme, toolline, tools
+from . import commands, completion, config, difffmt, notify, orchestrator, registry, theme, toolline, tools, tui
 from .commands import command_specs, dispatch_input
 from .orchestrator import EventType
 from .session import MODE_ACCEPT, MODE_LABELS, MODE_PLAN, Session, TaskState
@@ -288,6 +288,9 @@ class TwoBApp(App):
         self.ui = _LogConsole(self)               # provider-neutral output for commands.py
         self._stream_text = ""
         self._stream_widget = None                # the in-flow Static currently being streamed into
+        self._thinking_text = ""
+        self._thinking_widget = None              # the in-flow Static currently streaming reasoning
+        self._thinking_started: float | None = None  # monotonic() when the current thinking run began
         self._pending_confirm = None              # PendingConfirmation shown inline (answered y/n in view)
         self._default_placeholder = "Type a task, or / for commands  ·  ⇧⏎ or ^J = newline"
         self._pal: list[tuple[str, str]] = []     # current command-palette matches
@@ -893,13 +896,42 @@ class TwoBApp(App):
         self._stream_widget = None
         self._stream_text = ""
 
+    def _commit_thinking(self, collapsed: bool) -> None:
+        # Mirrors _commit_stream: a live "thinking" region either collapses to a
+        # one-line summary (the reply started) or is left as-is (a thinking-only
+        # turn — no reply followed, so the streamed reasoning is the visible output).
+        if self._thinking_widget is not None and collapsed:
+            elapsed = time.monotonic() - self._thinking_started if self._thinking_started else 0.0
+            self._thinking_widget.update(tui.thinking_line(tui.thinking_summary(elapsed)))
+        self._thinking_widget = None
+        self._thinking_text = ""
+        self._thinking_started = None
+
+    def _commit_live(self) -> None:
+        # Finalize BOTH live regions at a turn/tool/log/error boundary: flush the reply stream
+        # and collapse any in-flight thinking to its summary. Without this, a thinking→tool→thinking
+        # sequence (or a thinking→error→next-task) would append onto the stale thinking widget and
+        # misorder the log.
+        self._commit_stream()
+        self._commit_thinking(collapsed=True)
+
     def _drain_events(self) -> None:
         q = self.session.events
         log = self.query_one("#log", VerticalScroll)
         while not q.empty():
             ev = q.get()
             t = ev.type
-            if t == EventType.ASSISTANT_DELTA:
+            if t == EventType.THINKING_DELTA:
+                if self._thinking_widget is None:
+                    self._thinking_started = time.monotonic()
+                    self._thinking_widget = Static(Text(""), classes="thinking")
+                    log.mount(self._thinking_widget)
+                self._thinking_text += ev.payload["chunk"]
+                self._thinking_widget.update(tui.thinking_line(self._thinking_text))
+                log.scroll_end(animate=False)
+            elif t == EventType.ASSISTANT_DELTA:
+                if self._thinking_widget is not None:
+                    self._commit_thinking(collapsed=True)
                 if self._stream_widget is None:
                     self._stream_widget = Static(Text(""), classes="reply")
                     log.mount(self._stream_widget)
@@ -907,28 +939,30 @@ class TwoBApp(App):
                 self._stream_widget.update(Text(self._stream_text))
                 log.scroll_end(animate=False)
             elif t == EventType.TURN_START:
-                self._commit_stream()
+                self._commit_live()
             elif t == EventType.TOOL_CALL_START:
-                self._commit_stream()
+                self._commit_live()
                 self._start_tool_line(ev.payload["name"], ev.payload["shown"])
             elif t == EventType.TOOL_CALL_RESULT:
                 self._finish_tool_line(ev.payload["result"])
             elif t == EventType.ASSISTANT_TEXT:
-                self._commit_stream()
+                self._commit_live()
                 self._close_tool_group()
                 self._last_reply = ev.payload["text"]
                 self.log_write(Markdown(ev.payload["text"]), classes="reply", search_text=ev.payload["text"])
             elif t == EventType.LOG:
-                self._commit_stream()
+                self._commit_live()
                 self.log_write(Text(f"✻ {ev.payload.get('text', '')}", style=self.c("dim")))
             elif t == EventType.TASK_ERROR:
-                self._commit_stream()
+                self._commit_live()
                 self._close_tool_group()
                 self.log_write(Text(f"error: {ev.payload.get('error', 'unknown')}", style=f"bold {self.c('err')}"))
                 self._notify_finished(ev.task_id, ok=False)
                 self._flush_leftover_steer(ev.task_id)
             elif t == EventType.TASK_DONE:
                 self._commit_stream()
+                if self._thinking_widget is not None:
+                    self._commit_thinking(collapsed=False)
                 self._close_tool_group()
                 self._notify_finished(ev.task_id, ok=True)
                 self._flush_leftover_steer(ev.task_id)

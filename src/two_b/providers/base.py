@@ -178,7 +178,7 @@ def post_stream(url: str, payload: dict, headers: dict | None = None, timeout: i
         _unregister(resp)
 
 
-def stream_with_retry(provider, conversation, model, tools, on_text, *, retries=3, cancel=None, reasoning=None):
+def stream_with_retry(provider, conversation, model, tools, on_text, *, retries=3, cancel=None, reasoning=None, on_thinking=None):
     """provider.stream with backoff on retryable ProviderError (429/5xx/conn). Honors a
     cancel Event (re-raises immediately) and re-raises the last error after `retries`.
     When a retryable error survives every retry, the surfaced message gets a
@@ -186,7 +186,7 @@ def stream_with_retry(provider, conversation, model, tools, on_text, *, retries=
     delay = 1.0
     for attempt in range(retries + 1):
         try:
-            return provider.stream(conversation, model, tools, on_text, cancel=cancel, reasoning=reasoning)
+            return provider.stream(conversation, model, tools, on_text, cancel=cancel, reasoning=reasoning, on_thinking=on_thinking)
         except _Cancelled:
             raise                                        # user aborted — never retry
         except ProviderError as e:

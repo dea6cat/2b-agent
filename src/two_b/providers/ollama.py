@@ -246,7 +246,7 @@ class OllamaProvider:
         )
 
     def stream(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...],
-               on_text: Callable[[str], None], *, cancel=None, reasoning=None) -> ProviderResponse:
+               on_text: Callable[[str], None], *, cancel=None, reasoning=None, on_thinking=None) -> ProviderResponse:
         payload = {
             "model": model,
             "messages": self._messages(conversation),
@@ -272,6 +272,8 @@ class OllamaProvider:
                 on_text(m["content"])
             if m.get("thinking"):
                 thinking.append(m["thinking"])
+                if on_thinking:
+                    on_thinking(m["thinking"])
             for c in m.get("tool_calls") or []:
                 fn = c["function"]
                 args = _parse_args(fn["arguments"])

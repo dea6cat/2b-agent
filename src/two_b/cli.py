@@ -13,7 +13,7 @@ import time
 
 from rich.console import Console
 
-from . import __version__, banner, orchestrator, registry
+from . import __version__, banner, orchestrator, registry, tui
 from .commands import dispatch_input
 from .prompt import make_session, prompt_line
 from .rawkey import CTRL_B, KeyListener
@@ -111,6 +111,7 @@ class App:
         self.listener.start()
         live = None
         mid_stream = False
+        thinking_started = None
 
         def stop_live():
             nonlocal live
@@ -124,13 +125,34 @@ class App:
                 self.console.print()   # end the streamed paragraph
                 mid_stream = False
 
+        def close_thinking():
+            # End the dim streamed reasoning line without a collapsed summary
+            # (no reply followed it — e.g. a thinking-only turn, or a boundary
+            # like TURN_START/TASK_DONE/an error). The reasoning text already
+            # printed is left as-is; only the run state is reset.
+            nonlocal thinking_started
+            if thinking_started is not None:
+                self.console.print()
+                thinking_started = None
+
         q = self.session.events
         try:
             while True:
                 while not q.empty():
                     ev = q.get()
-                    if ev.type == EventType.ASSISTANT_DELTA:
+                    if ev.type == EventType.THINKING_DELTA:
                         stop_live()
+                        if thinking_started is None:
+                            thinking_started = time.monotonic()
+                        self.console.print(ev.payload["chunk"], end="",
+                                           markup=False, highlight=False, soft_wrap=True, style="dim")
+                    elif ev.type == EventType.ASSISTANT_DELTA:
+                        stop_live()
+                        if thinking_started is not None:
+                            elapsed = time.monotonic() - thinking_started
+                            thinking_started = None
+                            self.console.print()
+                            self.console.print(tui.thinking_summary(elapsed), style="dim")
                         if not mid_stream:
                             self.console.print()   # blank line before the reply
                             mid_stream = True
@@ -138,22 +160,27 @@ class App:
                                            markup=False, highlight=False, soft_wrap=True)
                     elif ev.type == EventType.TURN_START:
                         close_stream()
+                        close_thinking()
                     elif ev.type in (EventType.TOOL_CALL_START, EventType.TOOL_CALL_RESULT,
                                      EventType.LOG, EventType.ASSISTANT_TEXT, EventType.TASK_ERROR):
                         close_stream()
+                        close_thinking()
                         stop_live()
                         self._print_event(ev)
                     elif ev.type == EventType.TASK_DONE:
                         close_stream()
+                        close_thinking()
 
                 if task.pending is not None:
                     close_stream()
+                    close_thinking()
                     stop_live()
                     self._prompt_confirmation(task)
                     continue
                 if self._background_requested:
                     self._background_requested = False
                     close_stream()
+                    close_thinking()
                     stop_live()
                     task.state = TaskState.BACKGROUNDED
                     self.console.print(
@@ -163,11 +190,14 @@ class App:
                     return
                 if (task.thread is None or not task.thread.is_alive()) and q.empty():
                     close_stream()
+                    close_thinking()
                     stop_live()
                     self.session.active_task_id = None
                     return
 
-                if not mid_stream:
+                # Don't restart the transient status spinner while a reply OR a thinking run is
+                # mid-stream — it would blink around the partial (dim) line and garble it.
+                if not mid_stream and thinking_started is None:
                     if live is None:
                         live = Live(render_session(self.session), console=self.console,
                                     refresh_per_second=12, transient=True)
@@ -177,6 +207,7 @@ class App:
                 time.sleep(0.05)
         finally:
             close_stream()
+            close_thinking()
             stop_live()
             self.listener.stop()
 

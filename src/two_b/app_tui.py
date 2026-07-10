@@ -902,10 +902,18 @@ class TwoBApp(App):
         # turn — no reply followed, so the streamed reasoning is the visible output).
         if self._thinking_widget is not None and collapsed:
             elapsed = time.monotonic() - self._thinking_started if self._thinking_started else 0.0
-            self._thinking_widget.update(Text(tui.thinking_summary(elapsed), style="dim"))
+            self._thinking_widget.update(tui.thinking_line(tui.thinking_summary(elapsed)))
         self._thinking_widget = None
         self._thinking_text = ""
         self._thinking_started = None
+
+    def _commit_live(self) -> None:
+        # Finalize BOTH live regions at a turn/tool/log/error boundary: flush the reply stream
+        # and collapse any in-flight thinking to its summary. Without this, a thinking→tool→thinking
+        # sequence (or a thinking→error→next-task) would append onto the stale thinking widget and
+        # misorder the log.
+        self._commit_stream()
+        self._commit_thinking(collapsed=True)
 
     def _drain_events(self) -> None:
         q = self.session.events
@@ -931,22 +939,22 @@ class TwoBApp(App):
                 self._stream_widget.update(Text(self._stream_text))
                 log.scroll_end(animate=False)
             elif t == EventType.TURN_START:
-                self._commit_stream()
+                self._commit_live()
             elif t == EventType.TOOL_CALL_START:
-                self._commit_stream()
+                self._commit_live()
                 self._start_tool_line(ev.payload["name"], ev.payload["shown"])
             elif t == EventType.TOOL_CALL_RESULT:
                 self._finish_tool_line(ev.payload["result"])
             elif t == EventType.ASSISTANT_TEXT:
-                self._commit_stream()
+                self._commit_live()
                 self._close_tool_group()
                 self._last_reply = ev.payload["text"]
                 self.log_write(Markdown(ev.payload["text"]), classes="reply", search_text=ev.payload["text"])
             elif t == EventType.LOG:
-                self._commit_stream()
+                self._commit_live()
                 self.log_write(Text(f"✻ {ev.payload.get('text', '')}", style=self.c("dim")))
             elif t == EventType.TASK_ERROR:
-                self._commit_stream()
+                self._commit_live()
                 self._close_tool_group()
                 self.log_write(Text(f"error: {ev.payload.get('error', 'unknown')}", style=f"bold {self.c('err')}"))
                 self._notify_finished(ev.task_id, ok=False)

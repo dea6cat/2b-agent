@@ -63,6 +63,35 @@ class ThinkingTui(unittest.IsolatedAsyncioTestCase):
             # left expanded (not collapsed to "thought for"): the streamed reasoning stands
             self.assertIn("just musing", _render(app.query(".thinking").first()))
 
+    async def test_turn_boundary_collapses_thinking_no_merge(self):
+        # think -> (turn/tool boundary) -> think again must NOT merge into one widget: the first
+        # collapses to a summary, the second is a fresh region (order preserved, no stale leak).
+        app = TwoBApp(model="fake:m", auto_yes=True, initial_task=None)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.session.events.put(AgentEvent(EventType.THINKING_DELTA, "t", {"chunk": "round one"}))
+            app.session.events.put(AgentEvent(EventType.TURN_START, "t", {}))
+            app.session.events.put(AgentEvent(EventType.THINKING_DELTA, "t", {"chunk": "round two"}))
+            app._drain_events()
+            await pilot.pause()
+            regions = [_render(w) for w in app.query(".thinking")]
+            self.assertTrue(any("thought for" in r for r in regions))   # round one collapsed
+            self.assertTrue(any("round two" in r and "round one" not in r for r in regions))  # fresh, not merged
+
+    async def test_error_does_not_bleed_thinking_into_next_task(self):
+        # A live thinking region at TASK_ERROR must be committed, so the next task's thinking
+        # starts fresh instead of appending onto the errored task's stale widget.
+        app = TwoBApp(model="fake:m", auto_yes=True, initial_task=None)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.session.events.put(AgentEvent(EventType.THINKING_DELTA, "t1", {"chunk": "task one thoughts"}))
+            app.session.events.put(AgentEvent(EventType.TASK_ERROR, "t1", {"error": "boom"}))
+            app.session.events.put(AgentEvent(EventType.THINKING_DELTA, "t2", {"chunk": "task two thoughts"}))
+            app._drain_events()
+            await pilot.pause()
+            regions = [_render(w) for w in app.query(".thinking")]
+            self.assertTrue(any("task two thoughts" in r and "task one thoughts" not in r for r in regions))
+
 
 if __name__ == "__main__":
     unittest.main()

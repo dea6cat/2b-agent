@@ -17,22 +17,20 @@ brew install dea6cat/2b/twob-agent   # installs the `2b` command
 
 or tap first: `brew tap dea6cat/2b && brew install twob-agent`.
 
-## Publishing the tap (one-time)
+## Publishing the tap (one-time — DONE)
 
-A Homebrew tap is a GitHub repo named `homebrew-<name>`. For `dea6cat/2b`:
+The tap is live at <https://github.com/dea6cat/homebrew-2b>, so
+`brew install dea6cat/2b/twob-agent` works for anyone. Kept here for reference —
+a Homebrew tap is just a GitHub repo named `homebrew-<name>`; for `dea6cat/2b` it was
+stood up from this formula:
 
 ```bash
-# 1) create an EMPTY GitHub repo named  homebrew-2b  under the dea6cat account
-# 2) stand it up from this formula:
 mkdir -p homebrew-2b/Formula
 cp packaging/homebrew/Formula/twob-agent.rb homebrew-2b/Formula/
 cd homebrew-2b
-git init && git add . && git commit -m "twob-agent 1.1.1"
-git remote add origin https://github.com/dea6cat/homebrew-2b.git
-git push -u origin main
+git init -b main && git add . && git commit -m "twob-agent <version>"
+gh repo create dea6cat/homebrew-2b --public --source=. --remote=origin --push
 ```
-
-Then `brew install dea6cat/2b/twob-agent` works for anyone.
 
 ## Updating on a new release
 
@@ -52,8 +50,8 @@ Then `brew install dea6cat/2b/twob-agent` works for anyone.
   Rust/LLVM toolchain (~2 GB) at install time (verified: ~4.5 min build). Making `mcp` an optional
   extra in `pyproject.toml` would drop the formula to three pure-Python resources and no toolchain.
 - **Install-method detection.** 2B's `--update` / `--rm` / PATH-fix classify the install (uv / pipx
-  / brew / pip). The `brew` case landed after `1.1.1`, so a formula pinned to `1.1.1` still
-  self-classifies as `pip` at runtime; installing (and `2b` itself) work regardless. Cut a release
-  ≥ the commit that added the `brew` case and bump the formula to make `--update`/`--rm` say `brew`.
+  / brew / pip). The `brew` case landed after `1.1.1`; now that the formula is pinned to `2.4.6`
+  (which carries the `brew` case) a brew install correctly self-classifies as `brew` at runtime, so
+  `--update` runs `brew upgrade`. Keep the formula at a release ≥ that commit on future bumps.
 - Verified locally: `brew style` + `brew audit` clean, source build succeeds, `2b --version` runs
   on the brew-provided Python 3.14.

@@ -3,8 +3,8 @@ class TwobAgent < Formula
 
   desc "Local-first coding agent that keeps small local models focused"
   homepage "https://github.com/dea6cat/2b-agent"
-  url "https://files.pythonhosted.org/packages/c7/95/0fc1fe77b6fa21c23cf893142d1d6abba715132406a78856d678e00d022d/2b_agent-1.1.1.tar.gz"
-  sha256 "0e8288ebbbbce44f407a41602feb1c0a3632a3f7b4aed35936e092c9f6dc5744"
+  url "https://files.pythonhosted.org/packages/7e/b7/146c3fa7a301466d8a408a1ab0e07cd690d568a0e6d59bf54e4b026e6558/2b_agent-2.4.6.tar.gz"
+  sha256 "cee66d99c69a9d20ee38937d2f2481f6cdca54b9675bed5d184555fdf227596c"
   license "PolyForm-Noncommercial-1.0.0"
 
   depends_on "rust" => :build # cryptography, pydantic-core, rpds-py build from source
@@ -32,8 +32,8 @@ class TwobAgent < Formula
   end
 
   resource "cffi" do
-    url "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz"
-    sha256 "44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529"
+    url "https://files.pythonhosted.org/packages/57/5f/ff100cae70ebe9d8df1c01a00e510e45d9adb5c1fdda84791b199141de97/cffi-2.1.0.tar.gz"
+    sha256 "efc1cdd798b1aaf39b4610bba7aad28c9bea9b910f25c784ccf9ec1fa719d1f9"
   end
 
   resource "click" do
@@ -202,8 +202,8 @@ class TwobAgent < Formula
   end
 
   resource "uvicorn" do
-    url "https://files.pythonhosted.org/packages/2e/41/06cce5dbb9f77591512957710ac709e60b12e6216a2f2d0d607fd49706e8/uvicorn-0.50.0.tar.gz"
-    sha256 "0c92e1bc2259cb7faa4fcef774a5966588f2e88542744550b66799fba10b76f1"
+    url "https://files.pythonhosted.org/packages/a2/65/b7c6c443ccc58678c91e1e973bbe2a878591538655d6e1d47f24ba1c51f3/uvicorn-0.51.0.tar.gz"
+    sha256 "f6f4b69b657c312f516dd2d268ab9ae6f254b11e4bac504f37b2ab58b24dd0b0"
   end
 
   resource "wcwidth" do

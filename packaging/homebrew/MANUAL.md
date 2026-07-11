@@ -97,9 +97,14 @@ dedicated token as a secret on the code repo:
    - **Repository access:** Only select repositories → `homebrew-2b`
    - **Permissions:** Repository permissions → **Contents → Read and write** (Metadata read is
      included automatically).
-2. Store it (keeps the token out of shell history / chat — the command prompts for the value):
+2. Store it. `TAP_DISPATCH_TOKEN` is the secret **name** (must match `secrets.TAP_DISPATCH_TOKEN`
+   in `release.yml`) — do not change it; only the token *value* differs.
    ```bash
+   # Prompts for the value — keeps the token out of shell history / chat (preferred):
    gh secret set TAP_DISPATCH_TOKEN --repo dea6cat/2b-agent
+
+   # One-liner (records the token in shell history — use only if that's acceptable):
+   gh secret set TAP_DISPATCH_TOKEN --repo dea6cat/2b-agent --body "github_pat_xxx"
    ```
 
 Until this is set, releases still publish fine — the `dispatch-tap` job just fails harmlessly and

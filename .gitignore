@@ -8,3 +8,6 @@ build/
 prepush.sh
 docs/
 .claude
+
+# JetBrains IDE
+.idea/

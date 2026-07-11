@@ -3,6 +3,9 @@
 `Formula/twob-agent.rb` is the Homebrew formula for the [`2b-agent`](https://pypi.org/project/2b-agent/)
 PyPI package. It's kept here (versioned with the project); the live tap is a separate GitHub repo.
 
+> **Maintainer runbook:** see [`MANUAL.md`](MANUAL.md) for the full distribution model, the
+> one-time token setup, the release flow, and troubleshooting. This README is the short version.
+
 The formula is named **`twob-agent`**, not `2b-agent`: Homebrew derives a Ruby class name from the
 formula name, and a name starting with a digit (`2b…`) yields an invalid class. `twob-agent` reads
 as "2b-agent", is a valid class (`TwobAgent`), and still installs the **`2b`** command. Homebrew

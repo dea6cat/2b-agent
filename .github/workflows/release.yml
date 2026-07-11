@@ -42,6 +42,7 @@ jobs:
     name: bump homebrew tap
     needs: pypi
     runs-on: ubuntu-latest
+    permissions: {} # uses TAP_DISPATCH_TOKEN, not GITHUB_TOKEN — needs no scopes
     steps:
       # Tell the Homebrew tap (dea6cat/homebrew-2b) to regenerate its formula for
       # the just-published version. TAP_DISPATCH_TOKEN is a fine-grained PAT with

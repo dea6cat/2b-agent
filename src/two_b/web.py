@@ -80,10 +80,11 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def fetch(url: str, timeout: int = _FETCH_TIMEOUT) -> str | None:
+def fetch(url: str, timeout: int = _FETCH_TIMEOUT, headers: dict | None = None) -> str | None:
     """GET `url`, returning the decoded body or None on any failure (never raises). HTTP is
     upgraded to HTTPS; non-HTTPS and non-public hosts are refused, on the initial URL AND on
-    every redirect (SSRF guard). Mirrors update.py's never-raise fetch style."""
+    every redirect (SSRF guard). Mirrors update.py's never-raise fetch style. `headers` are
+    extra request headers merged over the defaults (e.g. htmx's HX-* headers)."""
     try:
         if url.startswith("http://"):
             url = "https://" + url[len("http://"):]
@@ -91,6 +92,9 @@ def fetch(url: str, timeout: int = _FETCH_TIMEOUT) -> str | None:
             return None
         opener = urllib.request.build_opener(_SafeRedirect())
         req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "text/html,*/*"})
+        if headers:
+            for k, v in headers.items():
+                req.add_header(k, v)
         with opener.open(req, timeout=timeout) as r:
             raw = r.read(_MAX_BYTES)
             charset = r.headers.get_content_charset() or "utf-8"

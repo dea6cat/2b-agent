@@ -85,7 +85,7 @@ class Discover(unittest.TestCase):
     def test_coding_url_is_used_when_passed(self):
         seen = {}
 
-        def fake_fetch(url):
+        def fake_fetch(url, *args, **kwargs):
             seen["url"] = url
             return _html()
         with mock.patch.object(discover.web, "fetch", fake_fetch):

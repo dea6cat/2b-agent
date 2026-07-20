@@ -11,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import config, discover, setup, testcmd  # noqa: E402
+from two_b import config, discover, setup, testcmd, web  # noqa: E402
 
 
 class Helpers(unittest.TestCase):
@@ -32,11 +32,15 @@ class Helpers(unittest.TestCase):
 
 
 class CodingReport(unittest.TestCase):
-    def _report(self, installed, found, ram=32, failed=None):
+    def _report(self, installed, found, ram=32, failed=None, raw=None):
         out = []
+        # Default (raw=None) → web.fetch returns a non-None body (page fetched, but no
+        # parseable candidates). Pass raw=False to simulate a network failure (fetch None).
+        fetch = None if raw is False else "<html></html>"
         with mock.patch.object(setup, "machine", return_value=(ram, False)), \
              mock.patch.object(config, "get_prefs", return_value={"coding_failed": failed or []}), \
-             mock.patch.object(discover, "discover", return_value=found):
+             mock.patch.object(discover, "discover", return_value=found), \
+             mock.patch.object(web, "fetch", return_value=fetch):
             cands = testcmd._coding_report(out.append, installed)
         return "\n".join(out), cands
 
@@ -59,9 +63,16 @@ class CodingReport(unittest.TestCase):
         self.assertEqual(cands, [])          # can't compare → assume covered
 
     def test_offline_note_and_empty(self):
-        txt, cands = self._report(["qwen3:8b"], [])
+        # discover returns [] AND the page couldn't be fetched → unreachable message
+        txt, cands = self._report(["qwen3:8b"], [], raw=False)
         self.assertEqual(cands, [])
         self.assertIn("Couldn't reach ollama.com", txt)
+
+    def test_empty_parse_is_distinct_from_unreachable(self):
+        # page fetched fine but no parseable candidates → markup-changed message, not "reach"
+        txt, cands = self._report(["qwen3:8b"], [])
+        self.assertEqual(cands, [])
+        self.assertIn("page markup may have changed", txt)
 
     def test_previously_failed_candidate_is_skipped(self):
         # a candidate auto already pulled + failed here is remembered and not re-suggested

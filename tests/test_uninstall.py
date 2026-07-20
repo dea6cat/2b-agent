@@ -61,7 +61,7 @@ class UninstallTest(unittest.TestCase):
     def test_brew_install_uses_brew_uninstall(self):
         self._patch(uninstall, "_install_kind", lambda: "brew")
         uninstall.run([].append, confirm=lambda p: True)
-        self.assertIn(["brew", "uninstall", "2b-agent"], self.calls)
+        self.assertIn(["brew", "uninstall", "twob-agent"], self.calls)
         self.assertFalse(self.cfg.exists())
 
     def test_confirm_no_aborts_and_keeps_everything(self):

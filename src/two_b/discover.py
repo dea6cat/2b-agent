@@ -1,9 +1,12 @@
 """Discover installable, tool-capable local models live from ollama.com/search, filtered
 to what fits the machine and ranked by popularity. Pure stdlib — fetches via web.fetch
-(urllib) and parses the server-rendered HTML with regex keyed on ollama's stable
-`x-test-*` markers (their own test hooks), so it's resilient to CSS/class churn. Every
-entry point NEVER raises and returns [] on any failure, so setup falls back to the bundled
-curated model list (offline / site-changed / parse-empty).
+(urllib) and parses the search results. ollama.com renders the model grid on the server but
+only inside the htmx fragment (a normal GET of /search returns the app shell), so we send the
+HX-* headers the page itself sends. Two card markups are supported: the older
+`<li x-test-model>` / `x-test-*` spans, and the current `<a class="group w-full">` card where
+sizes are `bg-[#ddf4ff]` chips and capabilities are `bg-indigo-50` chips. Every entry point
+NEVER raises and returns [] on any failure, so setup falls back to the bundled curated model
+list (offline / site-changed / parse-empty).
 """
 import os
 import re
@@ -14,11 +17,30 @@ SEARCH_URL = "https://ollama.com/search?c=tools"
 # `2b --test` to compare the latest coding models against what you have installed.
 CODING_URL = "https://ollama.com/search?q=coding&c=tools"
 
+# htmx headers ollama.com's own search form sends — without them the server returns only the
+# app shell, not the #searchresults grid.
+_HX_HEADERS = {
+    "HX-Request": "true",
+    "HX-Target": "#searchresults",
+    "HX-Current-URL": "https://ollama.com/search",
+}
+
+# --- legacy markup (x-test-* markers) ---
 _BLOCK = re.compile(r"<li[^>]*x-test-model")          # split the page into per-model blocks
-_SLUG = re.compile(r'href="/library/([a-z0-9][a-z0-9._-]*)"', re.I)
+_SLUG = re.compile(r'href="/library/([a-z0-9][a-z0-9._:-]*)"', re.I)
 _CAP = re.compile(r"x-test-capability[^>]*>\s*([a-z]+)", re.I)
 _SIZE = re.compile(r"x-test-size[^>]*>\s*([0-9]+(?:\.[0-9]+)?)b\b", re.I)
 _PULLS = re.compile(r"x-test-pull-count[^>]*>\s*([0-9][0-9.,]*)\s*([KM]?)", re.I)
+
+# --- current markup (a.group / chip spans) ---
+_CARD = re.compile(r'<a [^>]*class="group w-full"[^>]*>.*?</a>', re.S | re.I)
+_CARD_SLUG = re.compile(r'href="/library/([a-z0-9][a-z0-9._:-]*)"', re.I)
+_SIZE_CHIP = re.compile(
+    r'<span\s+class="[^"]*bg-\[#ddf4ff\][^"]*">\s*([0-9]+(?:\.[0-9]+)?)b\s*</span>', re.I)
+_CAP_CHIP = re.compile(
+    r'<span\s+class="[^"]*bg-indigo-50[^"]*">\s*([a-z]+)\s*</span>', re.I)
+_PULLS_CHIP = re.compile(
+    r'<span\s*>\s*([0-9][0-9.,]*)\s*([KM]?)\s*</span>\s*<span class="hidden sm:flex">', re.I)
 
 
 def _pulls_to_int(num: str, suffix: str) -> int:
@@ -45,25 +67,55 @@ def fit_variant(sizes: list[float], ram_gb: int) -> float | None:
     return max(fits) if fits else None
 
 
+def _parse_legacy(block: str) -> dict | None:
+    """Parse one legacy `<li x-test-model>` card block, or None if it has no slug."""
+    m = _SLUG.search(block)
+    if not m:
+        return None
+    try:
+        sizes = sorted({float(s) for s in _SIZE.findall(block)})
+        caps = {c.lower() for c in _CAP.findall(block)}
+        pm = _PULLS.search(block)
+        pulls = _pulls_to_int(*pm.groups()) if pm else 0
+    except Exception:
+        return None
+    return {"slug": m.group(1), "sizes": sizes, "caps": caps, "pulls": pulls}
+
+
+def _parse_card(card: str) -> dict | None:
+    """Parse one current `<a class="group w-full">` card, or None if it has no slug."""
+    m = _CARD_SLUG.search(card)
+    if not m:
+        return None
+    try:
+        sizes = sorted({float(s) for s in _SIZE_CHIP.findall(card)})
+        caps = {c.lower() for c in _CAP_CHIP.findall(card)}
+        pm = _PULLS_CHIP.search(card)
+        pulls = _pulls_to_int(*pm.groups()) if pm else 0
+    except Exception:
+        return None
+    return {"slug": m.group(1), "sizes": sizes, "caps": caps, "pulls": pulls}
+
+
 def parse_search(html: str) -> list[dict]:
     """Per-model dicts {slug, sizes:[float], caps:{str}, pulls:int} from the search HTML.
-    Tolerant: a block that doesn't parse cleanly is skipped, never raised on."""
+    Tolerant: a card that doesn't parse cleanly is skipped, never raised on. Handles both the
+    legacy `x-test-*` markup and the current `a.group` chip markup; whichever the page uses
+    (one or the other, never both) is detected automatically."""
     out = []
     if not html:
         return out
-    for block in _BLOCK.split(html)[1:]:              # [0] is the pre-first-model preamble
-        block = block.split("</li>", 1)[0]            # bound to this card — don't sweep in
-        m = _SLUG.search(block)                        # trailing footer/related-tools markup
-        if not m:
-            continue
-        try:
-            sizes = sorted({float(s) for s in _SIZE.findall(block)})
-            caps = {c.lower() for c in _CAP.findall(block)}
-            pm = _PULLS.search(block)
-            pulls = _pulls_to_int(*pm.groups()) if pm else 0
-        except Exception:
-            continue
-        out.append({"slug": m.group(1), "sizes": sizes, "caps": caps, "pulls": pulls})
+    if _BLOCK.search(html):                            # legacy markup present
+        for block in _BLOCK.split(html)[1:]:           # [0] is the pre-first-model preamble
+            block = block.split("</li>", 1)[0]         # bound to this card — don't sweep in
+            c = _parse_legacy(block)                   # trailing footer/related-tools markup
+            if c:
+                out.append(c)
+    else:                                              # current markup (or empty → no cards)
+        for card in _CARD.findall(html):
+            c = _parse_card(card)
+            if c:
+                out.append(c)
     return out
 
 
@@ -71,11 +123,12 @@ def discover(ram_gb: int, search_url: str = SEARCH_URL) -> list[tuple[str, int, 
     """Fetch + parse an ollama.com/search page → [(pull_tag, pulls, est_ram)] for
     tool-capable, locally-pullable models with a variant that fits `ram_gb`, ranked by
     pulls (desc). `search_url` defaults to the tools listing; pass CODING_URL for the
-    coding-focused set. Returns [] on any failure (→ setup uses the bundled fallback)."""
+    coding-focused set. The htmx HX-* headers are sent because the model grid is only in the
+    htmx fragment response. Returns [] on any failure (→ setup uses the bundled fallback)."""
     if os.environ.get("TWOB_NO_MODEL_FETCH"):        # offline override (tests / forced-bundled)
         return []
     try:
-        cands = parse_search(web.fetch(search_url))
+        cands = parse_search(web.fetch(search_url, headers=_HX_HEADERS))
         rows = []
         for c in cands:
             if "tools" not in c["caps"] or not c["sizes"]:   # need tool-use + a local variant

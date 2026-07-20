@@ -15,9 +15,10 @@ testable on its own. All the grading machinery is reused from setup.py.
 """
 from __future__ import annotations
 
+import os
 import re
 
-from . import config, discover, setup
+from . import config, discover, setup, web
 
 
 _SIZE_RE = re.compile(r":(\d+(?:\.\d+)?)b", re.IGNORECASE)
@@ -59,9 +60,19 @@ def _coding_report(emit, installed: list[str]) -> list:
     if ollama.com is unreachable or you already run the best-fitting variants. Best-effort —
     never raises."""
     ram_gb, _ = setup.machine()
-    found = discover.discover(ram_gb, discover.CODING_URL)   # best-fitting variant per family, RAM-filtered
-    if not found:
+    if os.environ.get("TWOB_NO_MODEL_FETCH"):
+        emit("\n[dim]Model comparison skipped (TWOB_NO_MODEL_FETCH set).[/dim]")
+        return []
+    # Distinguish a real network failure from a parse-empty page so the message isn't
+    # misleading: a 200 with no parseable cards is a site-markup change, not a reachability
+    # problem. discover.discover does the RAM filtering + popularity ranking.
+    raw = web.fetch(discover.CODING_URL, headers=discover._HX_HEADERS)
+    if raw is None:
         emit("\n[dim]Couldn't reach ollama.com to compare the latest coding models.[/dim]")
+        return []
+    found = discover.discover(ram_gb, discover.CODING_URL)   # [(tag, pulls, ram)] RAM-filtered
+    if not found:
+        emit("\n[dim]Couldn't read the model list from ollama.com (page markup may have changed).[/dim]")
         return []
     have = _family_sizes(installed)
     skip = set(config.get_prefs().get("coding_failed", []))  # tags auto already pulled + failed here

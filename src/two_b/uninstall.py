@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 from . import config
-from .update import PKG, _install_kind
+from .update import PKG, BREW_FORMULA, _install_kind
 
 
 def run(emit, confirm, assume_yes: bool = False) -> int:
@@ -33,7 +33,7 @@ def run(emit, confirm, assume_yes: bool = False) -> int:
     elif kind == "pipx":
         tool, argv, shown = "pipx", ["pipx", "uninstall", PKG], f"pipx uninstall {PKG}"
     elif kind == "brew":
-        tool, argv, shown = "brew", ["brew", "uninstall", PKG], f"brew uninstall {PKG}"
+        tool, argv, shown = "brew", ["brew", "uninstall", BREW_FORMULA], f"brew uninstall {BREW_FORMULA}"
     else:
         tool, argv, shown = "pip", [sys.executable, "-m", "pip", "uninstall", "-y", PKG], f"pip uninstall {PKG}"
 

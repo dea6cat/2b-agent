@@ -106,7 +106,7 @@ class RunUpgrade(unittest.TestCase):
     def test_brew_install_uses_brew_upgrade(self):
         code, calls = self._capture("brew")
         self.assertEqual(code, 0)
-        self.assertIn(["brew", "upgrade", "2b-agent"], calls)
+        self.assertIn(["brew", "upgrade", "twob-agent"], calls)
 
     def test_uv_absent_returns_1(self):
         code, calls = self._capture("uv", which_ok=False)

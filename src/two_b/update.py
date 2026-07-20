@@ -26,7 +26,8 @@ CACHE = config.CONFIG_DIR / "update_check.json"
 CHECK_INTERVAL = 86400          # refresh the check at most once a day
 FETCH_TIMEOUT = 3               # short — this runs off-thread, but never hang forever
 TAGS_URL = "https://api.github.com/repos/dea6cat/2b-agent/tags"
-PKG = "2b-agent"
+PKG = "2b-agent"                 # pip / uv / pipx distribution name
+BREW_FORMULA = "twob-agent"      # Homebrew formula name (not 2b-agent)
 
 
 def _parse_ver(s: str) -> tuple:
@@ -136,10 +137,10 @@ def run_upgrade(emit) -> int:
         cmd = ["pipx", "upgrade", PKG]
     elif kind == "brew":
         if not shutil.which("brew"):
-            emit(f"brew not found — run 'brew upgrade {PKG}' once it's on PATH.")
+            emit(f"brew not found — run 'brew upgrade {BREW_FORMULA}' once it's on PATH.")
             return 1
-        emit(f"Updating {PKG} via Homebrew…")
-        cmd = ["brew", "upgrade", PKG]
+        emit(f"Updating {BREW_FORMULA} via Homebrew…")
+        cmd = ["brew", "upgrade", BREW_FORMULA]
     else:
         emit(f"Updating {PKG} via pip…")
         cmd = [sys.executable, "-m", "pip", "install", "-U", PKG]

@@ -1155,6 +1155,13 @@ class TwoBApp(App):
         self._ctx_cache = (None, ("",))
         threading.Thread(target=self._load_ctx_label, daemon=True).start()
 
+    def on_context_changed(self) -> None:
+        """Called by /ctx after a session-level context-window override:
+        recompute the budget label + drop the meter cache so usage re-measures
+        against the new window."""
+        self._ctx_cache = (None, ("",))
+        threading.Thread(target=self._load_ctx_label, daemon=True).start()
+
     # ---- finish notification (ping only when you've looked away) ----
     def on_app_blur(self, event) -> None:
         self._focused = False

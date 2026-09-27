@@ -50,6 +50,10 @@ class App:
         """Hook for /model and /default; the line-mode REPL has no context meter to refresh."""
         pass
 
+    def on_context_changed(self) -> None:
+        """Hook for /ctx; the line-mode REPL has no context meter to refresh."""
+        pass
+
     def enqueue_task(self, description: str) -> Task:
         task = self.session.add_task(description)
         if self._resume_conv is not None:        # first task adopts the resumed thread + its id

@@ -20,14 +20,24 @@ class SlashCompleter(Completer):
     """Completes slash commands and their arguments:
       - the command token itself (with descriptions in the meta column),
       - model names after `/model ` (from configured providers, cached),
-      - file paths after `/add `.
+      - file paths after `/add`.
     Yields nothing for normal task text, so typing a task doesn't pop a menu.
-    """
+
+    `refresh_specs` is called on each completion so dynamically-loaded skills
+    appear in the menu without restarting."""
 
     def __init__(self, app=None):
         self._specs = command_specs()
         self._app = app
         self._paths = PathCompleter(expanduser=True)
+        self._last_spec_id = None
+
+    def refresh_specs(self) -> None:
+        """Rebuild the spec list. Cheap for the static COMMANDS dict; skills are
+        cached so this is just a list extension."""
+        from .commands import _refresh_skills
+        _refresh_skills()
+        self._specs = command_specs()
 
     def _models(self):
         out = []
@@ -46,6 +56,7 @@ class SlashCompleter(Completer):
         if not text.startswith("/"):
             return
         if " " not in text:                       # completing the command name
+            self.refresh_specs()
             word = text[1:]
             for name, doc in self._specs:
                 if name.startswith(word):

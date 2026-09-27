@@ -1314,6 +1314,34 @@ def _missing_required(name: str, args) -> list[str]:
     return [k for k in req if args.get(k) is None]
 
 
+def _infer_write_path(task: Task, session: Session, args: dict) -> str | None:
+    """When the model calls write_file/edit_file without a `path`, try to infer
+    one from context so the work doesn't stall in a retry loop. Priority:
+
+    1. A markdown-style title in the content (e.g. ``# My Doc`` -> ``my_doc.md``)
+    2. The last file read in this task (edit_file on a just-read file)
+    3. A slug from the task description
+    4. A timestamped default (2b-output-<date>.md)
+    """
+    content = (args.get("content") or "") if args else ""
+    if isinstance(content, str) and content:
+        m = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+        if m:
+            slug = re.sub(r"[^\w\s-]", "", m.group(1).strip().lower())
+            slug = re.sub(r"[\s_]+", "-", slug.strip())[:60]
+            if slug:
+                return f"{slug}.md"
+    if task.last_read_arg:
+        return task.last_read_arg
+    desc = getattr(task, "description", "") or ""
+    if desc:
+        slug = re.sub(r"[^\w\s-]", "", desc.strip().lower())
+        slug = re.sub(r"[\s_]+", "-", slug.strip())[:40]
+        if slug:
+            return f"{slug}.md"
+    return f"2b-output-{time.strftime('%Y%m%d-%H%M%S')}.md"
+
+
 def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap: int | None = None,
                    batch: bool = False) -> str:
     # batch=True: this call is running as part of a concurrent read batch. The read-loop
@@ -1329,9 +1357,20 @@ def _dispatch_tool(session: Session, task: Task, name: str, args: dict, read_cap
                 "to run — don't emit it as a call. Make a real tool call or give your final answer.")
     missing = _missing_required(name, args)
     if missing:
-        need = ", ".join(_REQUIRED_ARGS[name])
-        return (f"error: {name} call is missing required argument(s): {', '.join(missing)}. "
-                f"Call {name} again with all of: {need}.")
+        # Smart recovery: if only `path` is missing on write_file or edit_file,
+        # try to infer one from context rather than dead-ending the model in a
+        # retry loop. Infer priority: title-derived filename, last-read file,
+        # task description, then a timestamped default.
+        if name in ("write_file", "edit_file") and missing == ["path"] and not session.read_only:
+            inferred = _infer_write_path(task, session, args)
+            if inferred is not None:
+                args = dict(args)
+                args["path"] = inferred
+                missing = _missing_required(name, args)
+        if missing:
+            need = ", ".join(_REQUIRED_ARGS[name])
+            return (f"error: {name} call is missing required argument(s): {', '.join(missing)}. "
+                    f"Call {name} again with all of: {need}.")
     if not batch and name != "read_file":
         # Any non-read action breaks a read streak, so the read-loop breaker only
         # counts *consecutive* identical reads with nothing done in between. (In a

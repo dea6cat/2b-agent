@@ -8,10 +8,13 @@ import os
 import re
 import shlex
 import time
+from pathlib import Path
 
-from . import config, difffmt, mcp_client, orchestrator, registry, repomap, tools, untrusted, web
-from .conversation import Conversation, Message
+from . import config, difffmt, mcp_client, orchestrator, registry, repomap, skills as skills_mod, tools, untrusted, web
+from .conversation import Conversation, Message, Role, trimmed
+from .providers.ollama import CTX_FLOOR
 from .session import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, MODE_LABELS, TaskState
+from .toolspec import specs_for
 
 COMMANDS = {}
 
@@ -106,7 +109,8 @@ def command(*names):
 
 def command_specs() -> list[tuple[str, str]]:
     """Ordered (primary_name, one-line-doc) for each command, deduped by handler
-    (aliases collapse to the first-registered name). Drives the / completion menu."""
+    (aliases collapse to the first-registered name). Drives the / completion menu.
+    Includes dynamically-loaded skills at the end."""
     specs: list[tuple[str, str]] = []
     seen = set()
     for name, fn in COMMANDS.items():
@@ -115,7 +119,34 @@ def command_specs() -> list[tuple[str, str]]:
         seen.add(fn)
         doc = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""
         specs.append((name, doc))
+    for sk in _loaded_skills():
+        specs.append((sk.name, sk.description[:80]))
     return specs
+
+
+_SKILL_CACHE: list = []  # cached (name, skill) pairs; invalidated on /skills or app start
+
+def _loaded_skills() -> list:
+    """Return cached skills, loading them if the cache is empty. The cache is
+    intentionally simple: skills are loaded once per app session. Call
+    _refresh_skills() to force a reload."""
+    global _SKILL_CACHE
+    if not _SKILL_CACHE:
+        try:
+            _SKILL_CACHE = skills_mod.get_all_skills(project_root=Path(os.getcwd()))
+        except Exception:
+            _SKILL_CACHE = []
+    return _SKILL_CACHE
+
+
+def _refresh_skills() -> list:
+    """Force a reload of skills from disk. Returns the loaded list."""
+    global _SKILL_CACHE
+    try:
+        _SKILL_CACHE = skills_mod.get_all_skills(project_root=Path(os.getcwd()))
+    except Exception:
+        _SKILL_CACHE = []
+    return _SKILL_CACHE
 
 
 def dispatch_input(raw: str, app) -> bool:
@@ -129,15 +160,71 @@ def dispatch_input(raw: str, app) -> bool:
     name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
     handler = COMMANDS.get(name)
     if handler is None:
+        # Check if it's a skill
+        skill = _find_skill(name)
+        if skill is not None:
+            _invoke_skill(skill, rest, app)
+            return True
         app.ui.print(f"[red]Unknown command:[/red] /{name}  (try /help)")
         return True
     handler(rest, app)
     return True
 
 
+def _find_skill(name: str) -> skills_mod.Skill | None:
+    """Look up a skill by name (with or without leading /)."""
+    key = name.lstrip("/")
+    for sk in _loaded_skills():
+        if sk.name == key:
+            return sk
+    return skills_mod.get_skill(key)
+
+
 def _target_task(app):
     """The task a state command acts on: the active one, else the most recent."""
     return app.session.active_task or (app.session.tasks[-1] if app.session.tasks else None)
+
+
+def _invoke_skill(skill: skills_mod.Skill, args: str, app) -> None:
+    """Inject a skill's prompt content into the active task's context.
+
+    The skill body has arguments substituted, then is appended as a user message
+    so the model sees it as explicit instructions — no model-facing tool changes
+    and the frozen-tool invariant is preserved."""
+    task = _target_task(app)
+    if task is None:
+        app.ui.print("No task to inject skill into — start a task first.")
+        return
+    content = skills_mod.substitute_arguments(
+        skill.markdown_content, args, argument_names=skill.arg_names)
+    if skill.skill_root:
+        root = skill.skill_root.replace("\\", "/")
+        content = content.replace("${SKILLS_DIR}", root)
+    if task.conversation is None:
+        task.conversation = Conversation(system_prompt=orchestrator.SYSTEM_PROMPT)
+    task.conversation.append(Message.user(f"[skill: {skill.name}]\n{content}"))
+    app.ui.print(f"Injected skill [bold]{skill.name}[/bold] into task context "
+                 f"({len(content)} chars).")
+
+
+@command("skills")
+def _skills(rest, app):
+    """List available skills: /skills · /skills reload."""
+    arg = rest.strip().lower()
+    if arg == "reload":
+        _refresh_skills()
+        app.ui.print(f"Reloaded skills from: {', '.join(skills_mod._REGISTRY.loaded_paths) or 'none'}")
+        return
+    sks = _loaded_skills()
+    if not sks:
+        app.ui.print("No skills found. Create one at .clawd/skills/<name>/SKILL.md")
+        return
+    app.ui.print(f"[bold]Skills ({len(sks)}):[/bold]")
+    for sk in sks:
+        mark = "·" if sk.user_invocable else "·"
+        tools_str = f"  [dim](tools: {', '.join(sk.allowed_tools)})[/dim]" if sk.allowed_tools else ""
+        app.ui.print(f"  {mark} [cyan]/{sk.name}[/cyan] — {sk.description[:70]}{tools_str}")
+    app.ui.print("  [dim]Invoke with /<skill-name> [args] · /skills reload to refresh.[/dim]")
 
 
 @command("help", "h")
@@ -714,20 +801,177 @@ def _theme(rest, app):
     app.set_theme(name)
 
 
+@command("compact")
+def _compact(rest, app):
+    """Summarize the conversation to reclaim context: /compact [instructions]."""
+    task = _target_task(app)
+    if task is None or task.conversation is None:
+        app.ui.print("No conversation yet — start a task first.")
+        return
+    if task.state == TaskState.ACTIVE:
+        app.ui.print("Stop the running task first (esc), then /compact.")
+        return
+    resolved = registry.resolve(app.registry, task.model_override or app.session.default_model)
+    if not resolved:
+        app.ui.print("[red]Cannot compact — no usable provider/model resolved for this task.[/red]")
+        return
+    provider, model = resolved
+    instructions = rest.strip()
+    if instructions and "previous summary" in instructions.lower():
+        app.ui.print("[red]Instructions cannot contain 'previous summary' (reserved for iterative update).[/red]")
+        return
+    task.status_line = "Compacting"
+    task.turn_started_at = time.monotonic()
+    app.ui.print(f"Compacting conversation… (model: {provider.name}:{model})")
+    touched = list(task.read_mtimes.keys()) + [p for p, _ in task.edit_history]
+    from . import persist
+    archiving = persist.enabled()
+    dropped = orchestrator.compact_conversation(
+        task.conversation, provider, model,
+        touched=touched,
+        breadcrumb=orchestrator._ARCHIVE_BREADCRUMB if archiving else "",
+        cancel=task.cancel_flag,
+    )
+    if not dropped:
+        app.ui.print("Nothing to compact — the conversation is short enough as-is.")
+        return
+    if archiving:
+        keep = [m for m in dropped
+                if not (m.role == Role.USER and (m.text or "").startswith(orchestrator._RECAP_PREFIX))]
+        persist.archive_messages(task.id, app.session.cwd, keep)
+    cpt = getattr(task, "chars_per_token", 4.0)
+    post_conv = trimmed(task.conversation) if not os.environ.get("TWOB_NO_TRIM") else task.conversation
+    task.last_compact_tokens = orchestrator.estimate_tokens(post_conv, cpt)
+    n = len(dropped)
+    saved = orchestrator.estimate_tokens(
+        Conversation(system_prompt="", messages=dropped), cpt)
+    app.ui.print(f"Compacted {n} message(s), ~{saved:,} tokens reclaimed. "
+                 f"Context now ~{task.last_compact_tokens:,} tokens.")
+
+
 @command("context")
 def _context(rest, app):
-    """Show estimated context usage for the current task (auto-compacts near the limit)."""
+    """Show estimated context usage by category (auto-compacts near the limit)."""
     task = _target_task(app)
     if task is None or task.conversation is None:
         app.ui.print("No conversation yet — start a task first.")
         return
     resolved = registry.resolve(app.registry, task.model_override or app.session.default_model)
     budget = orchestrator.context_budget(resolved[0], resolved[1]) if resolved else 8000
-    used = orchestrator.estimate_tokens(task.conversation, getattr(task, "chars_per_token", 4.0))
+    cpt = getattr(task, "chars_per_token", 4.0)
+    conv = task.conversation
+
+    cat_sys = _rough_tokens(conv.system_prompt or "", cpt)
+    tool_schema_chars = sum(len(s.description) for s in specs_for(registry.is_local(provider) if resolved else True))
+    cat_tools = _rough_tokens(str(tool_schema_chars), cpt)
+
+    cat_msgs = 0
+    cat_user = 0
+    cat_tool_calls = 0
+    cat_tool_results = 0
+    cat_thinking = 0
+    for m in conv.messages:
+        t = m.text or ""
+        cat_msgs += _rough_tokens(t, cpt)
+        if m.role == Role.USER:
+            cat_user += _rough_tokens(t, cpt)
+        elif m.role == Role.ASSISTANT:
+            cat_thinking += _rough_tokens(m.thinking or "", cpt)
+        for tc in m.tool_calls:
+            cat_tool_calls += _rough_tokens(tc.name, cpt) + _rough_tokens(str(tc.arguments), cpt)
+        for r in m.tool_results:
+            cat_tool_results += _rough_tokens(r.content, cpt)
+
+    used = cat_sys + cat_tools + cat_msgs
     pct = int(used / budget * 100) if budget else 0
     at = int(orchestrator.COMPACT_AT * 100)
-    app.ui.print(f"Context: ~[bold]{used}[/bold] / {budget} tokens ([bold]{pct}%[/bold]). "
-                 f"Auto-compacts at {at}%.")
+    warn = " [yellow](warning — near limit)[/yellow]" if pct >= 80 else ""
+
+    app.ui.print(f"[bold]Context usage:[/bold]  ~{used:,} / {budget:,} tokens ([bold]{pct}%[/bold]){warn}")
+    app.ui.print(f"  System prompt:  {cat_sys:,}")
+    app.ui.print(f"  Tool schemas:   {cat_tools:,}")
+    breakdown = []
+    if cat_user:
+        breakdown.append(("User messages", cat_user))
+    if cat_tool_calls:
+        breakdown.append(("Tool calls", cat_tool_calls))
+    if cat_tool_results:
+        breakdown.append(("Tool results", cat_tool_results))
+    if cat_thinking:
+        breakdown.append(("Thinking", cat_thinking))
+    if breakdown:
+        for label, val in breakdown:
+            app.ui.print(f"  {label + ':':<18}{val:,}")
+    app.ui.print(f"  [dim]Auto-compacts at {at}%.[/dim]")
+
+
+@command("ctx", "contextChange")
+def _ctx(rest, app):
+    """Set or show the session context window for local Ollama models.
+    /ctx — show current; /ctx 64k — set 64K tokens; /ctx 65536 — set exact;
+    /ctx auto — reset to 2B's RAM-computed default."""
+    task = _target_task(app)
+    if task is None:
+        app.ui.print("No active task yet — start a task first.")
+        return
+    resolved = registry.resolve(app.registry, task.model_override or app.session.default_model)
+    if not resolved:
+        app.ui.print("[red]Cannot set context — no usable provider/model resolved.[/red]")
+        return
+    provider, model = resolved
+    is_ollama_local = (
+        getattr(provider, "name", "") == "ollama"
+        and getattr(provider, "api_key", None) is None
+    )
+    if not is_ollama_local:
+        app.ui.print("[red]/ctx only applies to local Ollama models (cloud windows are fixed).[/red]")
+        return
+    if not rest.strip():
+        cur = provider.context_window(model)
+        computed = provider._compute_ctx(model) if hasattr(provider, "_compute_ctx") else 0
+        note = ""
+        if provider._ctx_override.get(model):
+            note = f" [dim](override — computed: {computed:,} on this machine)[/dim]"
+        else:
+            note = f" [dim](auto-computed for this machine)[/dim]"
+        app.ui.print(f"Context window for [bold]{model}[/bold]: {cur:,} tokens{note}")
+        app.ui.print("[dim]/ctx 64k — set 64K · /ctx 32k — set 32K · /ctx auto — reset to computed[/dim]")
+        return
+    val = rest.strip().lower()
+    if val == "auto":
+        provider.set_context_window(model, 0)
+        computed = provider.context_window(model)
+        _ctx_changed(app)
+        app.ui.print(f"Context window reset to computed default: {computed:,} tokens.")
+        return
+    m = re.match(r"^(\d+)\s*([kKmM]?)$", val)
+    if not m:
+        app.ui.print("[red]Usage:[/red] /ctx <number>[k|m]  e.g.  /ctx 64k  or  /ctx 65536")
+        return
+    num = int(m.group(1))
+    suffix = m.group(2).upper()
+    tokens = num * (1024 if suffix in ("K", "M") else 1) * (1 if suffix != "M" else 1024)
+    if tokens < CTX_FLOOR:
+        app.ui.print(f"[red]Too small[/red] — minimum is {CTX_FLOOR} tokens.")
+        return
+    provider.set_context_window(model, tokens)
+    _ctx_changed(app)
+    app.ui.print(f"Context window for [bold]{model}[/bold] set to {tokens:,} tokens.")
+    app.ui.print("[dim]Takes effect on the next model call. /ctx auto to revert.[/dim]")
+
+
+def _ctx_changed(app) -> None:
+    """Let the UI refresh the context-window meter/label after /ctx."""
+    hook = getattr(app, "on_context_changed", None)
+    if callable(hook):
+        hook()
+
+
+def _rough_tokens(text: str, chars_per_token: float = 4.0) -> int:
+    """Host-side token estimate by character ratio (no tiktoken dependency)."""
+    if not text:
+        return 0
+    return int(len(text) / max(1.5, chars_per_token))
 
 
 @command("copy", "cp")

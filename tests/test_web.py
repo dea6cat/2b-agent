@@ -1,6 +1,7 @@
 """Tests for src/two_b/web.py — stdlib fetch + readable extraction. Host-side, no network
 (fetch is monkeypatched). Run: `python -m unittest tests.test_web`.
 """
+import json
 import os
 import sys
 import unittest
@@ -219,6 +220,99 @@ class FetchCommand(unittest.TestCase):
             commands.COMMANDS["fetch"]("https://bad", app)
         self.assertIsNone(task.conversation)                      # nothing injected
         self.assertTrue(any("Could not fetch" in m for m in app.ui.msgs))
+
+
+# A trimmed DuckDuckGo Instant Answer response: a main abstract, an official-site result, and
+# related topics — some flat, some nested in a named group (disambiguation style).
+_IA = {
+    "Heading": "ELIZA",
+    "AbstractText": "ELIZA is an early natural language processing program created at MIT by Joseph Weizenbaum.",
+    "AbstractURL": "https://en.wikipedia.org/wiki/ELIZA",
+    "Results": [{"Text": "Official site", "FirstURL": "https://elizagen.org"}],
+    "RelatedTopics": [
+        {"Text": "ELIZA effect", "FirstURL": "https://duckduckgo.com/ELIZA_effect"},
+        {"Name": "People", "Topics": [{"Text": "Joseph Weizenbaum", "FirstURL": "https://duckduckgo.com/Joseph_Weizenbaum"}]},
+    ],
+}
+
+
+class Search(unittest.TestCase):
+    def _search(self, payload, **kw):
+        body = payload if isinstance(payload, (str, type(None))) else json.dumps(payload)
+        with mock.patch.object(web, "fetch", return_value=body):
+            return web.search("eliza", **kw)
+
+    def test_abstract_then_results_then_related_topics(self):
+        hits = self._search(_IA)
+        self.assertEqual(hits[0], {"title": "ELIZA", "url": "https://en.wikipedia.org/wiki/ELIZA",
+                                   "snippet": _IA["AbstractText"]})
+        self.assertEqual([h["url"] for h in hits[1:]], [
+            "https://elizagen.org", "https://duckduckgo.com/ELIZA_effect",
+            "https://duckduckgo.com/Joseph_Weizenbaum"])            # nested group flattened
+        self.assertEqual(hits[3]["title"], "Joseph Weizenbaum")
+
+    def test_definition_is_used(self):
+        hits = self._search({"Heading": "Kludge", "Definition": "A clumsy workaround.",
+                             "DefinitionURL": "https://en.wiktionary.org/wiki/kludge"})
+        self.assertEqual(hits[0]["snippet"], "A clumsy workaround.")
+
+    def test_caps_results(self):
+        self.assertEqual(len(self._search(_IA, max_results=2)), 2)
+
+    def test_failure_is_none_and_no_answer_is_empty(self):
+        self.assertIsNone(self._search(None))                  # offline / blocked
+        self.assertIsNone(self._search("<html>not json</html>"))
+        self.assertEqual(self._search({"Heading": "", "RelatedTopics": []}), [])
+
+    def test_uses_the_official_json_api(self):
+        seen = {}
+
+        def fake(url, **k):
+            seen["url"] = url
+            return "{}"
+        with mock.patch.object(web, "fetch", side_effect=fake):
+            web.search("a b&c")
+        self.assertTrue(seen["url"].startswith("https://api.duckduckgo.com/?"))
+        for part in ("q=a+b%26c", "format=json", "no_html=1", "no_redirect=1"):
+            self.assertIn(part, seen["url"])
+
+
+class SearchCommand(unittest.TestCase):
+    """/search is host-side like /fetch: results are fenced into task context; no model tool."""
+
+    _app = FetchCommand._app
+
+    def test_registered_but_not_a_model_tool(self):
+        from two_b.ui import commands
+        from two_b.tooling.toolspec import TOOL_SPECS
+        self.assertIn("search", commands.COMMANDS)
+        self.assertNotIn("search", {s.name for s in TOOL_SPECS})
+
+    def test_injects_fenced_results(self):
+        from two_b.ui import commands
+        app, task = self._app()
+        with mock.patch.object(web, "fetch", return_value=json.dumps(_IA)):
+            commands.COMMANDS["search"]("eliza chatbot", app)
+        blob = "\n".join(m.text or "" for m in task.conversation.messages)
+        self.assertIn("pre-loaded web search: eliza chatbot", blob)
+        self.assertIn("https://en.wikipedia.org/wiki/ELIZA", blob)
+        self.assertIn("Joseph Weizenbaum", blob)
+        self.assertIn("<untrusted_data", blob)
+        self.assertTrue(any("4 result" in m for m in app.ui.msgs))
+
+    def test_usage_failure_and_empty_are_clean(self):
+        from two_b.ui import commands
+        app, task = self._app()
+        commands.COMMANDS["search"]("  ", app)
+        with mock.patch.object(web, "fetch", return_value=None):
+            commands.COMMANDS["search"]("eliza", app)
+        with mock.patch.object(web, "fetch", return_value="{}"):
+            commands.COMMANDS["search"]("eliza", app)
+        self.assertIsNone(task.conversation)                      # nothing injected in any case
+        joined = "\n".join(app.ui.msgs)
+        self.assertIn("Usage: /search", joined)
+        self.assertIn("Could not search", joined)
+        self.assertIn("No instant answer", joined)
 
 
 if __name__ == "__main__":

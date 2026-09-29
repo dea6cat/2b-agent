@@ -10,6 +10,7 @@ services are added as data in registry.py, not new code.
 """
 import json
 import os
+import re
 from typing import Callable
 
 from ..core.conversation import Conversation, Message, Role, ToolCall
@@ -31,16 +32,31 @@ def _is_chat_model(model_id: str) -> bool:
     return not any(tok in low for tok in _NON_CHAT)
 
 
+# Reasoning is NOT part of the shared Chat Completions surface — each service has its own
+# fields, so each gets its own style (set per provider in registry.py):
+#   openai     reasoning_effort, on reasoning models only (others 400 on it)
+#   openrouter a `reasoning` object; models without reasoning ignore it
+#   deepseek   thinking {type} + reasoning_effort (low | high | max)
+#   cerebras   reasoning_effort, on its reasoning models; only some accept "none"
+_OPENAI_REASONING = re.compile(r"^(o\d|gpt-5|gpt-6)")
+_CEREBRAS_REASONING = ("qwen-3", "gpt-oss", "gemma-4")
+_CEREBRAS_CANT_DISABLE = ("gpt-oss",)
+_EFFORTS = ("low", "medium", "high")
+
+
 class OpenAICompatProvider:
     def __init__(self, name: str, base_url: str, key_env: str,
                  models: list[str] | None = None, dynamic_models: bool = False,
-                 extra_headers: dict | None = None):
+                 extra_headers: dict | None = None, reasoning_style: str | None = None,
+                 max_tokens: int | None = None):
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.key_env = key_env
         self._static_models = models or []
         self._dynamic = dynamic_models
         self._extra_headers = extra_headers or {}
+        self._reasoning_style = reasoning_style
+        self._max_tokens = max_tokens   # only where the service's default cap causes trouble
 
     @property
     def api_key(self) -> str:
@@ -55,7 +71,33 @@ class OpenAICompatProvider:
         return bool(self.api_key)
 
     def supports_reasoning(self, model: str) -> bool:
-        return False   # reasoning deferred (see design §7)
+        style, m = self._reasoning_style, model.lower()
+        if style == "openai":
+            return bool(_OPENAI_REASONING.match(m))
+        if style == "cerebras":
+            return m.startswith(_CEREBRAS_REASONING)
+        return style in ("openrouter", "deepseek")
+
+    def _reasoning_fields(self, model: str, reasoning) -> dict:
+        """This service's own request fields for a /think level; {} keeps its default."""
+        if reasoning is None or not self.supports_reasoning(model):
+            return {}
+        style = self._reasoning_style
+        if style == "openrouter":
+            if reasoning == "on":
+                return {"reasoning": {"enabled": True}}
+            return {"reasoning": {"effort": "none" if reasoning == "off" else reasoning}}
+        if style == "deepseek":
+            if reasoning == "off":
+                return {"thinking": {"type": "disabled"}}
+            effort = {} if reasoning == "on" else {"reasoning_effort": "low" if reasoning == "low" else "high"}
+            return {"thinking": {"type": "enabled"}, **effort}
+        if reasoning == "on":
+            return {}
+        if reasoning == "off":
+            can_disable = style == "cerebras" and not model.lower().startswith(_CEREBRAS_CANT_DISABLE)
+            return {"reasoning_effort": "none" if can_disable else "low"}
+        return {"reasoning_effort": reasoning} if reasoning in _EFFORTS else {}
 
     def list_models(self) -> list[str]:
         if not self._dynamic:
@@ -76,6 +118,10 @@ class OpenAICompatProvider:
                 continue
             if m.role == Role.ASSISTANT:
                 entry: dict = {"role": "assistant", "content": m.text or ""}
+                # DeepSeek 400s a tool conversation whose earlier assistant turns lack their
+                # reasoning_content; other services don't take the field.
+                if self._reasoning_style == "deepseek" and m.thinking:
+                    entry["reasoning_content"] = m.thinking
                 if m.tool_calls:
                     entry["tool_calls"] = [
                         {"id": tc.id, "type": "function",
@@ -121,8 +167,12 @@ class OpenAICompatProvider:
             "messages": self._messages(conversation),
             "tools": to_openai(tools),
             "stream": True,
+            **self._reasoning_fields(model, reasoning),
         }
+        if self._max_tokens:
+            payload["max_tokens"] = self._max_tokens
         content = []
+        thinking = []
         by_index: dict[int, dict] = {}   # assemble tool_calls from streamed fragments
         for line in post_stream(f"{self.base_url}/chat/completions", payload,
                                 headers=self._headers(), provider=self.name, cancel=cancel):
@@ -138,6 +188,12 @@ class OpenAICompatProvider:
                 continue
             choices = obj.get("choices") or [{}]
             delta = choices[0].get("delta", {})
+            # Reasoning text: DeepSeek uses reasoning_content; OpenRouter and Cerebras `reasoning`.
+            chunk = delta.get("reasoning_content") or delta.get("reasoning")
+            if isinstance(chunk, str) and chunk:
+                thinking.append(chunk)
+                if on_thinking:
+                    on_thinking(chunk)
             if delta.get("content"):
                 content.append(delta["content"])
                 on_text(delta["content"])
@@ -159,7 +215,8 @@ class OpenAICompatProvider:
                 args = {}
             calls.append(ToolCall.new(name=slot["name"], arguments=args, id=slot["id"]))
         text = "".join(content).strip()
+        think = "".join(thinking).strip()
         return ProviderResponse(
-            message=Message.assistant(text=text or None, tool_calls=calls),
+            message=Message.assistant(text=text or None, thinking=think or None, tool_calls=calls),
             raw={},
         )

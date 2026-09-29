@@ -17,7 +17,8 @@ _SSE_LINES = [
     "\n",
     'data: {"candidates":[{"content":{"parts":[{"text":"lo"}]}}]}\n',
     "data: {bad json here\n",   # malformed event must be skipped, not crash
-    'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"a.py"}}}]}}]}\n',
+    'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"a.py"}},'
+    '"thoughtSignature":"SIG-a"}]}}]}\n',
 ]
 
 
@@ -60,6 +61,21 @@ class GoogleStreaming(unittest.TestCase):
         tc = resp.message.tool_calls[0]
         self.assertEqual(tc.name, "read_file")
         self.assertEqual(tc.arguments, {"path": "a.py"})
+
+    def test_thought_signature_is_kept_on_the_call(self):
+        # Gemini 3 400s a replayed function call that lacks its thoughtSignature.
+        _deltas, resp = self._stream()
+        self.assertEqual(resp.message.tool_calls[0].signature, "SIG-a")
+
+    def test_signatures_are_echoed_back_and_missing_ones_use_the_placeholder(self):
+        from two_b.core.conversation import ToolCall
+        conv = Conversation(system_prompt="sys")
+        conv.append(Message.user("hi"))
+        conv.append(Message.assistant(tool_calls=[
+            ToolCall(id="1", name="read_file", arguments={"path": "a"}, signature="SIG-a"),
+            ToolCall(id="2", name="read_file", arguments={"path": "b"})]))   # e.g. from another model
+        parts = g.GoogleProvider()._contents(conv)[1]["parts"]
+        self.assertEqual([p["thoughtSignature"] for p in parts], ["SIG-a", g._SKIP_SIGNATURE])
 
     def test_uses_sse_endpoint_with_header_key(self):
         self._stream()

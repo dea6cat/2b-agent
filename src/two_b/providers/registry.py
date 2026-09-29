@@ -14,15 +14,19 @@ from .base import Provider
 from .openai_compat import OpenAICompatProvider
 
 # name, base_url, key_env, dynamic_models, static models (only for dynamic_models=False —
-# a dynamic provider lists live via /models and never falls back to a hardcoded guess), extra headers
+# a dynamic provider lists live via /models and never falls back to a hardcoded guess), extra
+# headers, options: reasoning_style (openai_compat.py lists each service's own reasoning fields)
+# and max_tokens (OpenRouter defaults to a model's full output cap and pre-checks credits
+# against it, rejecting low-balance accounts before generating anything).
 _OPENAI_COMPAT = [
-    ("openai", "https://api.openai.com/v1", "OPENAI_API_KEY", True, [], {}),
+    ("openai", "https://api.openai.com/v1", "OPENAI_API_KEY", True, [], {}, {"reasoning_style": "openai"}),
     ("openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", True, [],
-     {"HTTP-Referer": "https://github.com/dea6cat/2b-agent", "X-Title": "2B Agent"}),
-    ("mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", True, [], {}),
-    ("nvidia", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", True, [], {}),
-    ("deepseek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", True, [], {}),
-    ("cerebras", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", True, [], {}),
+     {"HTTP-Referer": "https://github.com/dea6cat/2b-agent", "X-Title": "2B Agent"},
+     {"reasoning_style": "openrouter", "max_tokens": 16384}),
+    ("mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", True, [], {}, {}),
+    ("nvidia", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", True, [], {}, {}),
+    ("deepseek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", True, [], {}, {"reasoning_style": "deepseek"}),
+    ("cerebras", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", True, [], {}, {"reasoning_style": "cerebras"}),
 ]
 
 
@@ -32,9 +36,9 @@ def build_registry() -> dict[str, Provider]:
     cloud = ollama.cloud()
     if cloud is not None:
         reg[cloud.name] = cloud
-    for name, base, key_env, dyn, models, hdrs in _OPENAI_COMPAT:
+    for name, base, key_env, dyn, models, hdrs, opts in _OPENAI_COMPAT:
         reg[name] = OpenAICompatProvider(name, base, key_env, models=models,
-                                         dynamic_models=dyn, extra_headers=hdrs)
+                                         dynamic_models=dyn, extra_headers=hdrs, **opts)
     # Anthropic and Google adapters register here as they land (M3.5 / M3.6).
     try:
         from .anthropic import AnthropicProvider

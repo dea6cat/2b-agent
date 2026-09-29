@@ -100,6 +100,64 @@ class Provider(Protocol):
         ...
 
 
+# Plain-language causes for provider HTTP errors, checked in order. Keyword matches run
+# against the provider's own message so a 400/403/429 that is really "out of credits"
+# (providers disagree on the status code) still reads as such.
+_CREDIT_WORDS = ("credit", "balance", "billing", "payment", "quota", "insufficient funds")
+_CONTEXT_WORDS = ("context length", "context window", "too long", "maximum context", "too many tokens",
+                  "reduce the length")
+
+
+def _error_text(body: str) -> str:
+    """The provider's own message from a JSON error body (the shapes vary by service), else
+    the raw body — collapsed to one line and capped."""
+    text = body
+    try:
+        data = json.loads(body)
+        err = data.get("error", data) if isinstance(data, dict) else data
+        if isinstance(err, dict):
+            err = err.get("message") or err.get("detail") or data.get("message") or data.get("detail") or err
+        if isinstance(err, str):
+            text = err
+    except (ValueError, AttributeError):
+        pass
+    text = " ".join(str(text).split())
+    return text[:240] + ("…" if len(text) > 240 else "")
+
+
+def http_error_message(code: int, body: str, reason: str) -> str:
+    """One readable line for a provider HTTP error: `HTTP <code> — <cause>: <provider message>`."""
+    msg = _error_text(body) if body.strip() else (reason or "")
+    low = msg.lower()
+    if code == 401:
+        hint = "authentication failed, check the API key (/connect)"
+    elif code == 402 or any(w in low for w in _CREDIT_WORDS):
+        hint = "out of credits or billing not set up on this account"
+    elif code == 403:
+        hint = "access denied for this key"
+    elif code == 404:
+        hint = "model not found or not available to this account, try /models"
+    elif code == 429:
+        hint = "rate limited"
+    elif code == 413 or any(w in low for w in _CONTEXT_WORDS):
+        hint = "request too large for the model's context, try /compact"
+    elif code >= 500:
+        hint = "provider error, usually temporary"
+    else:
+        hint = ""
+    return f"HTTP {code} — {hint}: {msg}" if hint else f"HTTP {code}: {msg}"
+
+
+def _http_error(e: urllib.error.HTTPError, provider: str) -> ProviderError:
+    body = ""
+    try:
+        body = e.read().decode(errors="replace")[:4000]
+    except Exception:
+        pass
+    return ProviderError(provider, http_error_message(e.code, body, e.reason),
+                         retryable=(e.code == 429 or e.code >= 500))
+
+
 def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 600,
               provider: str = "http", cancel=None) -> dict:
     """POST JSON, return parsed JSON. Raises ProviderError with a useful message.
@@ -115,12 +173,7 @@ def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode(errors="replace")[:500]
-        except Exception:
-            pass
-        raise ProviderError(provider, f"HTTP {e.code}: {body or e.reason}", retryable=(e.code == 429 or e.code >= 500)) from e
+        raise _http_error(e, provider) from e
     except urllib.error.URLError as e:
         if cancel is not None and cancel.is_set():
             raise _Cancelled() from e
@@ -153,12 +206,7 @@ def post_stream(url: str, payload: dict, headers: dict | None = None, timeout: i
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode(errors="replace")[:500]
-        except Exception:
-            pass
-        raise ProviderError(provider, f"HTTP {e.code}: {body or e.reason}", retryable=(e.code == 429 or e.code >= 500)) from e
+        raise _http_error(e, provider) from e
     except urllib.error.URLError as e:
         if cancel is not None and cancel.is_set():
             raise _Cancelled() from e
@@ -235,6 +283,6 @@ def get_json(url: str, headers: dict | None = None, timeout: int = 15, provider:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        raise ProviderError(provider, f"HTTP {e.code}: {e.reason}", retryable=e.code >= 500) from e
+        raise _http_error(e, provider) from e
     except urllib.error.URLError as e:
         raise ProviderError(provider, f"connection failed: {e.reason}", retryable=True) from e

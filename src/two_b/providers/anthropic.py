@@ -10,13 +10,12 @@ import json
 import os
 from typing import Callable
 
-from .. import catalog
-from ..conversation import Conversation, Message, Role, ToolCall
-from ..toolspec import ToolSpec, to_anthropic
-from .base import ProviderResponse, post_json, post_stream
+from . import catalog
+from ..core.conversation import Conversation, Message, Role, ToolCall
+from ..tooling.toolspec import ToolSpec, to_anthropic
+from .base import ProviderResponse, cached_model_list, get_json, post_json, post_stream
 
 API_URL = "https://api.anthropic.com/v1/messages"
-_MODELS = ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-fable-5"]
 
 
 class AnthropicProvider:
@@ -30,7 +29,11 @@ class AnthropicProvider:
         return bool(self.api_key)
 
     def list_models(self) -> list[str]:
-        return list(_MODELS)
+        return cached_model_list(self, self._fetch_models)
+
+    def _fetch_models(self) -> list[str]:
+        data = get_json("https://api.anthropic.com/v1/models?limit=1000", headers=self._headers(), provider=self.name)
+        return sorted(m["id"] for m in data.get("data", []) if m.get("id"))
 
     def supports_reasoning(self, model: str) -> bool:
         return False   # reasoning deferred (see design §7)

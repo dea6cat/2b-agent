@@ -1,6 +1,6 @@
 import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from two_b.commands import dispatch_input, command_specs, _context, _compact, _ctx
+from two_b.ui.commands import dispatch_input, command_specs, _context, _compact, _ctx
 
 
 class CommandRegistration(unittest.TestCase):
@@ -75,6 +75,20 @@ class ContextCommand(unittest.TestCase):
         app.registry = {}
         _context("", app)
         self.assertTrue(any("No conversation" in p for p in app.prints))
+
+    def test_context_with_resolved_model_reports_usage(self):
+        # Regression: the tool-schema line referenced an undefined `provider`, so /context
+        # raised NameError whenever the task's model resolved — i.e. every real use.
+        from two_b.core.conversation import Conversation, Message
+        provider = CtxCommand._FakeProvider()
+        app = self._FakeApp()
+        task = type("T", (), {"model_override": None,
+                              "conversation": Conversation(system_prompt="sys", messages=[Message.user("hi")])})()
+        app.session = type("S", (), {"tasks": [task], "active_task": task,
+                                    "active_task_id": "t1", "default_model": "ollama:gemma3"})()
+        app.registry = {"ollama": provider}
+        _context("", app)
+        self.assertTrue(any("Context usage" in p for p in app.prints))
 
 
 class CtxCommand(unittest.TestCase):

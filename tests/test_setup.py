@@ -9,7 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import setup  # noqa: E402
+from two_b.lifecycle import setup  # noqa: E402
 
 
 class Grade(unittest.TestCase):
@@ -219,7 +219,7 @@ class InstallAwarePath(unittest.TestCase):
     def test_script_dir_pip_user_install_uses_user_scheme(self):
         # package located under the user-site → the user scripts scheme (handles macOS framework)
         import sysconfig
-        pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(setup.__file__)))
+        pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(setup.__file__))))
         with mock.patch.object(setup, "_install_kind", return_value="pip"), \
              mock.patch("site.getusersitepackages", return_value=pkg_parent):
             expected = sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user"))

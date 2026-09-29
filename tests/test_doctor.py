@@ -11,7 +11,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import doctor, registry as R  # noqa: E402
+from two_b.lifecycle import doctor
+from two_b.providers import registry as R  # noqa: E402
 
 
 class _FakeProvider:

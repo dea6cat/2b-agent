@@ -9,8 +9,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import catalog  # noqa: E402
-from two_b import orchestrator  # noqa: E402
+from two_b.providers import catalog  # noqa: E402
+from two_b.core import compaction  # noqa: E402
 
 
 class _Prov:
@@ -81,29 +81,29 @@ class CorruptCatalog(unittest.TestCase):
 
 class ContextBudgetWiring(unittest.TestCase):
     def test_cloud_known_model_uses_catalog_window(self):
-        self.assertEqual(orchestrator.context_budget(_Prov("anthropic"), "claude-opus-4-8"), 200000)
-        self.assertEqual(orchestrator.context_budget(_Prov("openai"), "gpt-4o"), 128000)
+        self.assertEqual(compaction.context_budget(_Prov("anthropic"), "claude-opus-4-8"), 200000)
+        self.assertEqual(compaction.context_budget(_Prov("openai"), "gpt-4o"), 128000)
 
     def test_cloud_unknown_model_uses_provider_constant(self):
         # openai's per-provider fallback is 120000; an unlisted model hits it.
-        self.assertEqual(orchestrator.context_budget(_Prov("openai"), "mystery-model"), 120000)
+        self.assertEqual(compaction.context_budget(_Prov("openai"), "mystery-model"), 120000)
 
     def test_unknown_provider_and_model_floor(self):
-        self.assertEqual(orchestrator.context_budget(_Prov("whoknows"), "mystery"), 8000)
+        self.assertEqual(compaction.context_budget(_Prov("whoknows"), "mystery"), 8000)
 
     def test_local_ollama_uses_provider_window(self):
         class _Ollama:
             name = "ollama"
             def context_window(self, model):
                 return 4321
-        self.assertEqual(orchestrator.context_budget(_Ollama(), "qwen3.5:9b"), 4321)
+        self.assertEqual(compaction.context_budget(_Ollama(), "qwen3.5:9b"), 4321)
 
     def test_ollama_cloud_uses_provider_window_not_catalog(self):
         class _OllamaCloud:
             name = "ollama-cloud"
             def context_window(self, model):
                 return 120000
-        self.assertEqual(orchestrator.context_budget(_OllamaCloud(), "gpt-oss:120b"), 120000)
+        self.assertEqual(compaction.context_budget(_OllamaCloud(), "gpt-oss:120b"), 120000)
 
 
 if __name__ == "__main__":

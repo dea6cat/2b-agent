@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import lsp, retrieval  # noqa: E402
+from two_b.tooling import lsp, retrieval  # noqa: E402
 
 
 class Refs(unittest.TestCase):

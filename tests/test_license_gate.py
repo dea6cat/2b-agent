@@ -12,8 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import config  # noqa: E402
-from two_b import license as lic  # noqa: E402
+from two_b.storage import config  # noqa: E402
+from two_b.lifecycle import license as lic  # noqa: E402
 
 
 class Gate(unittest.TestCase):

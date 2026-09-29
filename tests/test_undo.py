@@ -9,8 +9,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import commands  # noqa: E402
-from two_b.session import Session, Task  # noqa: E402
+from two_b.ui import commands  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
 
 
 def _app_with(task):

@@ -10,7 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import tools  # noqa: E402
+from two_b.tooling import tools  # noqa: E402
 
 
 class EnvScrub(unittest.TestCase):

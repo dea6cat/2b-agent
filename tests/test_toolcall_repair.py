@@ -11,9 +11,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator, tools  # noqa: E402
+from two_b.core import dispatch, prompts
+from two_b.tooling import tools  # noqa: E402
 from two_b.providers import ollama  # noqa: E402
-from two_b.session import Session, Task  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
 
 KNOWN = ("read_file", "edit_file", "write_file", "search_files", "list_files", "run_git")
 
@@ -110,13 +111,13 @@ class EmptyNameGuard(unittest.TestCase):
         self.task = Task(description="t")
 
     def test_empty_name_returns_recoverable_error_not_crash(self):
-        out = orchestrator._dispatch_tool(self.session, self.task, "", {})
+        out = dispatch._dispatch_tool(self.session, self.task, "", {})
         self.assertTrue(out.startswith("error: that tool call had no tool name"))
         self.assertIn("data, not a tool", out)
 
     def test_named_but_unknown_tool_still_reaches_unknown_branch(self):
         # A non-empty name is not caught by the empty-name guard.
-        out = orchestrator._dispatch_tool(self.session, self.task, "frobnicate", {})
+        out = dispatch._dispatch_tool(self.session, self.task, "frobnicate", {})
         self.assertEqual(out, "error: unknown tool frobnicate")
 
 
@@ -139,8 +140,8 @@ class SamplingAndPrompt(unittest.TestCase):
         self.assertNotIn("num_ctx", opts)
 
     def test_system_prompt_states_flat_arg_shapes(self):
-        self.assertIn("do not nest them under an", orchestrator.SYSTEM_PROMPT)
-        self.assertIn("edit_file{path, old_text, new_text}", orchestrator.SYSTEM_PROMPT)
+        self.assertIn("do not nest them under an", prompts.SYSTEM_PROMPT)
+        self.assertIn("edit_file{path, old_text, new_text}", prompts.SYSTEM_PROMPT)
 
 
 class ParseArgsGuard(unittest.TestCase):
@@ -173,21 +174,21 @@ class MissingPathRecovery(unittest.TestCase):
 
     def test_infers_from_content_title(self):
         content = "# My Flutter Guide\n\nSome content"
-        path = orchestrator._infer_write_path(self.task, self.session, {"content": content})
+        path = dispatch._infer_write_path(self.task, self.session, {"content": content})
         self.assertEqual(path, "my-flutter-guide.md")
 
     def test_infers_from_last_read(self):
         self.task.last_read_arg = "src/lib/main.dart"
-        path = orchestrator._infer_write_path(self.task, self.session, {"content": ""})
+        path = dispatch._infer_write_path(self.task, self.session, {"content": ""})
         self.assertEqual(path, "src/lib/main.dart")
 
     def test_infers_from_description(self):
-        path = orchestrator._infer_write_path(self.task, self.session, {"content": ""})
+        path = dispatch._infer_write_path(self.task, self.session, {"content": ""})
         self.assertEqual(path, "create-a-manual.md")
 
     def test_falls_back_to_timestamp_default(self):
         empty_task = Task(description="")
-        path = orchestrator._infer_write_path(empty_task, self.session, {"content": ""})
+        path = dispatch._infer_write_path(empty_task, self.session, {"content": ""})
         self.assertTrue(path.startswith("2b-output-"))
         self.assertTrue(path.endswith(".md"))
 
@@ -197,7 +198,7 @@ class MissingPathRecovery(unittest.TestCase):
         # Use accept-edits mode so apply_write doesn't prompt.
         session = Session(default_model="x", cwd="/tmp", auto_yes=True)
         content = "# Test File\n\nHello"
-        result = orchestrator._dispatch_tool(session, self.task, "write_file",
+        result = dispatch._dispatch_tool(session, self.task, "write_file",
                                              {"content": content})
         self.assertNotIn("missing required argument", result)
         # The inferred path should be based on the title

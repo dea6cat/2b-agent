@@ -10,16 +10,17 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import conversation, orchestrator  # noqa: E402
-from two_b.conversation import Conversation, Message, ToolCall, ToolResult  # noqa: E402
+from two_b.core import conversation  # noqa: E402
+from two_b.core import prompts  # noqa: E402
+from two_b.core.conversation import Conversation, Message, ToolCall, ToolResult  # noqa: E402
 from two_b.providers import ollama  # noqa: E402
-from two_b.toolspec import specs_for, to_openai  # noqa: E402
+from two_b.tooling.toolspec import specs_for, to_openai  # noqa: E402
 
 
 class PrefixStability(unittest.TestCase):
     def test_system_prompt_is_a_stable_constant(self):
-        self.assertEqual(orchestrator.SYSTEM_PROMPT, orchestrator.SYSTEM_PROMPT)
-        self.assertNotIn("2026", orchestrator.SYSTEM_PROMPT)   # no volatile date baked into the prefix
+        self.assertEqual(prompts.SYSTEM_PROMPT, prompts.SYSTEM_PROMPT)
+        self.assertNotIn("2026", prompts.SYSTEM_PROMPT)   # no volatile date baked into the prefix
 
     def test_tool_schema_serialization_is_deterministic(self):
         # The frozen tool schema must serialize byte-identically every turn.
@@ -30,11 +31,11 @@ class PrefixStability(unittest.TestCase):
     def test_trimming_does_not_touch_the_prefix(self):
         # conversation.trimmed elides OLD tool-result bodies but must leave the system
         # prompt (the cached prefix) untouched.
-        conv = Conversation(system_prompt=orchestrator.SYSTEM_PROMPT)
+        conv = Conversation(system_prompt=prompts.SYSTEM_PROMPT)
         for i in range(10):
             conv.append(Message.assistant(tool_calls=[ToolCall.new("read_file", {"path": f"f{i}"})]))
             conv.append(Message.results([ToolResult(tool_call_id="x", content="y" * 5000)]))
-        self.assertEqual(conversation.trimmed(conv).system_prompt, orchestrator.SYSTEM_PROMPT)
+        self.assertEqual(conversation.trimmed(conv).system_prompt, prompts.SYSTEM_PROMPT)
 
     def test_ollama_messages_put_system_first_and_stable(self):
         p = ollama.OllamaProvider(name="ollama")

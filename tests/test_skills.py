@@ -1,9 +1,7 @@
 import os, sys, tempfile, unittest
+from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from two_b.skills import (
-    parse_frontmatter, create_skill, get_all_skills,
-    substitute_arguments, parse_argument_names, Skill,
-)
+from two_b.core.skills import parse_frontmatter, get_all_skills, substitute_arguments, parse_argument_names
 
 
 class Frontmatter(unittest.TestCase):
@@ -78,6 +76,13 @@ class Substitute(unittest.TestCase):
 class SkillLoad(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        # Isolate from the developer's real user skills (~/.clawd/skills, ~/.claude/skills,
+        # $TWOB_SKILLS_DIR), which get_all_skills also loads — otherwise they leak into the counts.
+        env = {k: v for k, v in os.environ.items() if k != "TWOB_SKILLS_DIR"}
+        env["HOME"] = tempfile.mkdtemp()
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _make_skill(self, name="test-skill", body="Do $task", **fm):
         d = os.path.join(self.tmp, ".clawd", "skills")
@@ -113,19 +118,6 @@ class SkillLoad(unittest.TestCase):
         skills = get_all_skills(project_root=self.tmp)
         self.assertEqual(len(skills), 1)
         self.assertTrue(skills[0].user_invocable)
-
-    def test_create_skill_writes_file(self):
-        path = create_skill(
-            directory=os.path.join(self.tmp, ".clawd", "skills"),
-            name="new-skill", description="Created skill",
-            allowed_tools=["read_file"], arguments=["target"],
-        )
-        self.assertTrue(path.exists())
-        fm, body = parse_frontmatter(path.read_text())
-        self.assertEqual(fm["description"], "Created skill")
-        self.assertEqual(fm["allowed-tools"], ["read_file"])
-        self.assertEqual(fm["arguments"], ["target"])
-        self.assertEqual(fm["user-invocable"], True)
 
 
 if __name__ == "__main__":

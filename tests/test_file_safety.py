@@ -14,8 +14,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator  # noqa: E402
-from two_b.session import Session, Task  # noqa: E402
+from two_b.core import dispatch  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
 
 
 class _Base(unittest.TestCase):
@@ -33,7 +33,7 @@ class _Base(unittest.TestCase):
         return p
 
     def _read(self, session, task, path):
-        return orchestrator._dispatch_tool(session, task, "read_file", {"path": path})
+        return dispatch._dispatch_tool(session, task, "read_file", {"path": path})
 
 
 class ReadDedup(_Base):
@@ -48,7 +48,7 @@ class ReadDedup(_Base):
     def test_read_loop_breaker_after_limit(self):
         self._write("a.py", "x = 1\n")
         s, t = Session(default_model="m"), Task(description="t")
-        outs = [self._read(s, t, "a.py") for _ in range(orchestrator.READ_LOOP_LIMIT)]
+        outs = [self._read(s, t, "a.py") for _ in range(dispatch.READ_LOOP_LIMIT)]
         self.assertTrue(outs[-1].startswith("error:"))
         self.assertIn("keep re-reading", outs[-1])
         self.assertIn("stop re-reading", outs[-1].lower())
@@ -67,7 +67,7 @@ class ReadDedup(_Base):
         self._write("a.py", "x = 1\n")
         s, t = Session(default_model="m"), Task(description="t")
         self._read(s, t, "a.py")
-        orchestrator._dispatch_tool(s, t, "list_files", {"path": "."})   # breaks the streak
+        dispatch._dispatch_tool(s, t, "list_files", {"path": "."})   # breaks the streak
         out = self._read(s, t, "a.py")
         self.assertIn("x = 1", out)
         self.assertNotIn("unchanged since you read it", out)
@@ -101,28 +101,28 @@ class OverwriteGate(_Base):
     def test_overwrite_unread_existing_file_is_refused(self):
         p = self._write("cfg.txt", "old\n")
         s, t = self._session_task()
-        out = orchestrator.apply_write(s, t, "cfg.txt", "new\n")
+        out = dispatch.apply_write(s, t, "cfg.txt", "new\n")
         self.assertIn("haven't read it this session", out)
         with open(p) as f:
             self.assertEqual(f.read(), "old\n")   # left untouched
 
     def test_new_file_write_is_allowed(self):
         s, t = self._session_task()
-        out = orchestrator.apply_write(s, t, "new.txt", "hello\n")
+        out = dispatch.apply_write(s, t, "new.txt", "hello\n")
         self.assertTrue(out.startswith("wrote"), out)
 
     def test_overwrite_after_reading_is_allowed(self):
         self._write("cfg.txt", "old\n")
         s, t = self._session_task()
         self._read(s, t, "cfg.txt")
-        out = orchestrator.apply_write(s, t, "cfg.txt", "new\n")
+        out = dispatch.apply_write(s, t, "cfg.txt", "new\n")
         self.assertTrue(out.startswith("wrote"), out)
 
     def test_overwrite_after_own_write_is_allowed(self):
         # 2B's own write refreshes read-state, so overwriting a file it just wrote is fine.
         s, t = self._session_task()
-        orchestrator.apply_write(s, t, "gen.txt", "v1\n")
-        out = orchestrator.apply_write(s, t, "gen.txt", "v2\n")
+        dispatch.apply_write(s, t, "gen.txt", "v1\n")
+        out = dispatch.apply_write(s, t, "gen.txt", "v2\n")
         self.assertTrue(out.startswith("wrote"), out)
 
 

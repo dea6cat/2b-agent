@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 try:
     from textual.containers import VerticalScroll  # noqa: F401
-    from two_b.app_tui import TwoBApp
-    from two_b.orchestrator import AgentEvent, EventType
+    from two_b.ui.app_tui import TwoBApp
+    from two_b.core.orchestrator import AgentEvent, EventType
     _HAS_TEXTUAL = True
 except ModuleNotFoundError:
     _HAS_TEXTUAL = False

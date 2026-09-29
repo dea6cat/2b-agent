@@ -1,8 +1,8 @@
 import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from two_b.providers import anthropic as A
-from two_b.conversation import Conversation
-from two_b.toolspec import TOOL_SPECS
+from two_b.core.conversation import Conversation
+from two_b.tooling.toolspec import TOOL_SPECS
 
 
 class Cache(unittest.TestCase):

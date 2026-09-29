@@ -11,10 +11,10 @@ import os
 import json as _json
 from typing import Callable
 
-from ..conversation import Conversation, Message, Role, ToolCall
-from ..tools import recover_toolcalls
-from ..toolspec import ToolSpec, to_openai
-from .base import Provider, ProviderResponse, get_json, post_json, post_stream
+from ..core.conversation import Conversation, Message, Role, ToolCall
+from ..tooling.tools import recover_toolcalls
+from ..tooling.toolspec import ToolSpec, to_openai
+from .base import ProviderResponse, get_json, post_json, post_stream
 
 LOCAL_DEFAULT = "http://localhost:11434"
 CLOUD_HOST = "https://ollama.com"

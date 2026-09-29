@@ -14,12 +14,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator, verify  # noqa: E402
-from two_b.conversation import Message, ToolCall  # noqa: E402
-from two_b.orchestrator import EventType  # noqa: E402
+from two_b.core import answer, orchestrator, verify  # noqa: E402
+from two_b.core.conversation import Message, ToolCall  # noqa: E402
+from two_b.core.orchestrator import EventType  # noqa: E402
 from two_b.providers.base import ProviderResponse  # noqa: E402
-from two_b.session import Session, Task  # noqa: E402
-from two_b.verify import CheckResult  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
+from two_b.core.verify import CheckResult  # noqa: E402
 
 
 class ScanText(unittest.TestCase):
@@ -174,7 +174,7 @@ class VerifyNudge(unittest.TestCase):
         # then gives up and finishes rather than looping forever.
         feedback = [m for m in provider.last_conv.messages
                     if m.text and "did not pass the project checks" in m.text]
-        self.assertEqual(len(feedback), orchestrator.MAX_VERIFY_ROUNDS)
+        self.assertEqual(len(feedback), answer.MAX_VERIFY_ROUNDS)
         exhausted = [e for e in events if e.type == EventType.LOG
                      and "still failing" in e.payload.get("text", "")]
         self.assertEqual(len(exhausted), 1)

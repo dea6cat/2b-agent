@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b.conversation import Conversation  # noqa: E402
+from two_b.core.conversation import Conversation  # noqa: E402
 from two_b.providers import ollama as o  # noqa: E402
 
 _LINES = [

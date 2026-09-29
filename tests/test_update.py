@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import update  # noqa: E402
+from two_b.lifecycle import update  # noqa: E402
 
 
 class ParseVer(unittest.TestCase):

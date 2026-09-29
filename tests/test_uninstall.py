@@ -13,7 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import config, uninstall  # noqa: E402
+from two_b.storage import config
+from two_b.lifecycle import uninstall  # noqa: E402
 
 
 class UninstallTest(unittest.TestCase):

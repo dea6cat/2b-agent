@@ -352,8 +352,7 @@ small as you keep it.
   `TWOB_CONTEXT_TOKENS` (override the local window) · `TWOB_NO_DIAGNOSTICS` (skip post-edit checks) ·
   `TWOB_NO_LSP` (regex symbol map instead of a language server) · `TWOB_NO_SEATBELT` /
   `TWOB_SEATBELT=strict` (relax / harden the `run_command` sandbox) · `TWOB_NO_TRIM` (keep bulky tool
-  output in each request) · `TWOB_NO_HISTORY` (don't persist sessions) · `TWOB_SUBAGENT_MODEL` (run
-  delegated sub-agents on a cheaper model) · `TWOB_NO_UPDATE_CHECK` (no background update check) ·
+  output in each request) · `TWOB_NO_HISTORY` (don't persist sessions) · `TWOB_NO_UPDATE_CHECK` (no background update check) ·
   `TWOB_NO_VERIFY` (turn off the verify loop) · `TWOB_VERIFY_FAST` (skip test suites, static checks
   only) · `TWOB_VERIFY_CMD="cmd1;;cmd2"` (declare your own checks for stacks 2B can't auto-detect) ·
   `TWOB_THINK=off|on|low|medium|high` (persistent reasoning level — the `/think` default; applies to

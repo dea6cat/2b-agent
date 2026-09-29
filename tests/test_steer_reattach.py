@@ -9,13 +9,13 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b.conversation import Conversation, Message  # noqa: E402
-from two_b.session import TaskState  # noqa: E402
+from two_b.core.conversation import Conversation, Message  # noqa: E402
+from two_b.core.session import TaskState  # noqa: E402
 
 # TwoBApp pulls in textual, a runtime-only dep the pure-Python test gate doesn't install.
 # Skip cleanly when it's absent (like the bwrap tests on macOS) rather than erroring out.
 try:
-    from two_b.app_tui import TwoBApp  # noqa: E402
+    from two_b.ui.app_tui import TwoBApp  # noqa: E402
     _HAS_TEXTUAL = True
 except ModuleNotFoundError:
     TwoBApp = None

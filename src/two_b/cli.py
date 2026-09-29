@@ -13,13 +13,16 @@ import time
 
 from rich.console import Console
 
-from . import __version__, banner, orchestrator, registry, tui
-from .commands import dispatch_input
-from .prompt import make_session, prompt_line
-from .rawkey import CTRL_B, KeyListener
-from .orchestrator import AgentEvent, EventType
-from .session import Session, Task, TaskState
-from .tui import render_session
+from . import __version__
+from .ui import banner, tui
+from .core import orchestrator
+from .providers import registry
+from .ui.commands import dispatch_input
+from .ui.prompt import make_session, prompt_line
+from .ui.rawkey import CTRL_B, KeyListener
+from .core.events import AgentEvent, EventType
+from .core.session import Session, Task, TaskState
+from .ui.tui import render_session
 
 
 class App:
@@ -60,7 +63,7 @@ class App:
             task.conversation = self._resume_conv
             if self._resume_id:
                 task.id = self._resume_id
-            from . import changelog       # restore the durable undo stack for this thread
+            from .storage import changelog       # restore the durable undo stack for this thread
             task.edit_history = changelog.load(task.id, self.session.cwd)
             self._resume_conv = None
             self._resume_id = None
@@ -277,7 +280,7 @@ def main() -> None:
     # `2b setup [flags]` — first-time onboarding. Intercepted before the main parser so
     # setup's own flags (--clean/--models/--no-benchmark/--fix-path) don't need declaring here.
     if sys.argv[1:2] == ["setup"]:
-        from . import setup
+        from .lifecycle import setup
         raise SystemExit(setup.main(sys.argv[2:]))
 
     # `2b eval …` — host-side technique scorer (drives the real agent over a fixed
@@ -285,13 +288,13 @@ def main() -> None:
     # a following flag (or nothing) so a free-text task like `2b eval this diff` — where
     # "eval" is just the first word — still runs as a task rather than being swallowed.
     if sys.argv[1:2] == ["eval"] and (len(sys.argv) == 2 or sys.argv[2].startswith("-")):
-        from . import evals
+        from .evals import evals
         raise SystemExit(evals.main(sys.argv[2:]))
 
     # `2b trace replay <session>` — prompt-drift replay (P10). No LLM; rebuilds the recorded
     # prefix with current code and reports drift. Intercepted before the parser like eval/setup.
     if sys.argv[1:2] == ["trace"]:
-        from . import driftreplay
+        from .storage import driftreplay
         raise SystemExit(driftreplay.trace_main(sys.argv[2:]))
 
     parser = argparse.ArgumentParser(
@@ -327,13 +330,13 @@ def main() -> None:
     args = parser.parse_args()
 
     # Load any provider keys saved via /connect before we detect providers.
-    from . import config
+    from .storage import config
     config.load_into_env()
 
     console = Console()
 
     if args.list_sessions:
-        from . import persist
+        from .storage import persist
         rows = persist.list_sessions(cwd=os.getcwd())
         if not rows:
             console.print("[dim]No saved sessions for this directory.[/dim]")
@@ -349,11 +352,11 @@ def main() -> None:
         raise SystemExit(0)
 
     if args.doctor:
-        from . import doctor
+        from .lifecycle import doctor
         raise SystemExit(doctor.run(console.print))
 
     if args.rm:
-        from . import uninstall
+        from .lifecycle import uninstall
 
         def _confirm(prompt: str) -> bool:
             try:
@@ -363,15 +366,15 @@ def main() -> None:
         raise SystemExit(uninstall.run(console.print, _confirm, args.yes))
 
     if args.update:
-        from . import update
+        from .lifecycle import update
         raise SystemExit(update.run_upgrade(console.print))
 
     if args.setup:
-        from . import setup
+        from .lifecycle import setup
         raise SystemExit(setup.run({}))
 
     if args.test is not None:
-        from . import testcmd
+        from .lifecycle import testcmd
 
         def _confirm(prompt: str) -> bool:
             if not sys.stdin.isatty():        # never auto-delete without a TTY; require --yes
@@ -386,7 +389,7 @@ def main() -> None:
                                      confirm=_confirm, assume_yes=args.yes))
 
     if args.list_models:
-        from . import registry
+        from .providers import registry
         reg = registry.usable(registry.build_registry())
         if not reg:
             console.print("[red]No providers configured. Start Ollama, or set a provider API key.[/red]")
@@ -403,9 +406,9 @@ def main() -> None:
         raise SystemExit(0)
 
     if args.print_ctx is not None:
-        from . import catalog, registry
+        from .providers import catalog, registry
         m = args.print_ctx or args.model or orchestrator.pick_default_model()
-        # Ollama-first, matching orchestrator.context_budget: a locally-pulled
+        # Ollama-first, matching compaction.context_budget: a locally-pulled
         # model whose name collides with a cloud catalog entry (codestral,
         # devstral, …) must report its real pinned num_ctx, not cloud numbers.
         ol = registry.build_registry().get("ollama")
@@ -427,10 +430,10 @@ def main() -> None:
     # Metadata/maintenance commands above already exited, so this fires only when using the
     # agent. --yes counts as acceptance (also how install.sh accepts non-interactively). An
     # explicit 'n' uninstalls 2B; Enter/anything else just exits (asked again next run).
-    from . import license as _license
+    from .lifecycle import license as _license
 
     def _decline_uninstall() -> None:
-        from . import uninstall
+        from .lifecycle import uninstall
         raise SystemExit(uninstall.run(console.print, lambda _p: True, assume_yes=True))
 
     if not _license.ensure_accepted(assume_yes=args.yes, interactive=sys.stdin.isatty(),
@@ -443,13 +446,13 @@ def main() -> None:
         else:
             # Prefer a persisted /default, but only if it still resolves (provider
             # reachable / key present); otherwise fall back to local autodetect.
-            from . import registry
+            from .providers import registry
             saved = config.get_prefs().get("default_model")
             model = saved if (saved and registry.resolve(registry.build_registry(), saved) is not None) else None
             model = model or orchestrator.pick_default_model()
     except SystemExit:
         # No model available. Offer first-run onboarding instead of just erroring out.
-        from . import setup
+        from .lifecycle import setup
         if not args.model and sys.stdin.isatty() and setup._confirm(
                 "No local model is set up yet. Run first-time setup now?", True, {}):
             setup.run({})
@@ -464,13 +467,13 @@ def main() -> None:
         console.print(f"[dim]No --model given, {src}: {model}[/dim]")
 
     # Best-effort update notice (from a prior background check; never blocks startup).
-    from . import update
+    from .lifecycle import update
     _note = update.notice()
     if _note:
         console.print(f"[dim]{_note}[/dim]")
 
     # Connect any MCP servers with enabled tools (no-op if none are configured).
-    from . import mcp_client
+    from .tooling import mcp_client
     mcp_client.manager.start()
 
     # Resume a saved conversation (--continue = most recent here; --resume ID = specific).
@@ -479,7 +482,7 @@ def main() -> None:
     resume_conv = None
     resume_id = None
     if args.cont or args.resume:
-        from . import persist
+        from .storage import persist
         sid = args.resume or persist.most_recent_id(os.getcwd())
         resume_conv = persist.load(sid, cwd=os.getcwd()) if sid else None
         if resume_conv is None:
@@ -494,7 +497,7 @@ def main() -> None:
     # line-mode REPL for --classic and for scripted/piped (non-TTY) use.
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
     if interactive and not args.classic:
-        from .app_tui import run_tui
+        from .ui.app_tui import run_tui
         run_tui(model, args.yes, args.task, args.theme, resume_conv=resume_conv, resume_id=resume_id)
     else:
         App(model=model, auto_yes=args.yes, resume_conv=resume_conv,

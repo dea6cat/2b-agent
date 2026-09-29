@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .. import __version__
-from ..conversation import Conversation, Message
-from ..toolspec import ToolSpec
+from ..core.conversation import Conversation, Message
+from ..tooling.toolspec import ToolSpec
 
 # Identify ourselves. urllib's default "Python-urllib/x" User-Agent is blocked by some
 # providers' bot filters (e.g. Cerebras's Cloudflare returns 403 "error code: 1010"), so
@@ -205,6 +205,25 @@ def stream_with_retry(provider, conversation, model, tools, on_text, *, retries=
                     raise
                 _time.sleep(0.1); waited += 0.1
             delay = min(delay * 2, 8.0)
+
+
+MODELS_TTL = 60  # seconds to cache a provider's live model list
+
+
+def cached_model_list(provider, fetch) -> list[str]:
+    """A provider's live model list via `fetch()`, cached on the provider for MODELS_TTL.
+    On failure (down, blocked, bad/absent key) returns [] and caches nothing, so the next
+    call retries — never a stale hardcoded guess, which would hide the real failure or
+    offer a model the provider has since retired."""
+    cache = getattr(provider, "_models_cache", None)
+    if cache is not None and _time.monotonic() - cache[0] < MODELS_TTL:
+        return cache[1]
+    try:
+        models = fetch()
+    except Exception:
+        return []
+    provider._models_cache = (_time.monotonic(), models)
+    return models
 
 
 def get_json(url: str, headers: dict | None = None, timeout: int = 15, provider: str = "http") -> dict:

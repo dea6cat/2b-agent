@@ -13,27 +13,29 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator, tools  # noqa: E402
-from two_b.conversation import Message, ToolCall  # noqa: E402
-from two_b.orchestrator import EventType  # noqa: E402
+from two_b.core import orchestrator
+from two_b.core import dispatch
+from two_b.tooling import tools  # noqa: E402
+from two_b.core.conversation import Message, ToolCall  # noqa: E402
+from two_b.core.orchestrator import EventType  # noqa: E402
 from two_b.providers.base import ProviderResponse  # noqa: E402
-from two_b.session import Session, Task  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
 
 
 class Classify(unittest.TestCase):
     def test_read_tools_are_parallel(self):
         for name in ("read_file", "list_files", "search_files"):
-            self.assertTrue(orchestrator._is_parallel_read(name, {"path": "x"}), name)
+            self.assertTrue(dispatch._is_parallel_read(name, {"path": "x"}), name)
 
     def test_git_is_never_parallel(self):
         # Even read-only git is excluded — concurrent git can collide on .git/index.lock.
-        self.assertFalse(orchestrator._is_parallel_read("run_git", {"args": "status"}))
-        self.assertFalse(orchestrator._is_parallel_read("run_git", {"args": "log --oneline"}))
-        self.assertFalse(orchestrator._is_parallel_read("run_git", {"args": "commit -m x"}))
+        self.assertFalse(dispatch._is_parallel_read("run_git", {"args": "status"}))
+        self.assertFalse(dispatch._is_parallel_read("run_git", {"args": "log --oneline"}))
+        self.assertFalse(dispatch._is_parallel_read("run_git", {"args": "commit -m x"}))
 
     def test_mutating_and_gated_tools_are_not_parallel(self):
         for name in ("edit_file", "write_file", "run_command", "some_mcp_tool"):
-            self.assertFalse(orchestrator._is_parallel_read(name, {}), name)
+            self.assertFalse(dispatch._is_parallel_read(name, {}), name)
 
 
 class _Base(unittest.TestCase):
@@ -56,7 +58,7 @@ class ConcurrentRuns(_Base):
         self._write("c.txt", "CCC\n")
         s, t = Session(default_model="m"), Task(description="t")
         calls = [ToolCall.new("read_file", {"path": p}) for p in ("a.txt", "b.txt", "c.txt")]
-        out = orchestrator._run_reads_concurrently(s, t, calls, None)
+        out = dispatch._run_reads_concurrently(s, t, calls, None)
         self.assertEqual(len(out), 3)
         self.assertIn("AAA", out[0]); self.assertIn("BBB", out[1]); self.assertIn("CCC", out[2])
 
@@ -69,7 +71,7 @@ class ConcurrentRuns(_Base):
         tools.do_read_file = lambda *a, **k: (time.sleep(0.2), orig(*a, **k))[1]
         try:
             t0 = time.monotonic()
-            out = orchestrator._run_reads_concurrently(s, t, calls, None)
+            out = dispatch._run_reads_concurrently(s, t, calls, None)
             elapsed = time.monotonic() - t0
         finally:
             tools.do_read_file = orig
@@ -90,7 +92,7 @@ class ConcurrentRuns(_Base):
             return orig(path, **k)
         tools.do_read_file = counting
         try:
-            out = orchestrator._run_reads_concurrently(s, t, calls, None)
+            out = dispatch._run_reads_concurrently(s, t, calls, None)
         finally:
             tools.do_read_file = orig
         self.assertEqual(len(out), 3)
@@ -110,7 +112,7 @@ class ConcurrentRuns(_Base):
             return orig(path, **k)
         tools.do_read_file = flaky
         try:
-            out = orchestrator._run_reads_concurrently(s, t, calls, None)
+            out = dispatch._run_reads_concurrently(s, t, calls, None)
         finally:
             tools.do_read_file = orig
         self.assertIn("AAA", out[0])

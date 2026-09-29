@@ -7,8 +7,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator as O  # noqa: E402
-from two_b.session import Session  # noqa: E402
+from two_b.core import orchestrator as O  # noqa: E402
+from two_b.core.session import Session  # noqa: E402
 
 
 class Resolve(unittest.TestCase):

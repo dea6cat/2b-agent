@@ -10,12 +10,12 @@ import json
 import os
 from typing import Callable
 
-from ..conversation import Conversation, Message, Role, ToolCall
-from ..toolspec import ToolSpec, to_gemini
-from .base import ProviderResponse, post_json, post_stream
+from ..core.conversation import Conversation, Message, Role, ToolCall
+from ..tooling.toolspec import ToolSpec, to_gemini
+from .base import ProviderResponse, cached_model_list, get_json, post_json, post_stream
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
-_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+_NON_CHAT = ("tts", "image", "transcribe", "computer-use", "robotics")   # listed, but not coding chat models
 _G_LOW, _G_MED, _G_HIGH = 2048, 8192, 24576   # bounded thinking budgets; never -1 (dynamic)
 
 
@@ -30,7 +30,15 @@ class GoogleProvider:
         return bool(self.api_key)
 
     def list_models(self) -> list[str]:
-        return list(_MODELS)
+        return cached_model_list(self, self._fetch_models)
+
+    def _fetch_models(self) -> list[str]:
+        # Gemini chat models only: the endpoint also lists embedders, Gemma (no function
+        # calling here), and special-purpose variants that can't drive a coding tool loop.
+        data = get_json(f"{BASE}/models?pageSize=1000", headers=self._headers(), provider=self.name)
+        names = (m.get("name", "").removeprefix("models/") for m in data.get("models", [])
+                 if "generateContent" in m.get("supportedGenerationMethods", []))
+        return sorted(n for n in names if n.startswith("gemini-") and not any(t in n for t in _NON_CHAT))
 
     def _contents(self, conv: Conversation) -> list[dict]:
         # Map tool_call_id -> tool name, so tool results can name their function.

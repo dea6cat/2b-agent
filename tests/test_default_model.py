@@ -11,7 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import commands, config, registry  # noqa: E402
+from two_b.ui import commands
+from two_b.storage import config
+from two_b.providers import registry  # noqa: E402
 
 
 class _FakeProvider:

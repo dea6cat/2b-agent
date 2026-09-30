@@ -7,17 +7,17 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator as O  # noqa: E402
+from two_b.core import compaction  # noqa: E402
 
 
 class Hook(unittest.TestCase):
     def test_helper_returns_message_when_block_nonempty(self, ):
-        msg = O._retrieval_message("BLOCK TEXT")
+        msg = compaction._retrieval_message("BLOCK TEXT")
         self.assertIsNotNone(msg)
         self.assertIn("BLOCK TEXT", msg.text)
 
     def test_helper_returns_none_on_empty_block(self):
-        self.assertIsNone(O._retrieval_message(""))
+        self.assertIsNone(compaction._retrieval_message(""))
 
 
 if __name__ == "__main__":

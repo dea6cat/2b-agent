@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from two_b.providers.base import stream_with_retry  # noqa: E402
-from two_b.orchestrator import EventType  # noqa: E402
+from two_b.core.orchestrator import EventType  # noqa: E402
 
 
 class _FakeProvider:
@@ -19,7 +19,7 @@ class _FakeProvider:
         self.seen["on_thinking"] = on_thinking
         if on_thinking:
             on_thinking("reasoning chunk")
-        from two_b.conversation import Message
+        from two_b.core.conversation import Message
         from two_b.providers.base import ProviderResponse
         return ProviderResponse(message=Message.assistant(text="ok"), raw={})
 

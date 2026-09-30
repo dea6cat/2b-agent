@@ -11,7 +11,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import config, discover, setup, testcmd, web  # noqa: E402
+from two_b.storage import config
+from two_b.providers import discover
+from two_b.lifecycle import setup, testcmd
+from two_b.tooling import web  # noqa: E402
 
 
 class Helpers(unittest.TestCase):

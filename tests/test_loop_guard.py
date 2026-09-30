@@ -1,4 +1,4 @@
-"""Tests for the graduated tool-call loop guard (orchestrator._LoopGuard).
+"""Tests for the graduated tool-call loop guard (nudges._LoopGuard).
 
 warn -> veto -> breaker, keyed on the tool result with volatile fields stripped.
 Pure host-side logic — no model needed. Run:
@@ -10,11 +10,12 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator  # noqa: E402
-from two_b.conversation import Message, ToolCall  # noqa: E402
-from two_b.orchestrator import _LoopGuard, _strip_volatile, EventType  # noqa: E402
+from two_b.core import orchestrator  # noqa: E402
+from two_b.core.conversation import Message, ToolCall  # noqa: E402
+from two_b.core.nudges import _LoopGuard, _strip_volatile  # noqa: E402
+from two_b.core.orchestrator import EventType  # noqa: E402
 from two_b.providers.base import ProviderResponse  # noqa: E402
-from two_b.session import Session, Task  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
 
 
 class Ladder(unittest.TestCase):

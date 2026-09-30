@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import diagnostics  # noqa: E402
+from two_b.core import diagnostics  # noqa: E402
 
 
 class Diagnostics(unittest.TestCase):

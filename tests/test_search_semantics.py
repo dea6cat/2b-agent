@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import repomap, symbols, tools  # noqa: E402
+from two_b.tooling import repomap, symbols, tools  # noqa: E402
 
 
 class Project(unittest.TestCase):

@@ -1,7 +1,7 @@
 import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from two_b import conversation as C
-from two_b.conversation import Conversation, Message, ToolResult
+from two_b.core import conversation as C
+from two_b.core.conversation import Conversation, Message, ToolResult
 class Trim(unittest.TestCase):
     def test_old_large_result_elided_recent_kept(self):
         big = "x" * 5000

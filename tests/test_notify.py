@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import notify  # noqa: E402
+from two_b.ui import notify  # noqa: E402
 
 
 class Osc9(unittest.TestCase):

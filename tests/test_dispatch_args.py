@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b.orchestrator import _missing_required  # noqa: E402
+from two_b.core.dispatch import _missing_required  # noqa: E402
 
 
 class MissingRequired(unittest.TestCase):

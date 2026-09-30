@@ -10,14 +10,11 @@ services are added as data in registry.py, not new code.
 """
 import json
 import os
-import time
 from typing import Callable
 
-from ..conversation import Conversation, Message, Role, ToolCall
-from ..toolspec import ToolSpec, to_openai
-from .base import ProviderResponse, get_json, post_json, post_stream
-
-_MODELS_TTL = 60  # seconds to cache a provider's model list
+from ..core.conversation import Conversation, Message, Role, ToolCall
+from ..tooling.toolspec import ToolSpec, to_openai
+from .base import ProviderResponse, cached_model_list, get_json, post_json, post_stream
 
 # Substrings that mark a model as NOT a chat/tool-calling model — filtered out
 # of listings so /models shows usable models, not embedders/audio/OCR/etc.
@@ -44,7 +41,6 @@ class OpenAICompatProvider:
         self._static_models = models or []
         self._dynamic = dynamic_models
         self._extra_headers = extra_headers or {}
-        self._cache: tuple[float, list[str]] | None = None
 
     @property
     def api_key(self) -> str:
@@ -64,19 +60,12 @@ class OpenAICompatProvider:
     def list_models(self) -> list[str]:
         if not self._dynamic:
             return list(self._static_models)
-        if self._cache is not None and (time.monotonic() - self._cache[0]) < _MODELS_TTL:
-            return self._cache[1]
-        try:
-            data = get_json(f"{self.base_url}/models", headers=self._headers(), provider=self.name)
-        except Exception:
-            # Can't reach the provider (down, or blocked, or a bad/absent key). Surface nothing
-            # rather than a stale guess — a fabricated list would hide the real failure. Don't
-            # cache it, so the next call retries once the provider is reachable again.
-            return []
+        return cached_model_list(self, self._fetch_models)
+
+    def _fetch_models(self) -> list[str]:
+        data = get_json(f"{self.base_url}/models", headers=self._headers(), provider=self.name)
         ids = [m.get("id", "") for m in data.get("data", [])]
-        models = sorted(i for i in ids if i and _is_chat_model(i))
-        self._cache = (time.monotonic(), models)
-        return models
+        return sorted(i for i in ids if i and _is_chat_model(i))
 
     def _messages(self, conv: Conversation) -> list[dict]:
         out = [{"role": "system", "content": conv.system_prompt}]

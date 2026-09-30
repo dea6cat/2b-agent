@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import mcp_client, symbols  # noqa: E402
+from two_b.tooling import mcp_client, symbols  # noqa: E402
 
 
 class LocationParser(unittest.TestCase):

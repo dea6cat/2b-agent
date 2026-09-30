@@ -14,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import seatbelt, tools  # noqa: E402
+from two_b.tooling import seatbelt, tools  # noqa: E402
 
 
 class Pure(unittest.TestCase):

@@ -2,7 +2,7 @@ import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from two_b.providers import base
 from two_b.providers.base import ProviderError, ProviderResponse
-from two_b.conversation import Conversation, Message
+from two_b.core.conversation import Conversation, Message
 class Retry(unittest.TestCase):
     def setUp(self):
         self._orig_sleep = base._time.sleep

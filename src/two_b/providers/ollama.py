@@ -11,10 +11,10 @@ import os
 import json as _json
 from typing import Callable
 
-from ..conversation import Conversation, Message, Role, ToolCall
-from ..tools import recover_toolcalls
-from ..toolspec import ToolSpec, to_openai
-from .base import Provider, ProviderResponse, get_json, post_json, post_stream
+from ..core.conversation import Conversation, Message, Role, ToolCall
+from ..tooling.tools import recover_toolcalls
+from ..tooling.toolspec import ToolSpec, to_openai
+from .base import ProviderResponse, get_json, post_json, post_stream
 
 LOCAL_DEFAULT = "http://localhost:11434"
 CLOUD_HOST = "https://ollama.com"
@@ -28,6 +28,11 @@ KEEP_ALIVE = "30m"
 CTX_FALLBACK = 16384     # used when RAM/arch can't be read to size the window
 CLOUD_CTX = 120_000      # cloud runs large windows; don't pin num_ctx there
 CTX_FLOOR = 2048         # never pin below this
+
+
+def _ctx_env_key(model: str) -> str:
+    """Normalize a model name into an env-var-safe key for TWOB_MODEL_CONTEXT_*."""
+    return "".join(c if c.isalnum() else "_" for c in model.upper())
 CTX_ROUND = 1024         # round the computed window down to a clean multiple
 KV_RESERVE_BYTES = 3 * 1024 ** 3   # RAM kept free for OS + app + compute buffers
 KV_USE_FRACTION = 0.75             # of the RAM left after weights+reserve, give this to KV
@@ -88,6 +93,7 @@ class OllamaProvider:
                      or os.environ.get("OLLAMA_HOST") or LOCAL_DEFAULT).rstrip("/")
         self.api_key = api_key
         self._ctx_cache: dict[str, int] = {}   # model -> effective num_ctx
+        self._ctx_override: dict[str, int] = {}  # session-level override (from /ctx)
         self._show_cache: dict[str, dict] = {}  # model -> /api/show payload
 
     def _headers(self) -> dict:
@@ -150,16 +156,32 @@ class OllamaProvider:
 
     def context_window(self, model: str) -> int:
         """The window 2B pins (via num_ctx) and budgets for. TWOB_CONTEXT_TOKENS
-        overrides; cloud isn't pinned; otherwise it's computed per machine+model
-        so we run as large as the box handles comfortably, no more. Cached."""
+        overrides globally; TWOB_MODEL_CONTEXT_<MODEL> overrides per-model; cloud
+        isn't pinned; otherwise it's computed per machine+model so we run as large
+        as the box handles comfortably, no more. Cached."""
         env = os.environ.get("TWOB_CONTEXT_TOKENS")
         if env and env.isdigit():
             return int(env)
+        pm = os.environ.get(f"TWOB_MODEL_CONTEXT_{_ctx_env_key(model)}")
+        if pm and pm.isdigit():
+            self._ctx_cache[model] = int(pm)
+            return self._ctx_cache[model]
+        if override := self._ctx_override.get(model):
+            return override
         if self.api_key is not None:            # cloud
             return CLOUD_CTX
         if model not in self._ctx_cache:
             self._ctx_cache[model] = self._compute_ctx(model)
         return self._ctx_cache[model]
+
+    def set_context_window(self, model: str, tokens: int) -> None:
+        """Override the computed/auto context window for this model for this session.
+        A value of None or 0 clears the override so the next call recomputes.
+        Takes effect immediately for num_ctx pinning and context budget."""
+        if tokens is None or tokens <= 0:
+            self._ctx_override.pop(model, None)
+        else:
+            self._ctx_override[model] = tokens
 
     def _options(self, model: str) -> dict:
         """Runtime options. Conservative sampling (low temperature + a mild

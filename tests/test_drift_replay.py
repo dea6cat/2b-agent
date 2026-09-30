@@ -11,8 +11,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import driftreplay, persist  # noqa: E402
-from two_b.conversation import Conversation, Message  # noqa: E402
+from two_b.storage import driftreplay, persist  # noqa: E402
+from two_b.core.conversation import Conversation, Message  # noqa: E402
 
 
 class Hashing(unittest.TestCase):
@@ -67,26 +67,26 @@ class ReplayRoundTrip(unittest.TestCase):
 
     def test_replay_reports_no_drift_when_prefix_unchanged(self):
         # Stub assemble_system_prompt so replay's "current" prefix matches what was saved.
-        from two_b import orchestrator
+        from two_b.core import prompts
         persist.save("s1", "/proj/a", "t", "m", self._conv("STABLE PREFIX"))
-        orig = orchestrator.assemble_system_prompt
-        orchestrator.assemble_system_prompt = lambda cwd=None: "STABLE PREFIX"
+        orig = prompts.assemble_system_prompt
+        prompts.assemble_system_prompt = lambda cwd=None: "STABLE PREFIX"
         try:
             r = driftreplay.replay("s1", cwd="/proj/a")
         finally:
-            orchestrator.assemble_system_prompt = orig
+            prompts.assemble_system_prompt = orig
         self.assertTrue(r["found"])
         self.assertFalse(r["drift"])
 
     def test_replay_detects_drift_when_prefix_changed(self):
-        from two_b import orchestrator
+        from two_b.core import prompts
         persist.save("s1", "/proj/a", "t", "m", self._conv("OLD PREFIX"))
-        orig = orchestrator.assemble_system_prompt
-        orchestrator.assemble_system_prompt = lambda cwd=None: "NEW PREFIX (code changed)"
+        orig = prompts.assemble_system_prompt
+        prompts.assemble_system_prompt = lambda cwd=None: "NEW PREFIX (code changed)"
         try:
             r = driftreplay.replay("s1", cwd="/proj/a")
         finally:
-            orchestrator.assemble_system_prompt = orig
+            prompts.assemble_system_prompt = orig
         self.assertTrue(r["drift"])
         self.assertIn("changed", r["reason"])
 
@@ -95,16 +95,16 @@ class ReplayRoundTrip(unittest.TestCase):
 
     def test_replay_scoped_to_cwd_avoids_id_collision(self):
         # Same 8-hex id in two projects: replay must resolve within the requested project.
-        from two_b import orchestrator
+        from two_b.core import prompts
         persist.save("dup", "/proj/a", "A", "m", self._conv("PREFIX-A"))
         persist.save("dup", "/proj/b", "B", "m", self._conv("PREFIX-B"))
-        orig = orchestrator.assemble_system_prompt
-        orchestrator.assemble_system_prompt = lambda cwd=None: "PREFIX-A"
+        orig = prompts.assemble_system_prompt
+        prompts.assemble_system_prompt = lambda cwd=None: "PREFIX-A"
         try:
             ra = driftreplay.replay("dup", cwd="/proj/a")
             rb = driftreplay.replay("dup", cwd="/proj/b")
         finally:
-            orchestrator.assemble_system_prompt = orig
+            prompts.assemble_system_prompt = orig
         self.assertFalse(ra["drift"])   # matches project A's recorded prefix
         self.assertTrue(rb["drift"])    # project B recorded a different prefix
 

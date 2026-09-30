@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import evals  # noqa: E402
+from two_b.evals import evals  # noqa: E402
 
 
 class ShapeValidity(unittest.TestCase):
@@ -34,13 +34,6 @@ class ShapeValidity(unittest.TestCase):
 
     def test_none_args_is_invalid_for_tool_needing_args(self):
         self.assertFalse(evals.shape_ok("read_file", None))
-
-    def test_delegate_is_a_known_tool_for_cloud_models(self):
-        # Cloud models get `delegate` on top of the frozen five; a well-formed
-        # delegate call must count as valid, not unknown.
-        from two_b.toolspec import DELEGATE_SPEC
-        args = {p.name: "x" for p in DELEGATE_SPEC.params if p.required}
-        self.assertTrue(evals.shape_ok(DELEGATE_SPEC.name, args))
 
 
 class TraceParsing(unittest.TestCase):
@@ -238,7 +231,7 @@ class TraceTapRoundTrip(unittest.TestCase):
     """The orchestrator's TWOB_TRACE tap must write what read_trace expects."""
 
     def test_tap_output_is_read_back(self):
-        from two_b.orchestrator import AgentEvent, EventType, _traced
+        from two_b.core.orchestrator import AgentEvent, EventType, _traced
         f = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
         f.close()
         self.addCleanup(os.unlink, f.name)

@@ -11,10 +11,11 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import commands, orchestrator  # noqa: E402
-from two_b.conversation import Conversation, Message  # noqa: E402
+from two_b.ui import commands
+from two_b.core import orchestrator  # noqa: E402
+from two_b.core.conversation import Conversation, Message  # noqa: E402
 from two_b.providers.base import ProviderResponse  # noqa: E402
-from two_b.session import Session, Task, TaskState  # noqa: E402
+from two_b.core.session import Session, Task, TaskState  # noqa: E402
 
 
 class _RecordingProvider:

@@ -1,4 +1,4 @@
-"""Tests for P9 eval-rigor primitives: the exact-match scorer, seeded bootstrap CIs, the
+"""Tests for P9 eval-rigor primitives: seeded bootstrap CIs, the
 McNemar paired test, across-seed variance, and the publish guard. All pure/deterministic.
 Run: `python -m unittest tests.test_evalstats`.
 """
@@ -8,38 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import evalstats as es  # noqa: E402
-
-
-class ExactMatch(unittest.TestCase):
-    def test_scalar_punctuation_and_space_insensitive(self):
-        self.assertTrue(es.exact_match("Yes.", "yes"))
-        self.assertTrue(es.exact_match("  Hello World ", "helloworld"))
-        self.assertFalse(es.exact_match("cat", "dog"))
-
-    def test_strips_currency_percent_thousands(self):
-        self.assertTrue(es.exact_match("$1,000", "1000"))
-        self.assertTrue(es.exact_match("42%", "42"))
-
-    def test_listlike_multiset_with_length_check(self):
-        self.assertTrue(es.exact_match("apple, banana", "banana; apple"))   # order-insensitive
-        self.assertFalse(es.exact_match("apple, banana", "apple"))          # length mismatch
-        self.assertFalse(es.exact_match("a, b, c", "a, b, x"))              # element mismatch
-
-    def test_compact_numeric_lists_are_not_collapsed_by_thousands_strip(self):
-        # A grouping comma is exactly 3-wide; a comma with 1-2 trailing digits is a list sep.
-        self.assertFalse(es.exact_match("1,23", "12,3"))     # different 2-item lists
-        self.assertTrue(es.exact_match("1,2,3", "3,2,1"))    # same multiset, any order
-        self.assertFalse(es.exact_match("10,20", "1,020"))   # 2-item list vs one thousands number
-        self.assertTrue(es.exact_match("1,000,2,000", "2000, 1000"))   # list of two grouped numbers
-
-    def test_empty_elements_count_toward_length(self):
-        self.assertFalse(es.exact_match("a,,b", "a,b"))      # 3 slots vs 2 — a real length mismatch
-
-    def test_scalar_vs_list_are_not_conflated(self):
-        # An expected scalar with no separator compares as a scalar.
-        self.assertTrue(es.exact_match("hello world", "Hello, World"))      # got's comma is punctuation here
-        self.assertFalse(es.exact_match("a; b", "ab"))                      # expected is a 2-elem list
+from two_b.evals import evalstats as es  # noqa: E402
 
 
 class Bootstrap(unittest.TestCase):

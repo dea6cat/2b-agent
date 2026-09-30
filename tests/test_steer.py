@@ -13,10 +13,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator  # noqa: E402
-from two_b.conversation import Message, Role, ToolCall  # noqa: E402
+from two_b.core import orchestrator  # noqa: E402
+from two_b.core.conversation import Message, ToolCall  # noqa: E402
 from two_b.providers.base import ProviderResponse  # noqa: E402
-from two_b.session import Session, Task  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
 
 
 class Buffer(unittest.TestCase):

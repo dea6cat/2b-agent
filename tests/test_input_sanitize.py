@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 try:
     from textual import events
-    from two_b.app_tui import TwoBApp, TaskInput, _sanitize_pasted
+    from two_b.ui.app_tui import TwoBApp, TaskInput, _sanitize_pasted
     _HAS_TEXTUAL = True
 except ModuleNotFoundError:
     _HAS_TEXTUAL = False

@@ -8,7 +8,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import config, registry  # noqa: E402
+from two_b.storage import config
+from two_b.providers import registry  # noqa: E402
 
 
 class CerebrasProvider(unittest.TestCase):

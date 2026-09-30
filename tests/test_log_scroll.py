@@ -3,7 +3,6 @@ the mouse wheel in the any-event mode 2B disables to stop the flood, so scrollin
 depend on the wheel. Guarded on textual (runtime-only dep).
 Run: `python -m unittest tests.test_log_scroll`.
 """
-import asyncio
 import os
 import sys
 import unittest
@@ -14,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 try:
     from rich.text import Text
     from textual.containers import VerticalScroll
-    from two_b.app_tui import TwoBApp
+    from two_b.ui.app_tui import TwoBApp
     _HAS_TEXTUAL = True
 except ModuleNotFoundError:
     _HAS_TEXTUAL = False

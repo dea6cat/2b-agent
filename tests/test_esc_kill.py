@@ -13,7 +13,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator, tools  # noqa: E402
+from two_b.core import orchestrator
+from two_b.tooling import tools  # noqa: E402
+from two_b.core import dispatch  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
 
 
 class Cancellable(unittest.TestCase):
@@ -93,9 +96,43 @@ class Cancellable(unittest.TestCase):
         self.assertTrue(out.startswith("stopped:"), out)
 
 
+class CancellableWalks(unittest.TestCase):
+    """search_files / list_files walk the tree in-process, so esc must be checked inside the
+    walk — started in a huge root (e.g. ~), the search otherwise runs on for minutes after esc."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.root, ignore_errors=True))
+        for i in range(3):
+            with open(os.path.join(self.root, f"f{i}.txt"), "w") as f:
+                f.write("needle\n")
+        self.cancel = threading.Event()
+        self.cancel.set()                       # esc already pressed
+
+    def test_search_stops_when_cancelled(self):
+        out = tools.do_search_files("needle", self.root, cancel=self.cancel)
+        self.assertTrue(out.startswith("stopped:"), out)
+
+    def test_list_stops_when_cancelled(self):
+        out = tools.do_list_files(self.root, cancel=self.cancel)
+        self.assertTrue(out.startswith("stopped:"), out)
+
+    def test_uncancelled_walks_are_unchanged(self):
+        self.assertIn("needle", tools.do_search_files("needle", self.root, cancel=threading.Event()))
+        self.assertIn("f0.txt", tools.do_list_files(self.root, cancel=threading.Event()))
+
+    def test_dispatch_passes_the_task_cancel_flag(self):
+        s, t = Session(default_model="m"), Task(description="t")
+        t.cancel_flag.set()
+        for name, args in (("search_files", {"query": "needle", "path": self.root}),
+                           ("list_files", {"path": self.root})):
+            out = dispatch._dispatch_tool(s, t, name, args)
+            self.assertTrue(out.startswith("stopped:"), f"{name}: {out}")
+
+
 class Teardown(unittest.TestCase):
     def test_teardown_helpers_shuts_lsp_and_restarts_mcp(self):
-        from two_b import lsp, mcp_client
+        from two_b.tooling import lsp, mcp_client
         calls = []
         self.addCleanup(setattr, lsp, "shutdown_all", lsp.shutdown_all)
         lsp.shutdown_all = lambda: calls.append("lsp.shutdown_all")
@@ -114,7 +151,7 @@ class Teardown(unittest.TestCase):
         self.assertEqual(calls, ["lsp.shutdown_all", "mcp.shutdown", "mcp.start"])
 
     def test_teardown_helpers_swallows_failures(self):
-        from two_b import lsp, mcp_client
+        from two_b.tooling import lsp, mcp_client
         self.addCleanup(setattr, lsp, "shutdown_all", lsp.shutdown_all)
 
         def boom():

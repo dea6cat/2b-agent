@@ -13,10 +13,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator  # noqa: E402
+from two_b.core import compaction  # noqa: E402
 
 try:
-    from two_b.app_tui import TwoBApp, _provider_display  # noqa: E402
+    from two_b.ui.app_tui import TwoBApp, _provider_display  # noqa: E402
     _HAS_TEXTUAL = True
 except ModuleNotFoundError:
     TwoBApp = None
@@ -53,10 +53,10 @@ class ProviderDisplay(unittest.TestCase):
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed (runtime-only dependency)")
 class HeaderRefresh(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self._orig_budget = orchestrator.context_budget
+        self._orig_budget = compaction.context_budget
 
     def tearDown(self):
-        orchestrator.context_budget = self._orig_budget
+        compaction.context_budget = self._orig_budget
 
     async def _refresh_and_read(self, app, model, provider):
         """Point the session at `model`/`provider` and run the async loader as the app
@@ -77,7 +77,7 @@ class HeaderRefresh(unittest.IsolatedAsyncioTestCase):
         return str(app.query_one("#header", Static).render())
 
     async def test_cloud_switch_updates_header(self):
-        orchestrator.context_budget = lambda p, m: 1_000_000
+        compaction.context_budget = lambda p, m: 1_000_000
         app = TwoBApp(model="fake:m", auto_yes=True, initial_task=None)
         async with app.run_test():
             text = await self._refresh_and_read(
@@ -88,7 +88,7 @@ class HeaderRefresh(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("local  ·  Ollama", text)         # no longer hardcoded
 
     async def test_local_still_shows_window_and_ollama(self):
-        orchestrator.context_budget = lambda p, m: 13000
+        compaction.context_budget = lambda p, m: 13000
         app = TwoBApp(model="fake:m", auto_yes=True, initial_task=None)
         async with app.run_test():
             text = await self._refresh_and_read(

@@ -8,7 +8,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import web  # noqa: E402
+from two_b.tooling import web  # noqa: E402
 
 _PAGE = """
 <html><head><title>T</title><style>.x{color:red}</style>
@@ -179,7 +179,7 @@ class FetchCommand(unittest.TestCase):
 
     def _app(self):
         import types
-        from two_b.session import Task
+        from two_b.core.session import Task
 
         class _UI:
             def __init__(self): self.msgs = []
@@ -190,13 +190,14 @@ class FetchCommand(unittest.TestCase):
         return app, task
 
     def test_registered_but_not_a_model_tool(self):
-        from two_b import commands
+        from two_b.ui import commands
         self.assertIn("fetch", commands.COMMANDS)                 # a slash command
-        from two_b.toolspec import TOOL_SPECS
+        from two_b.tooling.toolspec import TOOL_SPECS
         self.assertNotIn("fetch", {s.name for s in TOOL_SPECS})   # NOT a model tool
 
     def test_injects_readable_content(self):
-        from two_b import commands, web
+        from two_b.ui import commands
+        from two_b.tooling import web
         app, task = self._app()
         page = "<body><nav>nope</nav><main><h1>Hi</h1><p>Body text here</p></main></body>"
         with mock.patch.object(web, "fetch", return_value=page):
@@ -211,7 +212,8 @@ class FetchCommand(unittest.TestCase):
         self.assertIn("from=web:https://example.com/doc", blob)
 
     def test_fetch_failure_is_clean(self):
-        from two_b import commands, web
+        from two_b.ui import commands
+        from two_b.tooling import web
         app, task = self._app()
         with mock.patch.object(web, "fetch", return_value=None):
             commands.COMMANDS["fetch"]("https://bad", app)

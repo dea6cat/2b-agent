@@ -1,5 +1,5 @@
 import unittest
-from two_b.tools import recover_toolcalls, loads_tolerant
+from two_b.tooling.tools import recover_toolcalls, loads_tolerant
 
 KNOWN = ("read_file", "edit_file", "write_file", "search_files", "list_files", "run_git")
 

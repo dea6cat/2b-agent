@@ -12,8 +12,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import cmdguard, orchestrator  # noqa: E402
-from two_b.session import MODE_NORMAL, Session, Task  # noqa: E402
+from two_b.tooling import cmdguard
+from two_b.core import dispatch  # noqa: E402
+from two_b.core.session import MODE_NORMAL, Session, Task  # noqa: E402
 
 
 class EscapesRoot(unittest.TestCase):
@@ -49,13 +50,13 @@ class UnattendedWriteJail(unittest.TestCase):
 
     def test_accept_edits_write_outside_is_refused(self):
         s, t = Session(auto_yes=True, default_model="m"), Task(description="x")   # accept-edits = unattended
-        out = orchestrator.apply_write(s, t, os.path.join(self.outside, "escape.txt"), "x\n")
+        out = dispatch.apply_write(s, t, os.path.join(self.outside, "escape.txt"), "x\n")
         self.assertIn("outside the workspace", out)
         self.assertFalse(os.path.exists(os.path.join(self.outside, "escape.txt")))
 
     def test_accept_edits_write_inside_is_allowed(self):
         s, t = Session(auto_yes=True, default_model="m"), Task(description="x")
-        out = orchestrator.apply_write(s, t, "inside.txt", "x\n")
+        out = dispatch.apply_write(s, t, "inside.txt", "x\n")
         self.assertTrue(out.startswith("wrote"), out)
 
     def test_normal_mode_is_not_jailed(self):
@@ -63,14 +64,14 @@ class UnattendedWriteJail(unittest.TestCase):
         # jail doesn't apply — _jail_blocked returns '' and 2B stays point-anywhere.
         s = Session(default_model="m")            # normal mode, no grant
         self.assertEqual(s.mode, MODE_NORMAL)
-        self.assertEqual(orchestrator._jail_blocked(s, "write_file",
+        self.assertEqual(dispatch._jail_blocked(s, "write_file",
                                                     os.path.join(self.outside, "x.txt")), "")
 
     def test_granted_write_outside_is_refused(self):
         # A per-session "allow write_file" grant also makes the write unattended → jailed.
         s, t = Session(default_model="m"), Task(description="x")
         s.granted.add("write_file")
-        out = orchestrator.apply_write(s, t, os.path.join(self.outside, "escape.txt"), "x\n")
+        out = dispatch.apply_write(s, t, os.path.join(self.outside, "escape.txt"), "x\n")
         self.assertIn("outside the workspace", out)
 
 

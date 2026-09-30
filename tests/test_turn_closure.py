@@ -12,11 +12,12 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator  # noqa: E402
-from two_b.conversation import Message, Role, ToolCall  # noqa: E402
-from two_b.orchestrator import EventType, _classify_exc, _finish_failed  # noqa: E402
+from two_b.core import orchestrator  # noqa: E402
+from two_b.core import dispatch  # noqa: E402
+from two_b.core.conversation import Message, Role, ToolCall  # noqa: E402
+from two_b.core.orchestrator import EventType, _classify_exc, _finish_failed  # noqa: E402
 from two_b.providers.base import ProviderError, ProviderResponse  # noqa: E402
-from two_b.session import Session, Task  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
 
 
 class _FakeProvider:
@@ -99,12 +100,12 @@ class NeverThrows(unittest.TestCase):
         # re-raises and, before this phase, escaped run_task past only `finally`,
         # killing the worker thread with no terminal event (UI hangs). The new outer
         # except must turn it into exactly one clean TASK_ERROR.
-        orig = orchestrator._dispatch_tool
-        orchestrator._dispatch_tool = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("dispatch boom"))
+        orig = dispatch._dispatch_tool
+        dispatch._dispatch_tool = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("dispatch boom"))
         try:
             task, events = _run(_CallsTool())
         finally:
-            orchestrator._dispatch_tool = orig
+            dispatch._dispatch_tool = orig
         types = _types(events)
         self.assertEqual(types.count(EventType.TASK_ERROR), 1)
         self.assertNotIn(EventType.TASK_DONE, types)

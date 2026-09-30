@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b.orchestrator import context_usage  # noqa: E402
+from two_b.core.compaction import context_usage  # noqa: E402
 
 
 class ContextUsage(unittest.TestCase):

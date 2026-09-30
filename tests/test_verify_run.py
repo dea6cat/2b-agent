@@ -8,7 +8,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import seatbelt, tools, verify  # noqa: E402
+from two_b.tooling import seatbelt, tools
+from two_b.core import verify  # noqa: E402
 
 
 class RunChecks(unittest.TestCase):

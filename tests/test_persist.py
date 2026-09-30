@@ -4,14 +4,17 @@ Uses a temp DB via TWOB_HISTORY_DB, so nothing touches the real ~/.config/2b.
 Run: `python -m unittest tests.test_persist` from the repo root.
 """
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import conversation as conv_mod, persist  # noqa: E402
-from two_b.conversation import Conversation, Message, ToolCall, ToolResult, Role  # noqa: E402
+from two_b.core import conversation as conv_mod
+from two_b.storage import persist  # noqa: E402
+from two_b.core.conversation import Conversation, Message, ToolCall, ToolResult, Role  # noqa: E402
 
 
 def _sample_conv():
@@ -71,12 +74,16 @@ class Persistence(unittest.TestCase):
         self.assertEqual([r["id"] for r in persist.list_sessions(cwd="/proj/b")], ["s3"])
 
     def test_save_updates_existing_and_keeps_created_at(self):
+        def created_at():
+            with closing(sqlite3.connect(self.db.name)) as c:
+                return c.execute("SELECT created_at FROM sessions WHERE id='s1'").fetchone()[0]
         persist.save("s1", "/proj/a", "v1", "m", _sample_conv())
-        first = persist.list_sessions(cwd="/proj/a")[0]
+        first = created_at()
         persist.save("s1", "/proj/a", "v2", "m", _sample_conv())
         rows = persist.list_sessions(cwd="/proj/a")
         self.assertEqual(len(rows), 1)                             # updated in place, not duplicated
         self.assertEqual(rows[0]["title"], "v2")
+        self.assertEqual(created_at(), first)                      # the original creation time survives
 
     def test_trivial_conversation_is_not_saved(self):
         c = Conversation(system_prompt="SYS")

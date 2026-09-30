@@ -10,25 +10,26 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator, persist  # noqa: E402
-from two_b.conversation import Conversation, Message, ToolCall, ToolResult, Role  # noqa: E402
+from two_b.core import compaction
+from two_b.storage import persist  # noqa: E402
+from two_b.core.conversation import Conversation, Message, ToolCall, ToolResult, Role  # noqa: E402
 
 
 class DanglingDetection(unittest.TestCase):
     def test_backward_references_match(self):
         for s in ["fix that file you edited", "the error from before", "go back to the parser",
                   "as I mentioned earlier", "remember the Lexer class", "same as before"]:
-            self.assertTrue(orchestrator._DANGLING_RE.search(s), s)
+            self.assertTrue(compaction._DANGLING_RE.search(s), s)
 
     def test_forward_requests_do_not_match(self):
         for s in ["add a new getter to Account", "write a test for the sum function",
                   "create a config file"]:
-            self.assertFalse(orchestrator._DANGLING_RE.search(s), s)
+            self.assertFalse(compaction._DANGLING_RE.search(s), s)
 
 
 class RecallTerms(unittest.TestCase):
     def test_extracts_identifiers_and_paths_drops_generic(self):
-        terms = orchestrator._recall_terms("fix that error in parser.dart around parseExpr again")
+        terms = compaction._recall_terms("fix that error in parser.dart around parseExpr again")
         self.assertIn("parser.dart", terms)
         self.assertIn("parseExpr", terms)
         self.assertNotIn("that", terms)      # stopword
@@ -36,7 +37,7 @@ class RecallTerms(unittest.TestCase):
         self.assertNotIn("again", terms)     # reference vocabulary
 
     def test_dedup_and_cap(self):
-        terms = orchestrator._recall_terms(" ".join(f"symbolNumber{i}" for i in range(20)) + " symbolNumber0")
+        terms = compaction._recall_terms(" ".join(f"symbolNumber{i}" for i in range(20)) + " symbolNumber0")
         self.assertLessEqual(len(terms), 8)
         self.assertEqual(len(terms), len(set(t.lower() for t in terms)))
 
@@ -59,12 +60,12 @@ class Injection(unittest.TestCase):
     def test_dangling_reference_merges_recall_into_latest_turn(self):
         conv = Conversation(system_prompt="sys")
         conv.append(Message.user("now revert that parseExpr rename you did earlier"))
-        injected = orchestrator._maybe_inject_recall(conv, "t1", "/proj/a")
+        injected = compaction._maybe_inject_recall(conv, "t1", "/proj/a")
         self.assertTrue(injected)
         # Merged INTO the last turn (no new message) so no consecutive same-role turns arise.
         self.assertEqual(len(conv.messages), 1)
         text = conv.messages[-1].text
-        self.assertTrue(text.startswith(orchestrator._RECALL_PREFIX))
+        self.assertTrue(text.startswith(compaction._RECALL_PREFIX))
         self.assertIn("parseExpression", text)      # the archived detail is back
         self.assertIn("revert", text)               # user's request preserved, after the recall
 
@@ -83,20 +84,20 @@ class Injection(unittest.TestCase):
         conv.append(Message.user("revert the parseExpr rename from earlier"))
         before_len = len(conv.messages)
         before_pairs = self._consecutive_user_pairs(conv)
-        orchestrator._maybe_inject_recall(conv, "t1", "/proj/a")
+        compaction._maybe_inject_recall(conv, "t1", "/proj/a")
         self.assertEqual(len(conv.messages), before_len)            # merged, not inserted
         self.assertEqual(self._consecutive_user_pairs(conv), before_pairs)   # no NEW adjacency
 
     def test_forward_request_does_not_inject(self):
         conv = Conversation(system_prompt="sys")
         conv.append(Message.user("add a brand new helper to parser.dart"))
-        self.assertFalse(orchestrator._maybe_inject_recall(conv, "t1", "/proj/a"))
+        self.assertFalse(compaction._maybe_inject_recall(conv, "t1", "/proj/a"))
         self.assertEqual(len(conv.messages), 1)
 
     def test_dangling_but_no_archive_match_does_not_inject(self):
         conv = Conversation(system_prompt="sys")
         conv.append(Message.user("fix that thing you did earlier"))   # dangling, but no salient term hits
-        self.assertFalse(orchestrator._maybe_inject_recall(conv, "t1", "/proj/a"))
+        self.assertFalse(compaction._maybe_inject_recall(conv, "t1", "/proj/a"))
         self.assertEqual(len(conv.messages), 1)
 
     def test_disabled_history_skips_injection(self):
@@ -104,7 +105,7 @@ class Injection(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("TWOB_NO_HISTORY", None))
         conv = Conversation(system_prompt="sys")
         conv.append(Message.user("revert the parseExpr rename from earlier"))
-        self.assertFalse(orchestrator._maybe_inject_recall(conv, "t1", "/proj/a"))
+        self.assertFalse(compaction._maybe_inject_recall(conv, "t1", "/proj/a"))
 
 
 class TailIntegrity(unittest.TestCase):
@@ -112,18 +113,18 @@ class TailIntegrity(unittest.TestCase):
         # A result turn whose call was folded into the head must not lead the kept tail.
         orphan = Message.results([ToolResult(tool_call_id="gone", content="x")])
         good = Message.assistant(text="hi")
-        out = orchestrator._strip_leading_orphan_results([orphan, good])
+        out = compaction._strip_leading_orphan_results([orphan, good])
         self.assertEqual(out, [good])
 
     def test_keeps_intact_tail_untouched(self):
         a = Message.assistant(tool_calls=[ToolCall.new("read_file", {"path": "p"}, id="c1")])
         r = Message.results([ToolResult(tool_call_id="c1", content="body")])
-        out = orchestrator._strip_leading_orphan_results([a, r])
+        out = compaction._strip_leading_orphan_results([a, r])
         self.assertEqual(out, [a, r])
 
     def test_plain_user_turn_is_not_treated_as_orphan(self):
         u = Message.user("a real question")
-        out = orchestrator._strip_leading_orphan_results([u])
+        out = compaction._strip_leading_orphan_results([u])
         self.assertEqual(out, [u])
 
 
@@ -140,8 +141,8 @@ class CompactArchivesAndBreadcrumbs(unittest.TestCase):
         for i in range(12):
             conv.append(Message.assistant(tool_calls=[ToolCall.new("read_file", {"path": f"f{i}"}, id=f"c{i}")]))
             conv.append(Message.results([ToolResult(tool_call_id=f"c{i}", content=f"body {i}")]))
-        dropped = orchestrator.compact_conversation(conv, _FakeSummarizer(), "m",
-                                                    breadcrumb=orchestrator._ARCHIVE_BREADCRUMB)
+        dropped = compaction.compact_conversation(conv, _FakeSummarizer(), "m",
+                                                    breadcrumb=compaction._ARCHIVE_BREADCRUMB)
         self.assertTrue(dropped)                                # returns the folded-away turns
         self.assertIn("archived", conv.messages[0].text)        # breadcrumb present in the recap
         # The recap replaced the head; the tail is intact call/result pairs.

@@ -11,9 +11,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator, tools  # noqa: E402
+from two_b.core import dispatch, prompts
+from two_b.tooling import tools  # noqa: E402
 from two_b.providers import ollama  # noqa: E402
-from two_b.session import Session, Task  # noqa: E402
+from two_b.core.session import Session, Task  # noqa: E402
 
 KNOWN = ("read_file", "edit_file", "write_file", "search_files", "list_files", "run_git")
 
@@ -110,13 +111,13 @@ class EmptyNameGuard(unittest.TestCase):
         self.task = Task(description="t")
 
     def test_empty_name_returns_recoverable_error_not_crash(self):
-        out = orchestrator._dispatch_tool(self.session, self.task, "", {})
+        out = dispatch._dispatch_tool(self.session, self.task, "", {})
         self.assertTrue(out.startswith("error: that tool call had no tool name"))
         self.assertIn("data, not a tool", out)
 
     def test_named_but_unknown_tool_still_reaches_unknown_branch(self):
         # A non-empty name is not caught by the empty-name guard.
-        out = orchestrator._dispatch_tool(self.session, self.task, "frobnicate", {})
+        out = dispatch._dispatch_tool(self.session, self.task, "frobnicate", {})
         self.assertEqual(out, "error: unknown tool frobnicate")
 
 
@@ -139,8 +140,8 @@ class SamplingAndPrompt(unittest.TestCase):
         self.assertNotIn("num_ctx", opts)
 
     def test_system_prompt_states_flat_arg_shapes(self):
-        self.assertIn("do not nest them under an", orchestrator.SYSTEM_PROMPT)
-        self.assertIn("edit_file{path, old_text, new_text}", orchestrator.SYSTEM_PROMPT)
+        self.assertIn("do not nest them under an", prompts.SYSTEM_PROMPT)
+        self.assertIn("edit_file{path, old_text, new_text}", prompts.SYSTEM_PROMPT)
 
 
 class ParseArgsGuard(unittest.TestCase):
@@ -160,6 +161,100 @@ class ParseArgsGuard(unittest.TestCase):
 
     def test_dict_passes_through(self):
         self.assertEqual(ollama._parse_args({"path": "a"}), {"path": "a"})
+
+
+class MissingPathRecovery(unittest.TestCase):
+    """When the model omits `path` on write_file/edit_file, the dispatcher
+    infers one from context (title, last-read file, description, default)
+    instead of dead-ending in a retry loop."""
+
+    def setUp(self):
+        self.session = Session(default_model="x", cwd="/tmp")
+        self.task = Task(description="create a manual")
+
+    def test_infers_from_content_title(self):
+        content = "# My Flutter Guide\n\nSome content"
+        path = dispatch._infer_write_path(self.task, self.session, {"content": content})
+        self.assertEqual(path, "my-flutter-guide.md")
+
+    def test_infers_from_last_read(self):
+        self.task.last_read_arg = "src/lib/main.dart"
+        path = dispatch._infer_write_path(self.task, self.session, {"content": ""})
+        self.assertEqual(path, "src/lib/main.dart")
+
+    def test_infers_from_description(self):
+        path = dispatch._infer_write_path(self.task, self.session, {"content": ""})
+        self.assertEqual(path, "create-a-manual.md")
+
+    def test_falls_back_to_timestamp_default(self):
+        empty_task = Task(description="")
+        path = dispatch._infer_write_path(empty_task, self.session, {"content": ""})
+        self.assertTrue(path.startswith("2b-output-"))
+        self.assertTrue(path.endswith(".md"))
+
+    def test_missing_path_is_inferred_not_errored(self):
+        # The missing-path recovery kicks in for write_file, so the dispatch
+        # should NOT return the old "missing required argument" error.
+        # Use accept-edits mode so apply_write doesn't prompt.
+        session = Session(default_model="x", cwd="/tmp", auto_yes=True)
+        content = "# Test File\n\nHello"
+        result = dispatch._dispatch_tool(session, self.task, "write_file",
+                                             {"content": content})
+        self.assertNotIn("missing required argument", result)
+        # The inferred path should be based on the title
+        self.assertIn("test-file.md", result.lower() + result)
+
+
+class CtxEnvKey(unittest.TestCase):
+    """_ctx_env_key normalizes model names for TWOB_MODEL_CONTEXT_* env lookup."""
+
+    def test_alphanumeric_preserved(self):
+        self.assertEqual(ollama._ctx_env_key("gemma3"), "GEMMA3")
+
+    def test_colons_and_dashes_become_underscores(self):
+        self.assertEqual(
+            ollama._ctx_env_key("gemma4:12b-mlx-16k"),
+            "GEMMA4_12B_MLX_16K",
+        )
+
+
+class PerModelContextOverride(unittest.TestCase):
+    """TWOB_MODEL_CONTEXT_<normalized_model_name> overrides _compute_ctx without
+    a network call or RAM probe — lets the user pin e.g. 64k for gemma4:12b-mlx-16k
+    when VS Code/Ollama recommends more than the model's reported context_length."""
+
+    def setUp(self):
+        self._saved = {}
+        for var in list(os.environ):
+            if var.startswith("TWOB_MODEL_CONTEXT_") or var == "TWOB_CONTEXT_TOKENS":
+                self._saved[var] = os.environ.pop(var)
+
+    def tearDown(self):
+        os.environ.update(self._saved)
+        for var in list(os.environ):
+            if var.startswith("TWOB_MODEL_CONTEXT_") and var not in self._saved:
+                del os.environ[var]
+
+    def test_per_model_env_var_overrides_compute(self):
+        os.environ["TWOB_MODEL_CONTEXT_GEMMA4_12B_MLX_16K"] = "65536"
+        p = ollama.OllamaProvider(name="ollama")
+        # _compute_ctx would hit the network; never called because env wins.
+        self.assertEqual(p.context_window("gemma4:12b-mlx-16k"), 65536)
+        # Cached — _compute_ctx is never invoked.
+        self.assertEqual(p._ctx_cache["gemma4:12b-mlx-16k"], 65536)
+
+    def test_global_env_var_still_wins_over_per_model(self):
+        os.environ["TWOB_CONTEXT_TOKENS"] = "32768"
+        os.environ["TWOB_MODEL_CONTEXT_GEMMA4_12B_MLX_16K"] = "65536"
+        p = ollama.OllamaProvider(name="ollama")
+        # Global override takes precedence.
+        self.assertEqual(p.context_window("gemma4:12b-mlx-16k"), 32768)
+
+    def test_no_env_falls_through_to_compute(self):
+        p = ollama.OllamaProvider(name="ollama")
+        # Stub _compute_ctx to avoid network; should be called when no env var set.
+        p._compute_ctx = lambda model: 8192
+        self.assertEqual(p.context_window("gemma4:12b-mlx-16k"), 8192)
 
 
 if __name__ == "__main__":

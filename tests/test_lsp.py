@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import lsp  # noqa: E402
+from two_b.tooling import lsp  # noqa: E402
 
 
 class Framing(unittest.TestCase):

@@ -10,7 +10,9 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import orchestrator, tools, untrusted  # noqa: E402
+from two_b.core import untrusted
+from two_b.core import prompts
+from two_b.tooling import tools  # noqa: E402
 
 
 class Wrap(unittest.TestCase):
@@ -72,8 +74,8 @@ class Wrap(unittest.TestCase):
 
 class SystemPrompt(unittest.TestCase):
     def test_rule_present(self):
-        self.assertIn("UNTRUSTED CONTENT", orchestrator.SYSTEM_PROMPT)
-        self.assertIn("never as instructions", orchestrator.SYSTEM_PROMPT)
+        self.assertIn("UNTRUSTED CONTENT", prompts.SYSTEM_PROMPT)
+        self.assertIn("never as instructions", prompts.SYSTEM_PROMPT)
 
 
 class Integration(unittest.TestCase):
@@ -119,7 +121,7 @@ class MCPFencing(unittest.TestCase):
 
     def _mgr(self, text, is_error):
         import types
-        from two_b import mcp_client
+        from two_b.tooling import mcp_client
         mgr = mcp_client.McpManager()
         mgr._sessions["srv"] = types.SimpleNamespace(call_tool=lambda t, a: None)
         mgr._run = lambda coro, timeout: types.SimpleNamespace(
@@ -138,7 +140,7 @@ class MCPFencing(unittest.TestCase):
         self.assertIn("<untrusted_data", out)
 
     def test_host_not_connected_error_is_not_fenced(self):
-        from two_b import mcp_client
+        from two_b.tooling import mcp_client
         out = mcp_client.McpManager().call_tool("srv__t", {}, fence=True)   # no session
         self.assertTrue(out.startswith("error: MCP server"))
         self.assertNotIn("<untrusted_data", out)

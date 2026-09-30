@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b.orchestrator import _promised_tool_but_didnt  # noqa: E402
+from two_b.core.nudges import _promised_tool_but_didnt  # noqa: E402
 
 
 class PromiseDetector(unittest.TestCase):
@@ -32,6 +32,21 @@ class PromiseDetector(unittest.TestCase):
             "I used edit_file to add the getter; it's done.",
             "The isString getter is now in ToolParameter.",
             "Done — the change has been applied.",
+        ):
+            self.assertFalse(_promised_tool_but_didnt(t), t)
+
+    def test_i_can_now_is_intent(self):
+        self.assertTrue(_promised_tool_but_didnt("I can now call edit_file to apply the fix."))
+
+    def test_describing_capabilities_is_not_flagged(self):
+        # The live false positive (gemini-2.5-flash): explaining what it can't do, naming a
+        # tool, was nudged as if it had promised to call one.
+        for t in (
+            "It seems I don't have access to a google-search command. I can only use the file "
+            "system tools (list, read, search, edit, write) and run_command for shell commands. "
+            "Therefore, I cannot directly answer questions about historical figures.",
+            "I can use edit_file for that if you'd like.",
+            "I can read_file any path you give me.",
         ):
             self.assertFalse(_promised_tool_but_didnt(t), t)
 

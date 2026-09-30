@@ -8,7 +8,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import discover  # noqa: E402
+from two_b.providers import discover  # noqa: E402
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "ollama_search_tools.html")
 

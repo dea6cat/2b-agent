@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from two_b import toolline  # noqa: E402
+from two_b.tooling import toolline  # noqa: E402
 
 
 class ResultSummary(unittest.TestCase):

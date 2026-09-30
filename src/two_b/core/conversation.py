@@ -29,10 +29,15 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    # Opaque token the producing provider requires echoed back with this call (Gemini 3's
+    # thoughtSignature). Other providers ignore it.
+    signature: str | None = None
 
     @staticmethod
-    def new(name: str, arguments: dict[str, Any], id: str | None = None) -> "ToolCall":
-        return ToolCall(id=id or f"call_{uuid.uuid4().hex[:12]}", name=name, arguments=dict(arguments or {}))
+    def new(name: str, arguments: dict[str, Any], id: str | None = None,
+            signature: str | None = None) -> "ToolCall":
+        return ToolCall(id=id or f"call_{uuid.uuid4().hex[:12]}", name=name,
+                        arguments=dict(arguments or {}), signature=signature)
 
 
 @dataclass(slots=True)
@@ -88,7 +93,8 @@ def message_to_dict(m: Message) -> dict:
         "role": m.role.value,
         "text": m.text,
         "thinking": m.thinking,
-        "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in m.tool_calls],
+        "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments, "signature": c.signature}
+                       for c in m.tool_calls],
         "tool_results": [{"tool_call_id": r.tool_call_id, "content": r.content, "is_error": r.is_error}
                          for r in m.tool_results],
     }
@@ -100,7 +106,8 @@ def message_from_dict(x: dict) -> Message:
         role=Role(x.get("role", "user")),
         text=x.get("text"),
         thinking=x.get("thinking"),
-        tool_calls=[ToolCall(id=c["id"], name=c["name"], arguments=c.get("arguments") or {})
+        tool_calls=[ToolCall(id=c["id"], name=c["name"], arguments=c.get("arguments") or {},
+                             signature=c.get("signature"))
                     for c in (x.get("tool_calls") or [])],
         tool_results=[ToolResult(tool_call_id=r["tool_call_id"], content=r["content"],
                                  is_error=r.get("is_error", False))

@@ -16,6 +16,17 @@ from ..tooling.toolspec import ToolSpec, to_anthropic
 from .base import ProviderResponse, cached_model_list, get_json, post_json, post_stream
 
 API_URL = "https://api.anthropic.com/v1/messages"
+_DEFAULT_MAX_TOKENS = 64000   # streaming output cap when the catalog doesn't know the model
+
+# Thinking controls differ by family (prefix-matched; always-on is checked first because
+# "claude-opus-5" is also a prefix of "claude-opus-5-5"). Always-on models reject a disabled
+# thinking config or a budget — effort is their only dial. Adaptive models take adaptive or
+# disabled. Older models use a fixed thinking budget; 2B doesn't enable that path.
+_ALWAYS_ON = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5", "claude-mythos-5")
+_ADAPTIVE = ("claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+             "claude-sonnet-5", "claude-sonnet-4-6")
+_SUMMARIZED_BY_DEFAULT = ("claude-opus-4-6", "claude-sonnet-4-6")   # newer ones default to "omitted"
+_EFFORTS = ("low", "medium", "high")
 
 
 class AnthropicProvider:
@@ -36,12 +47,55 @@ class AnthropicProvider:
         return sorted(m["id"] for m in data.get("data", []) if m.get("id"))
 
     def supports_reasoning(self, model: str) -> bool:
-        return False   # reasoning deferred (see design §7)
+        return model.lower().startswith(_ALWAYS_ON + _ADAPTIVE)
+
+    def _thinking_fields(self, model: str, reasoning) -> dict:
+        """Request fields for a /think level: `thinking` and/or `output_config.effort`, per the
+        model family. {} leaves the model's own default. Summarized thinking is requested so it
+        can stream to the thinking channel; "off" (also used by compaction) never shows it."""
+        m = model.lower()
+        effort = {"output_config": {"effort": reasoning}} if reasoning in _EFFORTS else {}
+        if m.startswith(_ALWAYS_ON):
+            if reasoning == "off":            # can't disable: lowest effort, reasoning not shown
+                return {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}
+            return {"thinking": {"type": "adaptive", "display": "summarized"}, **effort}
+        if m.startswith(_ADAPTIVE):
+            if reasoning is None:
+                return {}
+            if reasoning == "off":
+                return {"thinking": {"type": "disabled"}}
+            thinking = {"type": "adaptive"} if m.startswith(_SUMMARIZED_BY_DEFAULT) \
+                else {"type": "adaptive", "display": "summarized"}
+            return {"thinking": thinking, **effort}
+        return {}
+
+    def _payload(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...], reasoning=None) -> dict:
+        # Prompt caching (GA — no beta header needed): mark the stable prefix
+        # (system prompt, last tool definition) with cache_control so repeated
+        # requests reuse Anthropic's cache instead of paying full price every
+        # turn. OpenAI-compatible providers cache automatically server-side —
+        # no payload change needed there.
+        tools_json = to_anthropic(tools)
+        if tools_json:
+            tools_json[-1] = {**tools_json[-1], "cache_control": {"type": "ephemeral"}}
+        return {
+            "model": model,
+            "max_tokens": catalog.max_tokens(model, _DEFAULT_MAX_TOKENS),
+            "system": [{"type": "text", "text": conversation.system_prompt,
+                        "cache_control": {"type": "ephemeral"}}],
+            "tools": tools_json,
+            "messages": self._messages(conversation),
+            **self._thinking_fields(model, reasoning),
+        }
 
     def _headers(self) -> dict:
         return {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
 
     def _messages(self, conv: Conversation) -> list[dict]:
+        # Thinking is never replayed: a replayed block is only valid while every earlier turn is
+        # byte-identical, and 2B trims old tool results each request (conversation.trimmed),
+        # which Anthropic counts as a history edit. A request with no replayed blocks is always
+        # valid; the model just starts each turn without its earlier reasoning.
         out = []
         for m in conv.messages:
             if m.tool_results:
@@ -63,22 +117,8 @@ class AnthropicProvider:
         return out
 
     def send(self, conversation: Conversation, model: str, tools: tuple[ToolSpec, ...]) -> ProviderResponse:
-        # Prompt caching (GA — no beta header needed): mark the stable prefix
-        # (system prompt, last tool definition) with cache_control so repeated
-        # requests reuse Anthropic's cache instead of paying full price every
-        # turn. OpenAI-compatible providers cache automatically server-side —
-        # no payload change needed there.
-        tools_json = to_anthropic(tools)
-        if tools_json:
-            tools_json[-1] = {**tools_json[-1], "cache_control": {"type": "ephemeral"}}
-        payload = {
-            "model": model,
-            "max_tokens": catalog.max_tokens(model, 4096),
-            "system": [{"type": "text", "text": conversation.system_prompt,
-                        "cache_control": {"type": "ephemeral"}}],
-            "tools": tools_json,
-            "messages": self._messages(conversation),
-        }
+        payload = self._payload(conversation, model, tools)
+        payload["max_tokens"] = min(payload["max_tokens"], 16000)   # non-streaming: stay under HTTP timeouts
         raw = post_json(API_URL, payload, headers=self._headers(), provider=self.name)
         text_parts, calls = [], []
         for block in raw.get("content", []):
@@ -98,19 +138,9 @@ class AnthropicProvider:
         # Real SSE: emit text deltas as they arrive and assemble tool_use blocks
         # from input_json_delta fragments. Sharing post_stream means esc closes the
         # socket and aborts immediately, same as every other provider.
-        tools_json = to_anthropic(tools)
-        if tools_json:
-            tools_json[-1] = {**tools_json[-1], "cache_control": {"type": "ephemeral"}}
-        payload = {
-            "model": model,
-            "max_tokens": catalog.max_tokens(model, 4096),
-            "system": [{"type": "text", "text": conversation.system_prompt,
-                        "cache_control": {"type": "ephemeral"}}],
-            "tools": tools_json,
-            "messages": self._messages(conversation),
-            "stream": True,
-        }
+        payload = {**self._payload(conversation, model, tools, reasoning), "stream": True}
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         blocks: dict[int, dict] = {}   # index -> {"type", "name", "id", "json"}
         stop_reason = None
         prompt_tokens = None
@@ -144,6 +174,12 @@ class AnthropicProvider:
                     if chunk:
                         text_parts.append(chunk)
                         on_text(chunk)
+                elif dtype == "thinking_delta":
+                    chunk = delta.get("thinking", "")
+                    if chunk:
+                        thinking_parts.append(chunk)
+                        if on_thinking:
+                            on_thinking(chunk)
                 elif dtype == "input_json_delta":
                     slot = blocks.setdefault(idx, {"type": "tool_use", "name": "", "id": None, "json": ""})
                     slot["json"] += delta.get("partial_json", "")
@@ -162,8 +198,9 @@ class AnthropicProvider:
                 args = {}
             calls.append(ToolCall.new(name=b["name"], arguments=args, id=b["id"]))
         text = "".join(text_parts).strip()
+        thinking = "".join(thinking_parts).strip()
         return ProviderResponse(
-            message=Message.assistant(text=text or None, tool_calls=calls),
+            message=Message.assistant(text=text or None, thinking=thinking or None, tool_calls=calls),
             raw={},
             done_reason=stop_reason,
             prompt_tokens=prompt_tokens,

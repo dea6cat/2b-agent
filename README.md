@@ -274,6 +274,7 @@ Switch models anytime with `/model <name>`. A bare name works when it's unambigu
 | `/diff` | Re-show the last diff |
 | `/add <file>` | Pre-load a file into the current task's context |
 | `/fetch <url>` | Fetch a web page and pre-load its readable content into the current task's context |
+| `/search <topic>` | Look up a topic (DuckDuckGo instant answer: summary + related links) and pre-load it into the current task's context — topics like `eliza chatbot`, not full web search. Follow up with `/fetch <url>`. |
 | `/clear` | Reset the current task's history |
 | `/quit` | Exit |
 

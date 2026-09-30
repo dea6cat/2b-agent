@@ -791,6 +791,37 @@ def _fetch(rest, app):
     app.ui.print(f"Loaded {url} into task context ({len(content)} chars, {content.count(chr(10)) + 1} lines).")
 
 
+@command("search")
+def _search(rest, app):
+    """Look up a topic and pre-load DuckDuckGo's instant answer (summary + related topics)
+    into the current task's context: /search <topic>. Host-side like /fetch — the model gains
+    no new tool. Follow up with /fetch <url> to load a whole page."""
+    query = rest.strip()
+    if not query:
+        app.ui.print("Usage: /search <topic>")
+        return
+    task = _target_task(app)
+    if task is None:
+        app.ui.print("No task to add context to — start a task first.")
+        return
+    hits = web.search(query)
+    if hits is None:
+        app.ui.print("[red]Could not search the web (offline or blocked).[/red]")
+        return
+    if not hits:
+        app.ui.print(f"[red]No instant answer for {query!r} — this looks up topics, not full web search; "
+                     "try a short topic like 'eliza chatbot'.[/red]")
+        return
+    if task.conversation is None:
+        task.conversation = Conversation(system_prompt=prompts.SYSTEM_PROMPT)
+    listing = "\n".join(f"{i}. {h['title']}\n   {h['url']}" + (f"\n   {h['snippet']}" if h["snippet"] else "")
+                        for i, h in enumerate(hits, 1))
+    # Fenced like /fetch: search results are external content that may carry injected text.
+    fenced = untrusted.wrap(listing, f"web-search:{query}")
+    task.conversation.append(Message.user(f"[pre-loaded web search: {query}]\n{fenced}"))
+    app.ui.print(f"Loaded {len(hits)} result(s) for {query!r} into task context — /fetch <url> to read one.")
+
+
 @command("theme")
 def _theme(rest, app):
     """Switch color theme: /theme [system|light|dark] (system = terminal background)."""

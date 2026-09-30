@@ -42,6 +42,17 @@ class Serialization(unittest.TestCase):
         self.assertEqual((tr.tool_call_id, tr.content), ("call_1", "edited a.dart"))
         self.assertEqual(back.messages[1].role, Role.ASSISTANT)
 
+    def test_tool_call_signature_round_trips(self):
+        # Gemini 3 rejects a replayed function call without its thought signature, so a
+        # resumed session must keep it.
+        c = conv_mod.Conversation(system_prompt="S")
+        c.append(Message.assistant(tool_calls=[ToolCall(id="c1", name="list_files", arguments={}, signature="sig==")]))
+        back = conv_mod.from_jsonable(conv_mod.to_jsonable(c))
+        self.assertEqual(back.messages[0].tool_calls[0].signature, "sig==")
+        old = conv_mod.from_jsonable({"messages": [{"role": "assistant",
+                                                    "tool_calls": [{"id": "c1", "name": "x", "arguments": {}}]}]})
+        self.assertIsNone(old.messages[0].tool_calls[0].signature)   # sessions saved before the field
+
     def test_from_jsonable_tolerates_missing_keys(self):
         c = conv_mod.from_jsonable({"messages": [{"role": "user", "text": "hi"}]})
         self.assertEqual(c.system_prompt, "")

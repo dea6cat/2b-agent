@@ -1,5 +1,5 @@
-"""stream_with_retry forwards `reasoning` to provider.stream; deferred providers report
-supports_reasoning() False. Run: `python -m unittest tests.test_reasoning_plumbing`.
+"""stream_with_retry forwards `reasoning` to provider.stream; models/services without a
+reasoning control report supports_reasoning() False. Run: `python -m unittest tests.test_reasoning_plumbing`.
 """
 import os
 import sys
@@ -34,9 +34,9 @@ class Plumbing(unittest.TestCase):
         stream_with_retry(p, None, "m", (), lambda _c: None, reasoning="off")
         self.assertEqual(p.seen["reasoning"], "off")
 
-    def test_deferred_providers_report_unsupported(self):
-        self.assertFalse(AnthropicProvider().supports_reasoning("claude-opus-4-8"))
-        self.assertFalse(OpenAICompatProvider("x", "http://x", "K").supports_reasoning("m"))
+    def test_uncontrolled_models_report_unsupported(self):
+        self.assertFalse(AnthropicProvider().supports_reasoning("claude-3-5-haiku"))       # budget-era model
+        self.assertFalse(OpenAICompatProvider("x", "http://x", "K").supports_reasoning("m"))  # no style set
 
 
 if __name__ == "__main__":

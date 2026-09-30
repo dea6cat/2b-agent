@@ -16,7 +16,22 @@ class Budget(unittest.TestCase):
 
     def test_capability_by_model(self):
         self.assertTrue(self.p.supports_reasoning("gemini-2.5-flash"))
+        self.assertTrue(self.p.supports_reasoning("gemini-3.8-flash"))
         self.assertFalse(self.p.supports_reasoning("gemini-2.0-flash"))
+
+    def test_gemini_3_uses_thinking_level_not_budget(self):
+        # Gemini 3 can't turn thinking off; "minimal" isn't accepted by every 3.x model
+        # (3.8-flash 400s on it), so "off" maps to the lowest level all of them take.
+        self.assertIsNone(self.p._thinking_budget("gemini-3.8-flash", "high"))
+        levels = {r: self.p._thinking_level("gemini-3.8-flash", r) for r in (None, "off", "low", "on", "medium", "high")}
+        self.assertEqual(levels, {None: "medium", "off": "low", "low": "low", "on": "medium",
+                                  "medium": "medium", "high": "high"})
+        self.assertIsNone(self.p._thinking_level("gemini-2.5-flash", "high"))
+
+    def test_gemini_3_payload(self):
+        conv = type("C", (), {"system_prompt": "s", "messages": []})()
+        tc = self.p._payload(conv, (), thinking_level="low", include_thoughts=True)["generationConfig"]["thinkingConfig"]
+        self.assertEqual(tc, {"thinkingLevel": "low", "includeThoughts": True})
 
     def test_none_is_capped_medium(self):
         self.assertEqual(self.p._thinking_budget("gemini-2.5-flash", None), _G_MED)

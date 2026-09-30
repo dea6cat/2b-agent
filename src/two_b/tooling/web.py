@@ -10,6 +10,7 @@ hidden / aria-hidden subtrees, strip HTML comments and zero-width characters, pr
 light markdown — are adapted from Scrapling's Convertor (scrapling/core/shell.py,
 BSD-3-Clause) and reimplemented over the stdlib html.parser.
 """
+import json
 import ipaddress
 import re
 import socket
@@ -240,3 +241,44 @@ def extract_readable(html: str, *, as_markdown: bool = False, max_chars: int | N
         p._emit("".join(p._a_buf))
     chosen = "".join(p.main) if any(s.strip() for s in p.main) else "".join(p.out)
     return _collapse(chosen, max_chars)
+
+
+# --- web search (host-side, for /search) -------------------------------------
+# DuckDuckGo's official Instant Answer API: keyless and stdlib-only, but it answers TOPICS
+# (Wikipedia-style abstracts, definitions, related topics), not arbitrary web queries — a
+# natural-language question often has no instant answer. (Its HTML results page is off
+# limits: DuckDuckGo serves scripted requests a bot challenge there.)
+_SEARCH_URL = "https://api.duckduckgo.com/?"
+
+
+def _topics(items):
+    """RelatedTopics entries, flattening named groups ({Name, Topics: [...]})."""
+    for t in items or ():
+        if "Topics" in t:
+            yield from _topics(t["Topics"])
+        elif t.get("FirstURL") and t.get("Text"):
+            yield t
+
+
+def search(query: str, max_results: int = 5) -> list[dict] | None:
+    """Instant-answer results for `query` as [{title, url, snippet}]: the main abstract or
+    definition first, then official results and related topics. None if the API couldn't be
+    reached or returned junk (offline / blocked); [] if it has no answer. Never raises — goes
+    through fetch(), so the https-only + public-host guards apply."""
+    page = fetch(_SEARCH_URL + urllib.parse.urlencode(
+        {"q": query, "format": "json", "no_html": 1, "no_redirect": 1}))
+    if page is None:
+        return None
+    try:
+        data = json.loads(page)
+    except ValueError:
+        return None
+    heading = data.get("Heading") or query
+    hits = []
+    if data.get("AbstractText"):
+        hits.append({"title": heading, "url": data.get("AbstractURL", ""), "snippet": data["AbstractText"]})
+    elif data.get("Definition"):
+        hits.append({"title": heading, "url": data.get("DefinitionURL", ""), "snippet": data["Definition"]})
+    for t in [*_topics(data.get("Results")), *_topics(data.get("RelatedTopics"))]:
+        hits.append({"title": t["Text"][:120], "url": t["FirstURL"], "snippet": ""})
+    return hits[:max_results]

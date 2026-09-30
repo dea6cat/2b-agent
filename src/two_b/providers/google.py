@@ -17,6 +17,10 @@ from .base import ProviderResponse, cached_model_list, get_json, post_json, post
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 _NON_CHAT = ("tts", "image", "transcribe", "computer-use", "robotics")   # listed, but not coding chat models
 _G_LOW, _G_MED, _G_HIGH = 2048, 8192, 24576   # bounded thinking budgets; never -1 (dynamic)
+# Gemini 3 requires each replayed functionCall part to carry the thoughtSignature it was
+# returned with (400 otherwise). For calls Gemini didn't produce — another model's turn, or
+# a session saved before signatures were kept — Google documents this placeholder.
+_SKIP_SIGNATURE = "skip_thought_signature_validator"
 
 
 class GoogleProvider:
@@ -61,20 +65,29 @@ class GoogleProvider:
                 if m.text:
                     parts.append({"text": m.text})
                 for tc in m.tool_calls:
-                    parts.append({"functionCall": {"name": tc.name, "args": tc.arguments}})
+                    parts.append({"functionCall": {"name": tc.name, "args": tc.arguments},
+                                  "thoughtSignature": tc.signature or _SKIP_SIGNATURE})
                 contents.append({"role": "model", "parts": parts or [{"text": ""}]})
             else:
                 contents.append({"role": "user", "parts": [{"text": m.text or ""}]})
         return contents
 
     def supports_reasoning(self, model: str) -> bool:
-        return model.startswith("gemini-2.5")
+        return model.startswith(("gemini-2.5", "gemini-3"))
+
+    def _thinking_level(self, model: str, reasoning):
+        """thinkingLevel for Gemini 3, or None for other models. Gemini 3 can't disable
+        thinking and not every 3.x takes "minimal", so "off" is its lowest common level; None ->
+        capped medium, matching the 2.5 budget default."""
+        if not model.startswith("gemini-3"):
+            return None
+        return {"off": "low", "low": "low", "high": "high"}.get(reasoning, "medium")
 
     def _thinking_budget(self, model: str, reasoning):
         """thinkingBudget for thinkingConfig, or None to omit it (unsupported model). None ->
         capped MED (protect latency); never -1/dynamic. 2.5 Pro can't fully disable, so 'off'
         uses its minimum."""
-        if not self.supports_reasoning(model):
+        if not model.startswith("gemini-2.5"):
             return None
         if reasoning is None:
             return _G_MED
@@ -83,14 +96,15 @@ class GoogleProvider:
             return 128
         return tier
 
-    def _payload(self, conversation: Conversation, tools: tuple[ToolSpec, ...], thinking_budget=None, include_thoughts=False) -> dict:
+    def _payload(self, conversation: Conversation, tools: tuple[ToolSpec, ...], thinking_budget=None,
+                 include_thoughts=False, thinking_level=None) -> dict:
         p = {
             "systemInstruction": {"parts": [{"text": conversation.system_prompt}]},
             "contents": self._contents(conversation),
             "tools": to_gemini(tools),
         }
-        if thinking_budget is not None:
-            tc = {"thinkingBudget": thinking_budget}
+        if thinking_budget is not None or thinking_level is not None:
+            tc = {"thinkingLevel": thinking_level} if thinking_level is not None else {"thinkingBudget": thinking_budget}
             if include_thoughts:
                 tc["includeThoughts"] = True
             p["generationConfig"] = {"thinkingConfig": tc}
@@ -116,7 +130,8 @@ class GoogleProvider:
                     chunk_text.append(p["text"])
             elif "functionCall" in p:
                 fc = p["functionCall"]
-                calls.append(ToolCall.new(name=fc.get("name", ""), arguments=fc.get("args", {})))
+                calls.append(ToolCall.new(name=fc.get("name", ""), arguments=fc.get("args", {}),
+                                          signature=p.get("thoughtSignature")))
         joined = "".join(chunk_text)
         if joined:
             text_parts.append(joined)
@@ -135,12 +150,14 @@ class GoogleProvider:
         # Gemini SSE: :streamGenerateContent?alt=sse yields `data: {chunk}` lines, each a partial
         # GenerateContentResponse. Emit text as it arrives; collect functionCall parts along the way.
         budget = self._thinking_budget(model, reasoning)
+        level = self._thinking_level(model, reasoning)
         # Only request thought summaries when reasoning is actually on. `/think off` still floors
         # 2.5 Pro's budget at its minimum (it can't fully disable), but we must NOT surface thoughts
         # then — that would contradict the off gating and send includeThoughts alongside a 0 budget
         # on the compaction path (which streams with reasoning="off").
-        include_thoughts = reasoning != "off" and budget is not None
-        payload = self._payload(conversation, tools, thinking_budget=budget, include_thoughts=include_thoughts)
+        include_thoughts = reasoning != "off" and (budget is not None or level is not None)
+        payload = self._payload(conversation, tools, thinking_budget=budget, include_thoughts=include_thoughts,
+                                thinking_level=level)
         url = f"{BASE}/models/{model}:streamGenerateContent?alt=sse"
         text_parts: list = []
         thought_parts: list = []

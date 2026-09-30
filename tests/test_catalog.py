@@ -56,7 +56,7 @@ class CatalogAccessors(unittest.TestCase):
         self.assertIsNone(catalog.context_window("nope-nope"))
 
     def test_max_tokens_uses_default_when_unknown(self):
-        self.assertEqual(catalog.max_tokens("claude-opus-4-8", 4096), 8192)
+        self.assertEqual(catalog.max_tokens("claude-opus-4-8", 4096), 64000)
         self.assertEqual(catalog.max_tokens("nope-nope", 4096), 4096)
 
     def test_supports_images(self):

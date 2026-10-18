@@ -11,6 +11,8 @@ isn't a guarantee, and I wanted a coding agent that doesn't fall apart the momen
 > **macOS only.** 2B is built and tested for macOS — the installer is a shell script that leans on
 > Homebrew, and the clipboard integration uses `pbcopy`. It hasn't been tested elsewhere.
 
+> **Status (October 2026): dormant.** 2B is no longer maintained — no fixes, no new features — and the code stays up as reference material. For daily use, my successor project [**ClydeCLI**](https://github.com/dea6cat/ClydeCLI) carries the thesis forward. What dormancy means: [`DORMANT.md`](DORMANT.md). What a revival would do: [`ROADMAP.md`](ROADMAP.md).
+
 ---
 
 ## Why I built it
